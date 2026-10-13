@@ -17,15 +17,8 @@ My purpose is to add some features to the HDPack management for NES: As I use a 
 This builds don't require .NET to be installed.  
 I only work on Windows OS for now. If you want Mesen2 native builds for other OS, please visit the SourMesen repository.
 
-* [Windows 10 / 11](https://nightly.link/SourMesen/Mesen2/workflows/build/master/Mesen%20%28Windows%20-%20net8.0%20-%20AoT%29.zip)  
+* [See official MEsen repo : ](https://github.com/nesdev-org/MesenCE)  
 
-
-
-#### <ins>Notes</ins> ####
-
-Other builds are also available in the [Actions](https://github.com/SourMesen/Mesen2/actions) tab.
-
-**SteamOS**: See [SteamOS.md](SteamOS.md)
 
 ## Compiling
 
