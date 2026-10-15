@@ -181,8 +181,8 @@ struct SnesHdScreenInfo
 	SnesPpu* Ppu = nullptr;
 
 	// Historique du scroll pour chaque scanline (0-239) et chaque calque (0-3)
-	int16_t ScanlineHScroll[240][4] = { 0 };
-	int16_t ScanlineVScroll[240][4] = { 0 };
+	int16_t ScanlineHScroll[240][4] = { { 0 } };
+	int16_t ScanlineVScroll[240][4] = { { 0 } };
 };
 
 

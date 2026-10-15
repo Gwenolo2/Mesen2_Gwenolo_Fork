@@ -50,6 +50,14 @@
  
 #include <fstream>
 
+
+#if defined(_WIN32)
+#define EXPORT_SYMBOL __declspec(dllexport)
+#else
+#define EXPORT_SYMBOL __attribute__((visibility("default")))
+#endif
+
+
 // L'astuce du pointeur global pour l'Interop C#
 SnesConsole* g_GlobalSnesConsole = nullptr;
 
@@ -798,7 +806,7 @@ uint32_t SnesConsole::GetHdMode7Hash(bool forTileset)
 // HD PACK INTEROP (C# -> C++)
 // ====================================================================
 
-extern "C" __declspec(dllexport) uint64_t SnesGetHdTileHash(uint32_t tileIndex, uint8_t bpp)
+extern "C" EXPORT_SYMBOL uint64_t SnesGetHdTileHash(uint32_t tileIndex, uint8_t bpp)
 {
 	// On utilise notre pointeur global !
 	if(g_GlobalSnesConsole != nullptr) {
@@ -807,7 +815,7 @@ extern "C" __declspec(dllexport) uint64_t SnesGetHdTileHash(uint32_t tileIndex, 
 	return 0;
 }
 
-extern "C" __declspec(dllexport) uint32_t SnesGetHdMode7Hash(bool forTileset)
+extern "C" EXPORT_SYMBOL uint32_t SnesGetHdMode7Hash(bool forTileset)
 {
 	if(g_GlobalSnesConsole != nullptr) {
 		return g_GlobalSnesConsole->GetHdMode7Hash(forTileset);
