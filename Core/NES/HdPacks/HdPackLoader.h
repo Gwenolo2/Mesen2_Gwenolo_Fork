@@ -59,8 +59,8 @@ private:
 
 	/*--------------------------------- Added by Gwenolo  ----------------------------------*/
 	/* added by Gwenolo */
-	void HdPackLoader::ProcessPlayConditionalBgmTag(vector<string>& tokens, vector<HdPackCondition*>& conditions);
-	void HdPackLoader::ProcessPlayConditionalSfxTag(vector<string>& tokens, vector<HdPackCondition*>& conditions);
+	void ProcessPlayConditionalBgmTag(vector<string>& tokens, vector<HdPackCondition*>& conditions);
+	void ProcessPlayConditionalSfxTag(vector<string>& tokens, vector<HdPackCondition*>& conditions);
 	/*-------------------------------------------------------------------*/
 
 	void ProcessBgmTag(vector<string> &tokens);
