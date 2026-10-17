@@ -1896,6 +1896,13 @@ void SnesPpu::RenderSprites(const uint8_t priority[4])
 			(uint8_t)_state.Window[1].ActiveLayers[SnesPpu::SpriteLayerIndex];
 	}
 
+	// HD PACK : Conversion de la priorité des sprites en second plan (derrière d'autres sprites)
+	for(int x = 0; x < 256; x++) {
+		if(_hdSpriteBufferBehind[x].Tile != nullptr && _hdSpriteBufferBehind[x].SnesPriorityLevel <= 3) {
+			_hdSpriteBufferBehind[x].SnesPriorityLevel = priority[_hdSpriteBufferBehind[x].SnesPriorityLevel];
+		}
+	}
+
 	for(int x = _drawStartX; x <= _drawEndX; x++) {
 		if(_spritePriority[x] <= 3) {
 			uint8_t spritePrio = priority[_spritePriority[x]];
@@ -1970,10 +1977,11 @@ void SnesPpu::RenderSprites(const uint8_t priority[4])
 			// UnderlyingColor = couleur du BG en dessous (déjà dans _mainScreenBuffer[x])
 			_hdMainScreenBuffer[x].UnderlyingColor = _mainScreenBuffer[x];
 			_hdMainScreenBuffer[x].BaseColor = 0; // Pixel SNES transparent
-			// On utilise le SnesPriorityLevel du background en dessous comme z-référence
-			// Le filtre utilisera le z-index de la tuile pour le z-test dans tilesToExpand
-			_hdMainScreenBuffer[x].SnesPriorityLevel = (_mainScreenFlags[x] & 0x0F);
-			_hdMainScreenBuffer[x].IsHighPriority = false;
+			// On utilise la priorité réelle du sprite (et non celle du fond qui n'a pas encore été rendu)
+			uint8_t sprPrio = (_hdSpriteBuffer[x].SnesPriorityLevel <= 3) ? priority[_hdSpriteBuffer[x].SnesPriorityLevel] : priority[0];
+			_hdMainScreenBuffer[x].SnesPriorityLevel = sprPrio;
+			_hdMainScreenBuffer[x].IsHighPriority = _hdSpriteBuffer[x].IsHighPriority;
+			_hdMainScreenBuffer[x].OamIndex = _hdSpriteBuffer[x].OamIndex;
 		}
 	}
 }
@@ -2441,6 +2449,7 @@ void SnesPpu::RenderTilemapMode7()
 		}
 
 		hdData.BaseColor = paletteColor;
+		hdData.SnesPriorityLevel = priority;
 
 		// Vérification des priorités et des fenêtres
 		bool canDrawMain = drawMain && (_mainScreenFlags[x] & 0x0F) < priority && !ProcessMaskWindow<layerIndex>(mainWindowCount, x);
@@ -2448,7 +2457,13 @@ void SnesPpu::RenderTilemapMode7()
 
 		if(colorIndex > 0) {
 			// A. PIXEL SNES OPAQUE : On dessine tout normalement
-			if(canDrawMain) DrawMainPixel(x, paletteColor, priority | pixelFlags, hdData);
+			if(canDrawMain) {
+				DrawMainPixel(x, paletteColor, priority | pixelFlags, hdData);
+			} else if(hdData.IsMode7 || hdData.IsMode7Tile) {
+				// Le sprite est devant sur le Main Screen : on sauvegarde le Mode 7 dans le Sub Buffer
+				// pour que le filtre vidéo puisse restituer le décor HD sous le sprite !
+				_hdSubScreenBuffer[x] = hdData;
+			}
 			if(canDrawSub) DrawSubPixel(x, paletteColor, priority, hdData);
 		} else if(hdData.IsMode7 || hdData.IsMode7Tile) {
 			// B. PIXEL SNES TRANSPARENT (colorIndex == 0) MAIS ZONE HD !
@@ -2456,6 +2471,9 @@ void SnesPpu::RenderTilemapMode7()
 			// Mais on INJECTE de force nos mathématiques dans le buffer HD !
 			if(canDrawMain) {
 				_hdMainScreenBuffer[x] = hdData;
+			} else {
+				// Si le sprite est devant, on sauvegarde dans le Sub Buffer
+				_hdSubScreenBuffer[x] = hdData;
 			}
 		}
 

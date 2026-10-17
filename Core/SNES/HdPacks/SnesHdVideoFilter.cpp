@@ -183,6 +183,17 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				uint32_t imgScale = m7Img->Scale;
 				uint32_t mapDim = 1024 * imgScale;
 
+
+			/*
+			// version buguée avec load async
+			// Filet de sécurité : exécuté uniquement si LoadAsync a été annulé ou ignoré
+				if(m7Img->Bitmap->Mipmaps.empty()) {
+						bool dummyCancel = false;
+						m7Img->Init(dummyCancel);
+				}
+				*/
+				
+				//--------- backup -----------
 				if(m7Img->Bitmap->Mipmaps.empty()) {
 					m7Img->Bitmap->Mipmaps.push_back(m7Img->Bitmap->PixelData);
 					uint32_t currentDim = mapDim;
@@ -215,6 +226,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						m7Img->Bitmap->Mipmaps.push_back(nextMip);
 					}
 				}
+				//--------- end backup -----------
+				
+
 
 				bool applyColorMath = !m7Img->IgnoreColorMath;
 				uint8_t pixelZ = 20 + (refM7Data.SnesPriorityLevel * 4);
@@ -428,8 +442,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			}
 
 			// --- STEP 1.5: INDIVIDUAL MODE 7 TILES (<m7tiles>) WITH ANISOTROPIC FILTERING ---
-			if(hdData.IsMode7Tile) {
-				SnesHdMode7Image* m7Img = SnesHdPackLoader::ActivePack->GetMode7Image(hdData.M7TileHash);
+			auto renderMode7Tile = [&](const SnesHdPixelData& m7Data, uint8_t targetZ, bool useColorMath) {
+				SnesHdMode7Image* m7Img = SnesHdPackLoader::ActivePack->GetMode7Image(m7Data.M7TileHash);
 
 				if(m7Img && m7Img->Bitmap && !m7Img->Bitmap->PixelData.empty()) {
 					const uint32_t* rawPixelData = m7Img->Bitmap->PixelData.data();
@@ -445,23 +459,26 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					uint32_t mapDim = 1024 * imgScale;
 					uint32_t bitMask = mapDim - 1;
 
-					uint32_t baseSdColor = _calculatedPalette[hdData.BaseColor];
-					int diffR = ((sdColor >> 16) & 0xFF) - ((baseSdColor >> 16) & 0xFF);
-					int diffG = ((sdColor >> 8) & 0xFF) - ((baseSdColor >> 8) & 0xFF);
-					int diffB = (sdColor & 0xFF) - (baseSdColor & 0xFF);
+					uint32_t baseSdColor = _calculatedPalette[m7Data.BaseColor];
+					int diffR = 0, diffG = 0, diffB = 0;
+					if(useColorMath) {
+						diffR = ((sdColor >> 16) & 0xFF) - ((baseSdColor >> 16) & 0xFF);
+						diffG = ((sdColor >> 8) & 0xFF) - ((baseSdColor >> 8) & 0xFF);
+						diffB = (sdColor & 0xFF) - (baseSdColor & 0xFF);
+					}
 
-					int32_t baseHD_X = hdData.M7XValue * imgScale;
-					int32_t baseHD_Y = hdData.M7YValue * imgScale;
+					int32_t baseHD_X = m7Data.M7XValue * imgScale;
+					int32_t baseHD_Y = m7Data.M7YValue * imgScale;
 
-					int32_t snesM7X = (hdData.M7XValue >> 8) & 1023;
-					int32_t snesM7Y = (hdData.M7YValue >> 8) & 1023;
+					int32_t snesM7X = (m7Data.M7XValue >> 8) & 1023;
+					int32_t snesM7Y = (m7Data.M7YValue >> 8) & 1023;
 					int32_t tileMinX = (snesM7X & ~7) * imgScale;
 					int32_t tileMinY = (snesM7Y & ~7) * imgScale;
 
-					int32_t stepX = (hdData.M7A * (int32_t)imgScale) / (int32_t)scale;
-					int32_t stepY = (hdData.M7C * (int32_t)imgScale) / (int32_t)scale;
-					int32_t stepYTermX = (hdData.M7B * (int32_t)imgScale) / (int32_t)scale;
-					int32_t stepYTermY = (hdData.M7D * (int32_t)imgScale) / (int32_t)scale;
+					int32_t stepX = (m7Data.M7A * (int32_t)imgScale) / (int32_t)scale;
+					int32_t stepY = (m7Data.M7C * (int32_t)imgScale) / (int32_t)scale;
+					int32_t stepYTermX = (m7Data.M7B * (int32_t)imgScale) / (int32_t)scale;
+					int32_t stepYTermY = (m7Data.M7D * (int32_t)imgScale) / (int32_t)scale;
 
 					double lenX = std::sqrt((double)stepX * stepX + (double)stepY * stepY) / 256.0;
 					double lenY = std::sqrt((double)stepYTermX * stepYTermX + (double)stepYTermY * stepYTermY) / 256.0;
@@ -573,11 +590,22 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								uint32_t finalColor = (hdColorFromPng & 0xFF000000) | (outR << 16) | (outG << 8) | outB;
 
 								out[outBaseIdx + sx] = finalColor;
-								_zBuffer[outBaseIdx + sx] = pixelZ;
+								_zBuffer[outBaseIdx + sx] = targetZ;
 							}
 						}
 					}
 				}
+			};
+
+			// Si une tuile Mode 7 individuelle (<m7tiles>) se trouve sous le sprite (sauvegardée dans hdDataSub),
+			// on la dessine d'abord dans le buffer de sortie afin que le fond ne reste pas noir/transparent sous le sprite.
+			if(hdDataSub.IsMode7Tile) {
+				uint8_t m7PixelZ = 20 + (hdDataSub.SnesPriorityLevel * 4);
+				renderMode7Tile(hdDataSub, m7PixelZ, false);
+			}
+
+			if(hdData.IsMode7Tile) {
+				renderMode7Tile(hdData, pixelZ, true);
 				continue;
 			}
 
@@ -643,13 +671,14 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				hideNative = true;
 			}
 
+
 			if(hideNative) {
 				continue;
-			}
+			}  
 
 			ApplyFilterSpritesStandard(outX, outY, scale, outWidth, sdColor, hdData, pixelZ, out);
 		}
-	}
+	} 
 
 	// ====================================================================
 	// ÉTAPE 2 : INJECTION DES ADDITIONS HD

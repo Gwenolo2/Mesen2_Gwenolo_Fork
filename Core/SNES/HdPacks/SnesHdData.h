@@ -494,8 +494,55 @@ struct SnesHdMode7Image
 
 	std::vector<SnesHdPackCondition*> Conditions;
 	
+	// Pré-génération des Mipmaps en asynchrone
+
+	void Init(bool& cancelToken)
+	{
+		if(!Bitmap) return;
+		Bitmap->Init();
+		if(cancelToken || Bitmap->PixelData.empty()) return;
+
+		// Si les mipmaps sont déjà générés dans le Bitmap, on ne recalcule rien
+		if(!Bitmap->Mipmaps.empty()) return;
+
+		uint32_t mapDim = 1024 * Scale;
+		Bitmap->Mipmaps.push_back(Bitmap->PixelData);
+
+		uint32_t currentDim = mapDim;
+		for(int level = 1; level <= 3; level++) {
+			if(cancelToken) return;
+
+			uint32_t prevDim = currentDim;
+			currentDim /= 2;
+			std::vector<uint32_t> nextMip(currentDim * currentDim, 0);
+			const std::vector<uint32_t>& prevMip = Bitmap->Mipmaps[level - 1];
+
+			for(uint32_t my = 0; my < currentDim; my++) {
+				for(uint32_t mx = 0; mx < currentDim; mx++) {
+					uint32_t p00 = prevMip[(my * 2) * prevDim + (mx * 2)];
+					uint32_t p10 = prevMip[(my * 2) * prevDim + (mx * 2 + 1)];
+					uint32_t p01 = prevMip[(my * 2 + 1) * prevDim + (mx * 2)];
+					uint32_t p11 = prevMip[(my * 2 + 1) * prevDim + (mx * 2 + 1)];
+
+					uint32_t a1 = p00 >> 24, a2 = p10 >> 24, a3 = p01 >> 24, a4 = p11 >> 24;
+					uint32_t sumA = a1 + a2 + a3 + a4;
+
+					if(sumA == 0) {
+						nextMip[my * currentDim + mx] = 0x00000000;
+					} else {
+						uint32_t r = (((p00 >> 16) & 0xFF) * a1 + ((p10 >> 16) & 0xFF) * a2 + ((p01 >> 16) & 0xFF) * a3 + ((p11 >> 16) & 0xFF) * a4) / sumA;
+						uint32_t g = (((p00 >> 8) & 0xFF) * a1 + ((p10 >> 8) & 0xFF) * a2 + ((p01 >> 8) & 0xFF) * a3 + ((p11 >> 8) & 0xFF) * a4) / sumA;
+						uint32_t b = ((p00 & 0xFF) * a1 + (p10 & 0xFF) * a2 + (p01 & 0xFF) * a3 + (p11 & 0xFF) * a4) / sumA;
+						nextMip[my * currentDim + mx] = ((sumA / 4) << 24) | (r << 16) | (g << 8) | b;
+					}
+				}
+			}
+			Bitmap->Mipmaps.push_back(std::move(nextMip));
+		}
+	}
 	
-	//bool MatchesCondition();
+
+
 
 	// Fonction qui vérifie si toutes les conditions de cette image sont remplies
 	bool MatchesCondition()
@@ -509,9 +556,6 @@ struct SnesHdMode7Image
 		}
 		return true; // Si aucune condition n'a échoué, on affiche l'image !
 	}
-
-
-	//SnesHdPixelData GetPixel(int x, int y);
 
 
 	SnesHdPixelData GetPixel(int x, int y)
@@ -534,62 +578,8 @@ struct SnesHdMode7Image
 	}
 
 
-
-
 };
-/*
-struct SnesHdMode7Image
-{
-	SnesHdPackBitmapInfo* Bitmap = nullptr;
-	uint32_t Scale = 1;
-	
-	bool IgnoreColorMath = false;
-	std::vector<std::vector<uint32_t>> Mipmaps;
 
-	//coordonates in pixel in PNG file for the tile
-	int X = 0;
-	int Y = 0;
-
-
-	std::vector<SnesHdPackCondition*> Conditions;
-
-	// Fonction qui vérifie si toutes les conditions de cette image sont remplies
-	bool MatchesCondition()
-	{
-		for(auto cond : Conditions) {
-			// On passe (0, 0, nullptr) car les conditions Mode 7 (comme l'heure, 
-			// la mémoire ou la frame) ne dépendent généralement pas d'un pixel précis.
-			if(!cond->CheckCondition(0, 0, nullptr)) {
-				return false;
-			}
-		}
-		return true; // Si aucune condition n'a échoué, on affiche l'image !
-	}
-
-
-
-	//2026-09-01
-	SnesHdPixelData GetPixel(int x, int y)
-	{
-		if(!Bitmap || Bitmap->PixelData.empty()) return {};
-
-		// x et y sont les coordonnées de la sous-tuile SNES (0-7)
-		// On les multiplie par l'échelle pour taper dans l'image HD,
-		// puis on y ajoute X et Y de l'atlas (qui sont déjà à l'échelle HD)
-		uint32_t sx = ((uint32_t)x * Scale) + X;
-		uint32_t sy = ((uint32_t)y * Scale) + Y;
-
-		if(sx < Bitmap->Width && sy < Bitmap->Height) {
-			SnesHdPixelData data;
-			data.Color = Bitmap->PixelData[sy * Bitmap->Width + sx];
-			data.HasData = true;
-			return data;
-		}
-		return {};
-	}
-
-};
-*/
 //----------------------------------------------------------
 struct SnesHdMsuTrack
 {
@@ -717,6 +707,9 @@ public:
 	// MPEG1 videos
 	std::vector<std::unique_ptr<SnesHdVideoInfo>> Videos;
 
+
+	/*------------------------------------------------------------------------------------*/
+
 	void LoadAsync()
 	{
 		for(auto& bitmap : ImageFileData) {
@@ -773,7 +766,80 @@ public:
 	}
 
 
+	// version buguée pour les M4img
+	/*
+	void LoadAsync()
+	{
+		// 1. Décompression des PNG bruts (Backgrounds, Spritesheets, Atlas Mode 7)
+		for(auto& bitmap : ImageFileData) {
+			bitmap->Init();
+			if(_cancelLoad) return;
+		}
 
+		// 2. Découpage et initialisation des tuiles HD classiques
+		for(auto& entry : TileByKey) {
+			for(auto* tile : entry.second) {
+				tile->Init(Scale);
+				if(_cancelLoad) return;
+			}
+		}
+
+		// 3. Préchargement et génération des Mipmaps Mode 7 (<m7img> et <m7tiles>)
+		size_t m7LoadedCount = 0;
+		for(auto& pair : Mode7Maps) {
+			for(auto& m7Image : pair.second) {
+				if(_cancelLoad) return;
+				if(m7Image && m7Image->Bitmap) {
+					m7Image->Init(_cancelLoad);
+					m7LoadedCount++;
+				}
+			}
+		}
+
+		if(m7LoadedCount > 0) {
+			MessageManager::Log("[HD-MODE7] Prechargement termine : " +
+				std::to_string(m7LoadedCount) + " texture(s) Mode 7 initialisee(s).");
+		}
+
+		// 4. Préchargement audio OGG (<msu2ogg>)
+		size_t loadedTracksCount = 0;
+		size_t totalBytesLoaded = 0;
+
+		for(auto& pair : MsuTracks) {
+			for(auto& track : pair.second) {
+				if(_cancelLoad) return;
+				if(track.Filename.empty()) continue;
+
+				auto it = OggCache.find(track.Filename);
+				if(it != OggCache.end()) {
+					track.AudioData = it->second;
+					continue;
+				}
+
+				std::string fullPath = FolderUtilities::CombinePath(PackFolderPath, track.Filename);
+				auto fileData = std::make_shared<std::vector<uint8_t>>();
+				VirtualFile vFile(fullPath);
+
+				if(vFile.ReadFile(*fileData) && !fileData->empty()) {
+					totalBytesLoaded += fileData->size();
+					loadedTracksCount++;
+					OggCache[track.Filename] = fileData;
+					track.AudioData = fileData;
+				} else {
+					MessageManager::Log("[MSU1-HD] Erreur de prechargement audio : " + track.Filename);
+				}
+			}
+		}
+
+		if(loadedTracksCount > 0) {
+			MessageManager::Log("[MSU1-HD] Prechargement audio termine : " +
+				std::to_string(loadedTracksCount) + " fichier(s) OGG en RAM (" +
+				std::to_string(totalBytesLoaded / (1024 * 1024)) + " Mo)");
+		}
+
+		MessageManager::Log("[HD TRACE SYNCHRON] SUCCESS : Hash of tile success !");
+	}
+	*/
 	// --- MODE 7 FUNCTIONS  ---
 
 	 // 1. Chercher une Map HD complète
