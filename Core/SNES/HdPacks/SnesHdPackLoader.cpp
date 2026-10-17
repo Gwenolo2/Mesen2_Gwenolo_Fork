@@ -20,8 +20,17 @@
 #include "Shared/pl_mpeg.h" // Modifie le chemin si tu l'as mis dans un autre dossier
 // -----------------------------
 
+
+
 namespace
 {
+
+	std::string NormalizePath(std::string path)
+	{
+		std::replace(path.begin(), path.end(), '\\', '/');
+		return StringUtilities::Trim(path);
+	}
+
 	struct SnesHdLineInfo
 	{
 		std::string Content;
@@ -276,6 +285,9 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				return; // On sort de la lambda
 			}
 
+
+			pngPath = NormalizePath(pngPath);
+
 			// 3. RECUPERATION DU BITMAP ET INSCRIPTION
 			if(loadedBitmaps.find(pngPath) == loadedBitmaps.end()) {
 				auto bitmap = std::make_unique<SnesHdPackBitmapInfo>();
@@ -456,7 +468,8 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 		/// <IMG> TAGS
 		if(lineContent.substr(0, 5) == "<img>") {
-			imageCatalog.push_back(lineContent.substr(5));
+			//imageCatalog.push_back(lineContent.substr(5));
+			imageCatalog.push_back(NormalizePath(lineContent.substr(5)));
 		} else if(lineContent.substr(0, 7) == "<scale>") {
 			try { outData->Scale = std::stoi(lineContent.substr(7)); } catch(...) {}
 		}
@@ -904,7 +917,8 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			if(tokens.size() >= 1) {
 				auto bg = std::make_unique<SnesHdBackgroundInfo>();
 
-				std::string filename = StringUtilities::Trim(tokens[0]);
+				//std::string filename = StringUtilities::Trim(tokens[0]);
+				std::string filename = NormalizePath(tokens[0]);
 				std::string fullPath = FolderUtilities::CombinePath(rootFolder, filename);
 
 				// === DÉTECTION DOSSIER OU FICHIER (ANIMATION) ===
@@ -1039,7 +1053,9 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 		std::vector<std::string> tokens = StringUtilities::Split(data, ',');
 
 		if(tokens.size() >= 3) {
-			std::string filename = StringUtilities::Trim(tokens[0]);
+			// Remplacement de : std::string filename = StringUtilities::Trim(tokens[0]);
+			std::string filename = NormalizePath(tokens[0]);
+
 			uint32_t mapHash = (uint32_t)HexUtilities::FromHex(tokens[1]);
 			uint32_t m7Scale = std::stoi(tokens[2]);
 
@@ -1099,7 +1115,9 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			std::vector<std::string> tokens = StringUtilities::Split(data, ',');
 
 			if(tokens.size() >= 3) {
-				std::string filename = StringUtilities::Trim(tokens[0]);
+				// Remplacement de : std::string filename = StringUtilities::Trim(tokens[0]);
+				std::string filename = NormalizePath(tokens[0]);
+
 				// C'est de l'Hexa, on utilise FromHex !
 				uint32_t tileHash = (uint32_t)HexUtilities::FromHex(tokens[1]);
 				uint32_t m7Scale = std::stoi(tokens[2]);
@@ -1160,8 +1178,9 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				outData->Mode7Maps[tileHash].push_back(std::move(m7Map));
 
 				// --- LE MOUCHARD DU PARSEUR ---
-				MessageManager::Log("[MOUCHARD PARSEUR TILEM7] Tuile chargee:  " + filename + " | Hash: " + HexUtilities::ToHex(tileHash) +
+				/*MessageManager::Log("[MOUCHARD TILEM7 Parser] M7 Tile Loaded:  " + filename + " | Hash: " + HexUtilities::ToHex(tileHash) +
 									" | X: " + std::to_string(srcX) + " | Y: " + std::to_string(srcY));
+				*/
 			}
 		}
 
@@ -1300,7 +1319,9 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 						int trackId = std::stoi(trackIdStr);
 
 						SnesHdMsuTrack track;
-						track.Filename = StringUtilities::Trim(msuTokens[1]);
+						// Remplacement de : track.Filename = StringUtilities::Trim(msuTokens[1]);
+						track.Filename = NormalizePath(msuTokens[1]);
+
 						track.Conditions = trackConditions; // On accroche les conditions à la piste !
 
 						if(msuTokens.size() >= 3) {
@@ -1328,7 +1349,8 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				auto video = std::make_unique<SnesHdVideoInfo>();
 
 				// 1. Nom du fichier
-				video->Filename = StringUtilities::Trim(tokens[0]);
+				// Remplacement de : video->Filename = StringUtilities::Trim(tokens[0]);
+				video->Filename = NormalizePath(tokens[0]);
 
 				// 2. Mode
 				std::string modeStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[1]));
@@ -1510,7 +1532,8 @@ bool SnesHdPackLoader::ProcessImgTag(const std::string& content)
 	_data->ImageFileData.push_back(std::make_unique<SnesHdPackBitmapInfo>());
 	SnesHdPackBitmapInfo* bitmapInfo = _data->ImageFileData.back().get();
 
-	bitmapInfo->PngName = content;
+	//bitmapInfo->PngName = content;
+	bitmapInfo->PngName = NormalizePath(content);
 
 	// Sur SNES, on utilise FolderUtilities et VirtualFile pour lire les octets
 	// (Adapte _hdPackFolder si ta variable s'appelle rootFolder)
