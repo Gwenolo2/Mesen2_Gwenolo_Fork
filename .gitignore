@@ -3,9 +3,20 @@
 
 # User-specific files
 *.suo
+*.bat
 *.user
 *.sln.docstates
 .vs/*
+Core/*.zip
+Core/*.7z
+Core/SNES/*.zip
+Core/SNES/*.7z
+Core/SNES/HdPacks/*.zip
+Core/SNES/HdPacks/*.7z
+Core/SNES/HdPacks/*.md
+Core/SNES/*.md
+git_repo_structure.txt
+_push_to_Git.bat.txt
 
 # Build results
 

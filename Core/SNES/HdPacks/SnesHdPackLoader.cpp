@@ -1199,8 +1199,20 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				outData->Overscan.Right = std::stoi(StringUtilities::Trim(tokens[1]));
 				outData->Overscan.Bottom = std::stoi(StringUtilities::Trim(tokens[2]));
 				outData->Overscan.Left = std::stoi(StringUtilities::Trim(tokens[3]));
+
+				// 5th optional parameter: Stretch (true is default value)
+				outData->OverscanStretch = true;
+				if(tokens.size() >= 5) {
+					std::string opt = StringUtilities::ToLower(StringUtilities::Trim(tokens[4]));
+					if(opt == "false" || opt == "0" || opt == "nostretch" || opt == "no") {
+						outData->OverscanStretch = false;
+					}
+				}
+
 			}
-		}
+
+		}// End Parsing Overscan Tag
+
 
 		/// PARSING <setLayersOrder> TAG --------------------------------
 		else if(lineContent.substr(0, 16) == "<setLayersOrder>") {
@@ -1390,6 +1402,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 	return true;
 }
+
 
 //-----------------------------------------------------------------------------------------------------
 

@@ -22,20 +22,28 @@ SnesHdVideoFilter::SnesHdVideoFilter(Emulator* emu) : SnesDefaultVideoFilter(emu
 FrameInfo SnesHdVideoFilter::GetFrameInfo()
 {
 	static bool frameLog = false;
-	if(!frameLog) {
+	/*if(!frameLog) {
 		MessageManager::Log("[HD TRACE 2.5] GetFrameInfo a pris le relais pour l'affichage !");
 		frameLog = true;
 	}
+	*/
 
 	_sdFrameInfo = SnesDefaultVideoFilter::GetFrameInfo();
 	FrameInfo info = _sdFrameInfo;
 
-	// On agrandit la fenêtre en fonction de l'échelle du pack
 	if(SnesHdPackLoader::ActivePack) {
 		uint32_t scale = SnesHdPackLoader::ActivePack->Scale;
-		info.Width *= scale;
-		info.Height *= scale;
+		bool stretch = SnesHdPackLoader::ActivePack->OverscanStretch;
 
+		if(SnesHdPackLoader::ActivePack->HasOverscanConfig && !stretch) {
+			// Mode No-Stretch : we keep native geometry 
+			_sdFrameInfo = _baseFrameInfo;
+			info.Width = _baseFrameInfo.Width * scale;
+			info.Height = _baseFrameInfo.Height * scale;
+		} else {
+			info.Width *= scale;
+			info.Height *= scale;
+		}
 	}
 	return info;
 }
@@ -83,26 +91,37 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	uint32_t scale = SnesHdPackLoader::ActivePack->Scale;
 	uint32_t* out = GetOutputBuffer();
 
-	uint32_t sdWidth = _sdFrameInfo.Width;
-	uint32_t sdHeight = _sdFrameInfo.Height;
 	OverscanDimensions overscan = GetOverscan();
+	bool stretch = SnesHdPackLoader::ActivePack->OverscanStretch;
 
-	uint32_t xOffset = overscan.Left;
-	uint32_t yOffset = overscan.Top * _baseFrameInfo.Width;
+	// Dimensions de la zone active utile (tronquée par l'overscan)
+	uint32_t cropWidth = _baseFrameInfo.Width - overscan.Left - overscan.Right;
+	uint32_t cropHeight = _baseFrameInfo.Height - overscan.Top - overscan.Bottom;
+
+	// Dimensions du tampon de sortie selon le mode Stretch
+	uint32_t outWidth = stretch ? (cropWidth * scale) : (_baseFrameInfo.Width * scale);
+	uint32_t hdHeight = stretch ? (cropHeight * scale) : (_baseFrameInfo.Height * scale);
+
+	// Décalages d'écriture (destination) et de lecture (source)
+	uint32_t dstX = stretch ? 0 : overscan.Left;
+	uint32_t dstY = stretch ? 0 : overscan.Top;
+	uint32_t srcX = overscan.Left;
+	uint32_t srcY = overscan.Top;
+
+	// Décalage pour l'alignement des sprites et additions
+	int sprOffsetX = stretch ? -(int)overscan.Left : 0;
+	int sprOffsetY = stretch ? -(int)overscan.Top : 0;
 
 	SnesConsole* console = (SnesConsole*)_emu->GetConsole().get();
 	SnesHdPixelData* hdBuffer = console->GetPpu()->GetHdScreenBuffer();
 	SnesHdPixelData* hdSubBuffer = console->GetPpu()->GetHdSubScreenOutputBuffer();
 	SnesHdPixelData* hdBehindBuffer = console->GetPpu()->GetHdBehindScreenBuffer();
 
-	uint32_t outWidth = sdWidth * scale;
-	uint32_t hdHeight = sdHeight * scale;
-
 	if(_zBuffer.size() != outWidth * hdHeight) {
 		_zBuffer.resize(outWidth * hdHeight);
 	}
 	memset(_zBuffer.data(), 0, _zBuffer.size()); // Remise à zéro du Z-Buffer
-	memset(out, 0, outWidth * hdHeight * sizeof(uint32_t)); // CORRECTION TRAÎNÉE : Remise à zéro du tampon de couleur HD
+	memset(out, 0, outWidth * hdHeight * sizeof(uint32_t)); // Remise à zéro du tampon de couleur HD
 
 	// ====================================================================
 	// STEP 1: PRE-PASS MODE 7 (OPTIMIZED BSNES-HD PERSPECTIVE & FAST PATH)
@@ -115,18 +134,20 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		int diffB;
 	};
 
-	// Cache fixe sur la pile pour éviter les allocations dynamiques
 	SdColorCache sdColorRow[256];
 
-	for(uint32_t y = 0; y < sdHeight; y++) {
+	for(uint32_t y = 0; y < cropHeight; y++) {
+		uint32_t snesY = y + srcY;
+		uint32_t outY = y + dstY;
+
 		bool hasMode7OnLine = false;
 		SnesHdPixelData refM7Data;
 		SnesHdPixelData nextRefM7Data;
 		uint32_t refX = 0;
 
-		// 1. Recherche du premier pixel Mode 7 sur la ligne actuelle (y)
-		for(uint32_t tx = 0; tx < sdWidth; tx++) {
-			uint32_t offset = y * _baseFrameInfo.Width + tx + yOffset + xOffset;
+		// 1. Recherche du premier pixel Mode 7 sur la ligne actuelle
+		for(uint32_t tx = 0; tx < cropWidth; tx++) {
+			uint32_t offset = snesY * _baseFrameInfo.Width + tx + srcX;
 			if(hdBuffer[offset].IsMode7) {
 				refM7Data = hdBuffer[offset];
 				refX = tx;
@@ -136,12 +157,12 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 
 		if(hasMode7OnLine) {
-			// 2. Recherche du premier pixel Mode 7 sur la ligne suivante (y+1)
+			// 2. Recherche du premier pixel Mode 7 sur la ligne suivante
 			bool hasNextLine = false;
 			uint32_t nextRefX = 0;
-			if(y + 1 < sdHeight) {
-				for(uint32_t tx = 0; tx < sdWidth; tx++) {
-					uint32_t offset = (y + 1) * _baseFrameInfo.Width + tx + yOffset + xOffset;
+			if(snesY + 1 < _baseFrameInfo.Height) {
+				for(uint32_t tx = 0; tx < cropWidth; tx++) {
+					uint32_t offset = (snesY + 1) * _baseFrameInfo.Width + tx + srcX;
 					if(hdBuffer[offset].IsMode7) {
 						nextRefM7Data = hdBuffer[offset];
 						nextRefX = tx;
@@ -162,7 +183,6 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				uint32_t imgScale = m7Img->Scale;
 				uint32_t mapDim = 1024 * imgScale;
 
-				// Génération des Mipmaps partagées au niveau du Bitmap (exécutée 1 fois par fichier PNG)
 				if(m7Img->Bitmap->Mipmaps.empty()) {
 					m7Img->Bitmap->Mipmaps.push_back(m7Img->Bitmap->PixelData);
 					uint32_t currentDim = mapDim;
@@ -200,16 +220,14 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				uint8_t pixelZ = 20 + (refM7Data.SnesPriorityLevel * 4);
 				if(refM7Data.IsHighPriority) pixelZ += 2;
 
-				// =================================================================
-				// OPTIMISATION 1 : PRE-CACHE DU COLOR MATH (256 ITERATIONS/LINE)
-				// =================================================================
 				uint32_t baseSdColor = _calculatedPalette[refM7Data.BaseColor];
 				int baseR = (baseSdColor >> 16) & 0xFF;
 				int baseG = (baseSdColor >> 8) & 0xFF;
 				int baseB = baseSdColor & 0xFF;
 
-				for(uint32_t x = 0; x < sdWidth; x++) {
-					uint32_t currentOffset = y * _baseFrameInfo.Width + x + yOffset + xOffset;
+				for(uint32_t x = 0; x < cropWidth; x++) {
+					uint32_t snesX = x + srcX;
+					uint32_t currentOffset = snesY * _baseFrameInfo.Width + snesX;
 					uint16_t currentSnesPixel = ppuOutputBuffer[currentOffset];
 					uint32_t sdColor = SnesHdPackLoader::ActivePack->IsColorMathDisabled
 						? baseSdColor
@@ -227,20 +245,15 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					}
 				}
 
-				// Projection de l'origine à X = 0 (style bsnes)
 				int32_t startX_y = refM7Data.M7XValue - (refM7Data.M7A * (int32_t)refX);
 				int32_t startY_y = refM7Data.M7YValue - (refM7Data.M7C * (int32_t)refX);
 
 				int32_t startX_next = nextRefM7Data.M7XValue - (nextRefM7Data.M7A * (int32_t)nextRefX);
 				int32_t startY_next = nextRefM7Data.M7YValue - (nextRefM7Data.M7C * (int32_t)nextRefX);
 
-				// =================================================================
-				// BOUCLE SUR LES SOUS-LIGNES HD (sy)
-				// =================================================================
 				for(uint32_t sy = 0; sy < outScale; sy++) {
 					double t = (double)sy / (double)outScale;
 
-					// OPTIMISATION 2 : INTERPOLATION RÉCIPROQUE PERSPECTIVE (BSNES-HD)
 					double curM7A_d = refM7Data.M7A;
 					if(refM7Data.M7A != nextRefM7Data.M7A && refM7Data.M7A > 0 && nextRefM7Data.M7A > 0) {
 						double invA1 = 1.0 / (double)refM7Data.M7A;
@@ -265,7 +278,6 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					int32_t stepX = (int32_t)std::round((curM7A_d * (double)imgScale) / (double)outScale);
 					int32_t stepY = (int32_t)std::round((curM7C_d * (double)imgScale) / (double)outScale);
 
-					// Calcul du LOD basé sur le vecteur Mipmaps du Bitmap partagé
 					int64_t distSq = (((int64_t)stepX * stepX) + ((int64_t)stepY * stepY)) >> 16;
 					int lod = 0;
 					if(distSq > 16) lod = 3;
@@ -277,13 +289,11 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					uint32_t curMask = curDim - 1;
 					const uint32_t* curPixels = m7Img->Bitmap->Mipmaps[lod].data();
 
-					uint32_t hdRowIdx = (y * outScale + sy) * outWidth;
+					uint32_t hdRowIdx = (outY * outScale + sy) * outWidth;
 
-					// OPTIMISATION 3 : INCRÉMENTATION LINÉAIRE PAR DÉCALAGE
 					int32_t exactX = lineStartX * (int32_t)imgScale;
 					int32_t exactY = lineStartY * (int32_t)imgScale;
 
-					// Lambda d'échantillonnage bilinéaire
 					auto sampleBilinearFast = [&](int32_t sX, int32_t sY) -> uint32_t {
 						int32_t lX = sX >> lod;
 						int32_t lY = sY >> lod;
@@ -324,12 +334,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					int32_t halfStepX = stepX >> 1;
 					int32_t halfStepY = stepY >> 1;
 
-					// =============================================================
-					// BOUCLE INTERNE CRITIQUE : PARCOURS DES PIXELS HD DE LA LIGNE
-					// =============================================================
-					for(uint32_t x = 0; x < sdWidth; x++) {
+					for(uint32_t x = 0; x < cropWidth; x++) {
 						const SdColorCache& cache = sdColorRow[x];
-						uint32_t outIdx = hdRowIdx + (x * outScale);
+						uint32_t outX = x + dstX;
+						uint32_t outIdx = hdRowIdx + (outX * outScale);
 
 						for(uint32_t sx = 0; sx < outScale; sx++) {
 							uint32_t hdColorFromPng = 0;
@@ -349,7 +357,6 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 							} else if(m7Img->FilterMode == Mode7FilterMode::Bilinear) {
 								hdColorFromPng = sampleBilinearFast(exactX, exactY);
 							} else {
-								// Mode Nearest
 								int32_t lodX = exactX >> lod;
 								int32_t lodY = exactY >> lod;
 								int32_t px = lodX >> 8;
@@ -383,20 +390,14 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					}
 				}
 			}
-
-
-
-
-
-	//
 		}
-	
-	
 
 		// --- BOUCLE X POUR LES SPRITES ET TUILES DE BASE ---
-		for(uint32_t x = 0; x < sdWidth; x++) {
+		for(uint32_t x = 0; x < cropWidth; x++) {
+			uint32_t snesX = x + srcX;
+			uint32_t outX = x + dstX;
 
-			uint32_t bufferOffset = y * _baseFrameInfo.Width + x + yOffset + xOffset;
+			uint32_t bufferOffset = snesY * _baseFrameInfo.Width + snesX;
 			uint16_t snesPixel = ppuOutputBuffer[bufferOffset];
 
 			SnesHdPixelData hdDataMain = hdBuffer[bufferOffset];
@@ -419,7 +420,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 			if(!hdData.IsSprite && hdData.SourceLayer >= 0 && hdData.SourceLayer < 4) {
 				for(auto& rule : SnesHdPackLoader::ActivePack->LayerOrders) {
-					if(!rule.MatchesCondition(x, y, &hdData)) continue;
+					if(!rule.MatchesCondition(snesX, snesY, &hdData)) continue;
 					pixelZ = rule.ZIndexBg[hdData.SourceLayer];
 					if(hdData.IsHighPriority) pixelZ += 2;
 					break;
@@ -438,8 +439,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 					uint32_t pngWidth = m7Img->Bitmap->Width;
 					uint32_t pngHeight = m7Img->Bitmap->Height;
-					int32_t srcX = m7Img->X;
-					int32_t srcY = m7Img->Y;
+					int32_t atlasSrcX = m7Img->X;
+					int32_t atlasSrcY = m7Img->Y;
 
 					uint32_t mapDim = 1024 * imgScale;
 					uint32_t bitMask = mapDim - 1;
@@ -452,32 +453,27 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					int32_t baseHD_X = hdData.M7XValue * imgScale;
 					int32_t baseHD_Y = hdData.M7YValue * imgScale;
 
-					int32_t snesX = (hdData.M7XValue >> 8) & 1023;
-					int32_t snesY = (hdData.M7YValue >> 8) & 1023;
-					int32_t tileMinX = (snesX & ~7) * imgScale;
-					int32_t tileMinY = (snesY & ~7) * imgScale;
+					int32_t snesM7X = (hdData.M7XValue >> 8) & 1023;
+					int32_t snesM7Y = (hdData.M7YValue >> 8) & 1023;
+					int32_t tileMinX = (snesM7X & ~7) * imgScale;
+					int32_t tileMinY = (snesM7Y & ~7) * imgScale;
 
 					int32_t stepX = (hdData.M7A * (int32_t)imgScale) / (int32_t)scale;
 					int32_t stepY = (hdData.M7C * (int32_t)imgScale) / (int32_t)scale;
 					int32_t stepYTermX = (hdData.M7B * (int32_t)imgScale) / (int32_t)scale;
 					int32_t stepYTermY = (hdData.M7D * (int32_t)imgScale) / (int32_t)scale;
 
-					// lenX & lenY: Vector lengths along screen X and Y axes (in texels)
 					double lenX = std::sqrt((double)stepX * stepX + (double)stepY * stepY) / 256.0;
 					double lenY = std::sqrt((double)stepYTermX * stepYTermX + (double)stepYTermY * stepYTermY) / 256.0;
 
-					// maxLen & minLen: Major and minor axes of the tile footprint
 					double maxLen = std::max(lenX, lenY);
 					double minLen = std::max(std::min(lenX, lenY), 0.001);
 
-					// tileSamples: Dynamic sample count along major axis for anisotropic filtering
 					int tileSamples = std::clamp((int)std::ceil(maxLen / minLen), 1, 16);
 
-					// dirU & dirV: Normalized direction unit vector along major distortion axis
 					double dirU = (lenX >= lenY && lenX > 0.0001) ? (stepX / (lenX * 256.0)) : (lenY > 0.0001 ? (stepYTermX / (lenY * 256.0)) : 1.0);
 					double dirV = (lenX >= lenY && lenX > 0.0001) ? (stepY / (lenX * 256.0)) : (lenY > 0.0001 ? (stepYTermY / (lenY * 256.0)) : 0.0);
 
-					// Helper lambda to fetch a single pixel from tile atlas with clamping inside tile bounds
 					auto getTileTexel = [&](int32_t sampleX, int32_t sampleY) -> uint32_t {
 						int32_t px = sampleX >> 8;
 						int32_t py = sampleY >> 8;
@@ -490,8 +486,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						if(localY > (int32_t)(bitMask >> 1)) localY = 0;
 						else if(localY >= tileDim) localY = tileDim - 1;
 
-						uint32_t finalReadX = srcX + localX;
-						uint32_t finalReadY = srcY + localY;
+						uint32_t finalReadX = atlasSrcX + localX;
+						uint32_t finalReadY = atlasSrcY + localY;
 
 						if(finalReadX < pngWidth && finalReadY < pngHeight) {
 							return rawPixelData[finalReadY * pngWidth + finalReadX];
@@ -499,7 +495,6 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						return 0;
 					};
 
-					// Helper lambda for bilinear sampling inside the tile bounds
 					auto sampleTileBilinear = [&](int32_t sampleX, int32_t sampleY) -> uint32_t {
 						uint32_t fracX = sampleX & 0xFF;
 						uint32_t fracY = sampleY & 0xFF;
@@ -527,7 +522,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					for(uint32_t sy = 0; sy < scale; sy++) {
 						int32_t yTermX = stepYTermX * (int32_t)sy;
 						int32_t yTermY = stepYTermY * (int32_t)sy;
-						uint32_t outBaseIdx = (y * scale + sy) * outWidth + (x * scale);
+						uint32_t outBaseIdx = (outY * scale + sy) * outWidth + (outX * scale);
 
 						for(uint32_t sx = 0; sx < scale; sx++) {
 							int32_t exactX = baseHD_X + stepX * (int32_t)sx + yTermX;
@@ -594,8 +589,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 				int visualY = hdData.VFlip ? (7 - hdData.TileY) : hdData.TileY;
 
-				int startX = (int)x - visualX;
-				int startY = (int)y - visualY;
+				int startX = (int)outX - visualX;
+				int startY = (int)outY - visualY;
 
 				bool alreadyCaptured = false;
 				for(int i = (int)tilesToExpand.size() - 1; i >= 0; i--) {
@@ -607,7 +602,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 				if(!alreadyCaptured) {
 					tilesToExpand.push_back({ hdData.Tile, startX, startY, pixelZ,
-													  hdData.HFlip, hdData.VFlip, hdData.BaseColor, hdData.OamIndex });
+											  hdData.HFlip, hdData.VFlip, hdData.BaseColor, hdData.OamIndex });
 				}
 			}
 
@@ -618,8 +613,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					int visualX = hdBehindData.HFlip ? (7 - hdBehindData.TileX) : hdBehindData.TileX;
 					int visualY = hdBehindData.VFlip ? (7 - hdBehindData.TileY) : hdBehindData.TileY;
 
-					int startX = (int)x - visualX;
-					int startY = (int)y - visualY;
+					int startX = (int)outX - visualX;
+					int startY = (int)outY - visualY;
 
 					bool alreadyCaptured = false;
 					for(int i = (int)tilesToExpand.size() - 1; i >= 0; i--) {
@@ -633,7 +628,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						uint8_t behindPixelZ = 20 + (hdBehindData.SnesPriorityLevel * 4);
 						if(hdBehindData.IsHighPriority) behindPixelZ += 2;
 						tilesToExpand.push_back({ hdBehindData.Tile, startX, startY, behindPixelZ,
-														  hdBehindData.HFlip, hdBehindData.VFlip, hdBehindData.BaseColor, hdBehindData.OamIndex });
+												  hdBehindData.HFlip, hdBehindData.VFlip, hdBehindData.BaseColor, hdBehindData.OamIndex });
 					}
 				}
 			}
@@ -648,16 +643,11 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				hideNative = true;
 			}
 
-			// Si la tuile d'origine doit être masquée (remplacée par du HD ou désactivée) :
-			// Elle a déjà été capturée dans tilesToExpand et sera dessinée à l'Étape 3
-			// (avec tri Z-Index et Alpha Blending au-dessus des <background> et du Mode 7).
-			// On ne doit donc pas appeler ApplyFilterSpritesStandard ici afin de laisser
-			// le Z-Buffer à zéro pour que les <background> puissent se dessiner en dessous.
 			if(hideNative) {
 				continue;
 			}
 
-			ApplyFilterSpritesStandard(x, y, scale, outWidth, sdColor, hdData, pixelZ, out);
+			ApplyFilterSpritesStandard(outX, outY, scale, outWidth, sdColor, hdData, pixelZ, out);
 		}
 	}
 
@@ -665,7 +655,6 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// ÉTAPE 2 : INJECTION DES ADDITIONS HD
 	// ====================================================================
 	if(SnesHdPackLoader::ActivePack) {
-		SnesConsole* console = (SnesConsole*)_emu->GetConsole().get();
 		bool overscanFrame = console->GetPpu()->GetState().OverscanMode;
 
 		for(const auto& add : SnesHdPackLoader::ActivePack->ActiveAdditionsQueue) {
@@ -682,8 +671,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			if(hdTile && hdTile->Bitmap != nullptr && !hdTile->HdTileData.empty()) {
 				uint8_t pixelZ = 20 + (add.Priority * 4);
 
-				int finalScreenX = add.ScreenX - overscan.Left;
-				int finalScreenY = (overscanFrame ? (add.ScreenY - 1) : (add.ScreenY + 7)) - overscan.Top;
+				int finalScreenX = add.ScreenX + sprOffsetX;
+				int finalScreenY = (overscanFrame ? (add.ScreenY - 1) : (add.ScreenY + 7)) + sprOffsetY;
 
 				tilesToExpand.push_back({
 					hdTile,
@@ -701,7 +690,6 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 	// ====================================================================
 	// ÉTAPE 3 : PASSE DE RENDU UNIFIÉE ET TRIÉE PAR Z-INDEX ASCENDANT
-	// (Combine tous les <background> et toutes les tilesToExpand)
 	// ====================================================================
 	struct RenderTask
 	{
@@ -713,42 +701,32 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 	std::vector<RenderTask> tasks;
 
-	// 1. Ingestion de tous les Backgrounds HD
 	for(size_t i = 0; i < SnesHdPackLoader::ActivePack->Backgrounds.size(); i++) {
 		auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[i];
 		if(!bg->MatchesCondition()) continue;
 		tasks.push_back({ bg->ZIndex, 0, 0, i });
 	}
 
-	// 2. Ingestion de tous les Sprites/Tiles HD (tilesToExpand)
 	for(size_t i = 0; i < tilesToExpand.size(); i++) {
 		tasks.push_back({ (int)tilesToExpand[i].zIndex, 1, (int)tilesToExpand[i].oamIndex, i });
 	}
 
-	// 3. Tri Unifié par Z-Index Croissant
 	std::stable_sort(tasks.begin(), tasks.end(), [](const RenderTask& a, const RenderTask& b) {
 		if(a.zIndex != b.zIndex) {
-			return a.zIndex < b.zIndex; // ZIndex le plus bas (arrière-plan) dessiné en premier
+			return a.zIndex < b.zIndex;
 		}
 		if(a.type != b.type) {
-			return a.type < b.type; // À ZIndex égal, les backgrounds (0) passent sous les sprites (1)
+			return a.type < b.type;
 		}
-		// Pour les sprites de même ZIndex, tri OAM DÉCROISSANT (OAM 127 derrière, OAM 0 devant)
 		return a.oamIndex > b.oamIndex;
 	});
 
-	// 4. Exécution Séquentielle des Tâches
 	uint32_t hdWidth = outWidth;
 
 	for(const auto& task : tasks) {
-
-		// --------------------------------------------------------------------
-		// BRANCHE A : RENDU D'UN BACKGROUND HD (<background>)
-		// --------------------------------------------------------------------
 		if(task.type == 0) {
 			auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[task.index];
 
-			// Animation
 			if(bg->IsAnimated && !bg->AnimFrames.empty() && bg->FramesBetweenSteps > 0) {
 				uint32_t currentFrame = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
 				int totalFrames = (int)bg->AnimFrames.size();
@@ -774,7 +752,6 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					masterScrollY = screenInfo.ScanlineVScroll[sdY][bgIndex];
 				}
 
-				// --- CALCUL DU SCROLL SELON L'OPÉRATEUR (*, /, +, -) ---
 				int calcScrollX = 0;
 				int calcScrollY = 0;
 				uint32_t currentFrame = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
@@ -808,12 +785,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				uint32_t pngBaseRowIndex = pngY * bgWidth;
 				uint32_t outBaseRowIndex = hdY * hdWidth;
 
-				// --- FONCTION DE FUSION AVEC GESTION DU ALPHA FACTOR ---
 				auto blendPixel = [&](int localPngX, uint32_t localHdX) {
 					uint32_t pixelColor = bg->Bitmap->PixelData[pngBaseRowIndex + localPngX];
 					uint32_t alpha = (pixelColor >> 24);
 
-					// Application du facteur d'opacité dynamique
 					if(bg->AlphaFactor < 1.0f) {
 						alpha = static_cast<uint32_t>(alpha * bg->AlphaFactor);
 					}
@@ -845,7 +820,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 				if(!bg->TileX) {
 					for(uint32_t hdX = 0; hdX < hdWidth; hdX++) {
-						int pngX = hdX + lineScrollX; 
+						int pngX = hdX + lineScrollX;
 						if(pngX >= 0 && pngX < bgWidth) blendPixel(pngX, hdX);
 					}
 				} else {
@@ -858,11 +833,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					}
 				}
 			}
-		}
-		// --------------------------------------------------------------------
-		// BRANCHE B : RENDU D'UN SPRITE / TUILE HD (tilesToExpand)
-		// --------------------------------------------------------------------
-		else {
+		} else {
 			const auto& item = tilesToExpand[task.index];
 			uint32_t pngWidth = item.Tile->Width * scale;
 			uint32_t pngHeight = item.Tile->Height * scale;
@@ -891,13 +862,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 							uint32_t finalColor = hdColorFromPng;
 
 							if(alpha == 255) {
-								// Pixel totalement opaque : écriture directe + verrouillage du z-buffer
 								out[pixelIndex] = finalColor | 0xFF000000;
 								_zBuffer[pixelIndex] = item.zIndex;
 							} else {
-								// Pixel semi-transparent : alpha blending avec ce qui est déjà dessiné.
-								// IMPORTANT : on ne met PAS à jour le z-buffer pour laisser les sprites
-								// en second plan visibles là où ce sprite est semi-transparent.
 								uint32_t dstColor = out[pixelIndex];
 								uint32_t invAlpha = 255 - alpha;
 
@@ -914,7 +881,6 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								uint32_t out_B = ((s_B * alpha) + (d_B * invAlpha)) >> 8;
 
 								out[pixelIndex] = (out_R << 16) | (out_G << 8) | out_B | 0xFF000000;
-								// Ne pas mettre à jour _zBuffer : les sprites derrière restent accessibles
 							}
 						}
 					}
@@ -924,7 +890,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 
 	// ====================================================================
-	// ÉTAPE 4 : GESTION DES VIDÉOS (pl_mpeg) & VERROUILLAGE FINAL
+	// ÉTAPE 4 : GESTION DES VIDÉOS (pl_mpeg)
 	// ====================================================================
 	if(SnesHdPackLoader::ActivePack != nullptr && out != nullptr) {
 		for(auto& video : SnesHdPackLoader::ActivePack->Videos) {
@@ -1011,8 +977,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					uint32_t* videoPixels = reinterpret_cast<uint32_t*>(video->CurrentFramePixels.data());
 
 					if(hdWidth > 0 && hdHeight > 0) {
-						int startX = video->X;
-						int startY = video->Y;
+						int startX = video->X + sprOffsetX;
+						int startY = video->Y + sprOffsetY;
 						int maxW = std::min(video->VideoWidth, (int)hdWidth - startX);
 						int maxH = std::min(video->VideoHeight, (int)hdHeight - startY);
 
@@ -1043,7 +1009,45 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	}
 
-	// VERROUILLAGE FINAL DE L'ALPHA
+	// ====================================================================
+	// ÉTAPE 5 : MASQUAGE DES BANDES NOIRES (Si Stretch == false)
+	// ====================================================================
+	if(!stretch && out != nullptr) {
+		uint32_t topPx = overscan.Top * scale;
+		uint32_t btmPx = (_baseFrameInfo.Height - overscan.Bottom) * scale;
+		uint32_t leftPx = overscan.Left * scale;
+		uint32_t rightPx = (_baseFrameInfo.Width - overscan.Right) * scale;
+
+		// Bande supérieure
+		for(uint32_t y = 0; y < topPx && y < hdHeight; y++) {
+			for(uint32_t x = 0; x < outWidth; x++) {
+				out[y * outWidth + x] = 0xFF000000;
+				_zBuffer[y * outWidth + x] = 255;
+			}
+		}
+		// Bande inférieure
+		for(uint32_t y = btmPx; y < hdHeight; y++) {
+			for(uint32_t x = 0; x < outWidth; x++) {
+				out[y * outWidth + x] = 0xFF000000;
+				_zBuffer[y * outWidth + x] = 255;
+			}
+		}
+		// Bandes gauche et droite
+		for(uint32_t y = topPx; y < btmPx && y < hdHeight; y++) {
+			for(uint32_t x = 0; x < leftPx && x < outWidth; x++) {
+				out[y * outWidth + x] = 0xFF000000;
+				_zBuffer[y * outWidth + x] = 255;
+			}
+			for(uint32_t x = rightPx; x < outWidth; x++) {
+				out[y * outWidth + x] = 0xFF000000;
+				_zBuffer[y * outWidth + x] = 255;
+			}
+		}
+	}
+
+	// ====================================================================
+	// ÉTAPE 6 : VERROUILLAGE FINAL DE L'ALPHA
+	// ====================================================================
 	if(out != nullptr && hdWidth > 0 && hdHeight > 0) {
 		for(uint32_t y = 0; y < hdHeight; y++) {
 			for(uint32_t x = 0; x < hdWidth; x++) {
@@ -1051,8 +1055,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			}
 		}
 	}
-
-} // end fonction ApplyFilter
+}
 //------------------------------------------------------------------------------------------------------------/
 
 

@@ -658,6 +658,7 @@ public:
 	// --- OVERSCAN ---
 	bool HasOverscanConfig = false;
 	OverscanDimensions Overscan = { 0, 0, 0, 0 };
+	bool OverscanStretch = true; // true is défault (streched image)
 
 	std::vector<std::unique_ptr<SnesHdPackBitmapInfo>> ImageFileData;
 	std::unordered_map<SnesHdTileKey, std::vector<SnesHdPackTileInfo*>> TileByKey;
