@@ -358,7 +358,7 @@ void Emulator::PowerCycle()
 {
 	ReloadRom(true);
 }
-
+//------------------------------------------------------------------------------------------------------
 bool Emulator::LoadRom(VirtualFile romFile, VirtualFile patchFile, bool stopRom, bool forPowerCycle)
 {
 	bool result = false;
@@ -378,7 +378,7 @@ bool Emulator::LoadRom(VirtualFile romFile, VirtualFile patchFile, bool stopRom,
 
 	return result;
 }
-
+//------------------------------------------------------------------------------------------------------
 bool Emulator::InternalLoadRom(VirtualFile romFile, VirtualFile patchFile, bool stopRom, bool forPowerCycle)
 {
 	if(!romFile.IsValid()) {

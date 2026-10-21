@@ -973,7 +973,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				}
 			}
 
-			if(video->IsPlaying && video->VideoPlayer != nullptr) {
+			// 2. LECTURE & SYNCHRONISATION
+			/*if(video->IsPlaying && video->VideoPlayer != nullptr) {
 				double fps = plm_get_framerate(video->VideoPlayer);
 				if(fps <= 0.0) fps = 30.0;
 
@@ -1002,30 +1003,62 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					continue;
 				}
 
+
+
+				// 3. DESSIN DES PIXELS SUR L'ÉCRAN 'out'
 				if(!video->CurrentFramePixels.empty()) {
 					uint32_t* videoPixels = reinterpret_cast<uint32_t*>(video->CurrentFramePixels.data());
 
 					if(hdWidth > 0 && hdHeight > 0) {
-						int startX = video->X + sprOffsetX;
-						int startY = video->Y + sprOffsetY;
-						int maxW = std::min(video->VideoWidth, (int)hdWidth - startX);
-						int maxH = std::min(video->VideoHeight, (int)hdHeight - startY);
+						if(video->Stretch) {
+							// ========================================================
+							// MODE STRETCH : ÉTIREMENT PLEIN ÉCRAN VISIBLE
+							// ========================================================
+							for(uint32_t screenY = 0; screenY < hdHeight; screenY++) {
+								int vy = (screenY * video->VideoHeight) / hdHeight;
+								uint32_t* videoRow = &videoPixels[vy * video->VideoWidth];
+								uint32_t outRow = screenY * outWidth;
 
-						if(maxW > 0 && maxH > 0) {
-							for(int y = 0; y < maxH; y++) {
-								for(int x = 0; x < maxW; x++) {
-									int screenX = startX + x;
-									int screenY = startY + y;
+								for(uint32_t screenX = 0; screenX < hdWidth; screenX++) {
+									int vx = (screenX * video->VideoWidth) / hdWidth;
+									uint32_t pixel = videoRow[vx];
 
-									if(screenX >= 0 && screenX < (int)hdWidth && screenY >= 0 && screenY < (int)hdHeight) {
-										uint32_t pixel = videoPixels[y * video->VideoWidth + x];
+									// Si AlphaEnable est actif, on saute le noir pur (#000000). Sinon on dessine tout.
+									if(!video->AlphaEnable || (pixel & 0x00FFFFFF) != 0) {
+										uint32_t outIdx = outRow + screenX;
+										if(video->ZIndex >= _zBuffer[outIdx]) {
+											out[outIdx] = pixel | 0xFF000000;
+											_zBuffer[outIdx] = video->ZIndex;
+										}
+									}
+								}
+							}
+						} else {
+							// ========================================================
+							// MODE NORMAL : POSITIONNEMENT 1:1 (X, Y)
+							// ========================================================
+							int startX = video->X;
+							int startY = video->Y;
+							int maxW = std::min(video->VideoWidth, (int)hdWidth - startX);
+							int maxH = std::min(video->VideoHeight, (int)hdHeight - startY);
 
-										if((pixel & 0x00FFFFFF) != 0) {
-											uint32_t outIdx = screenY * outWidth + screenX;
+							if(maxW > 0 && maxH > 0) {
+								for(int y = 0; y < maxH; y++) {
+									for(int x = 0; x < maxW; x++) {
+										int screenX = startX + x;
+										int screenY = startY + y;
 
-											if(video->ZIndex >= _zBuffer[outIdx]) {
-												out[outIdx] = pixel | 0xFF000000;
-												_zBuffer[outIdx] = video->ZIndex;
+										if(screenX >= 0 && screenX < (int)hdWidth && screenY >= 0 && screenY < (int)hdHeight) {
+											uint32_t pixel = videoPixels[y * video->VideoWidth + x];
+
+											// Si AlphaEnable est actif, on saute le noir pur (#000000). Sinon on dessine tout.
+											if(!video->AlphaEnable || (pixel & 0x00FFFFFF) != 0) {
+												uint32_t outIdx = screenY * outWidth + screenX;
+
+												if(video->ZIndex >= _zBuffer[outIdx]) {
+													out[outIdx] = pixel | 0xFF000000;
+													_zBuffer[outIdx] = video->ZIndex;
+												}
 											}
 										}
 									}
@@ -1034,7 +1067,125 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						}
 					}
 				}
+
+
 			}
+			*/
+
+			// 2. LECTURE & SYNCHRONISATION
+if(video->IsPlaying && video->VideoPlayer != nullptr) {
+
+	double fps = plm_get_framerate(video->VideoPlayer);
+	if(fps <= 0.0) fps = 30.0;
+
+	double frameTime = 1.0 / fps;
+	video->TimeAccumulator += (1.0 / 60.0);
+
+	bool newFrameDecoded = false;
+	plm_frame_t* frame = nullptr;
+
+	while(video->TimeAccumulator >= frameTime) {
+		frame = plm_decode_video(video->VideoPlayer);
+		video->TimeAccumulator -= frameTime;
+		newFrameDecoded = true;
+	}
+
+	if(newFrameDecoded && frame != nullptr) {
+		plm_frame_to_bgra(frame, video->CurrentFramePixels.data(), video->VideoWidth * 4);
+	}
+
+	// === GESTION DE LA FIN ET DE LA BOUCLE ===
+	if(plm_has_ended(video->VideoPlayer)) {
+		if(video->LoopTargetFrame != 0) {
+			// La vidéo boucle
+			if(video->LoopTargetFrame > 0) {
+				// On cherche le temps (en secondes) correspondant à la frame demandée
+				double targetTime = (double)video->LoopTargetFrame / fps;
+				plm_seek(video->VideoPlayer, targetTime, false);
+			} else {
+				// Boucle infinie classique depuis le début
+				plm_rewind(video->VideoPlayer);
+			}
+			// On lit la nouvelle première frame
+			frame = plm_decode_video(video->VideoPlayer);
+			if(frame != nullptr) {
+				plm_frame_to_bgra(frame, video->CurrentFramePixels.data(), video->VideoWidth * 4);
+			}
+		} else {
+			// La vidéo s'arrête
+			video->IsPlaying = false;
+			video->HasPlayed = true;
+			plm_destroy(video->VideoPlayer);
+			video->VideoPlayer = nullptr;
+			video->CurrentFramePixels.clear();
+			continue;
+		}
+	}
+
+	// 3. DESSIN DES PIXELS SUR L'ÉCRAN 'out' !
+	if(!video->CurrentFramePixels.empty()) {
+		uint32_t* videoPixels = reinterpret_cast<uint32_t*>(video->CurrentFramePixels.data());
+
+		if(hdWidth > 0 && hdHeight > 0) {
+			if(video->Stretch) {
+				// ========================================================
+				// MODE STRETCH : ÉTIREMENT PLEIN ÉCRAN VISIBLE
+				// ========================================================
+				for(uint32_t screenY = 0; screenY < hdHeight; screenY++) {
+					int vy = (screenY * video->VideoHeight) / hdHeight;
+					uint32_t* videoRow = &videoPixels[vy * video->VideoWidth];
+					uint32_t outRow = screenY * outWidth;
+
+					for(uint32_t screenX = 0; screenX < hdWidth; screenX++) {
+						int vx = (screenX * video->VideoWidth) / hdWidth;
+						uint32_t pixel = videoRow[vx];
+
+						// Si AlphaEnable est actif, on saute le noir pur (#000000). Sinon on dessine tout.
+						if(!video->AlphaEnable || (pixel & 0x00FFFFFF) != 0) {
+							uint32_t outIdx = outRow + screenX;
+							if(video->ZIndex >= _zBuffer[outIdx]) {
+								out[outIdx] = pixel | 0xFF000000;
+								_zBuffer[outIdx] = video->ZIndex;
+							}
+						}
+					}
+				}
+			} else {
+				// ========================================================
+				// MODE NORMAL : POSITIONNEMENT 1:1 (X, Y)
+				// ========================================================
+				int startX = video->X;
+				int startY = video->Y;
+				int maxW = std::min(video->VideoWidth, (int)hdWidth - startX);
+				int maxH = std::min(video->VideoHeight, (int)hdHeight - startY);
+
+				if(maxW > 0 && maxH > 0) {
+					for(int y = 0; y < maxH; y++) {
+						for(int x = 0; x < maxW; x++) {
+							int screenX = startX + x;
+							int screenY = startY + y;
+
+							if(screenX >= 0 && screenX < (int)hdWidth && screenY >= 0 && screenY < (int)hdHeight) {
+								uint32_t pixel = videoPixels[y * video->VideoWidth + x];
+
+								// Si AlphaEnable est actif, on saute le noir pur (#000000). Sinon on dessine tout.
+								if(!video->AlphaEnable || (pixel & 0x00FFFFFF) != 0) {
+									uint32_t outIdx = screenY * outWidth + screenX;
+
+									if(video->ZIndex >= _zBuffer[outIdx]) {
+										out[outIdx] = pixel | 0xFF000000;
+										_zBuffer[outIdx] = video->ZIndex;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 		}
 	}
 
@@ -1650,7 +1801,11 @@ bool SnesHdPackTileNearbyCondition::InternalCheckCondition(int x, int y, SnesHdP
 	return false;
 }
 //--------------------------------------------------------------------------------------------------
-
+/* Vérifie si un sprite matériel est proche d'une position donnée (x, y) sur l'écran SNES.
+* @param x La coordonnée X de la position à vérifier.
+* @param y La coordonnée Y de la position à vérifier.
+* @param tile Pointeur vers les données du sprite HD (peut être null si non utilisé).
+*/
 bool SnesHdPackSpriteNearbyCondition::InternalCheckCondition(int x, int y, SnesHdPixelData* tile)
 {
 	if(!_screenInfo || !_screenInfo->Ppu) return false;
@@ -1679,8 +1834,10 @@ bool SnesHdPackSpriteNearbyCondition::InternalCheckCondition(int x, int y, SnesH
 		debugLog << "  Hash cherché : $" << HexUtilities::ToHex(MemoryHash) << std::endl;
 	}
 	*/
+	
 	bool foundHit = false;
 
+	// --- BOUCLE SUR LES 128 SPRITES OAM ---
 	for(uint8_t i = 0; i < 128; i++) {
 		int offset = i * 4;
 
@@ -1698,12 +1855,15 @@ bool SnesHdPackSpriteNearbyCondition::InternalCheckCondition(int x, int y, SnesH
 		bool matchX = CheckAnyX || (targetX >= spriteX && targetX < (spriteX + sprWidth));
 		bool matchY = CheckAnyY || (targetY >= spriteY && targetY < (spriteY + sprHeight));
 
+		// 2. Si le point cible tombe dans la hitbox du sprite, on continue l'analyse
 		if(matchX && matchY) {
 			foundHit = true;
 
 			uint16_t baseTileIndex = oamRam[offset + 2] | ((oamRam[offset + 3] & 0x01) << 8);
+
 			uint8_t flags = oamRam[offset + 3];
 			uint32_t snesPalette = (flags >> 1) & 0x07;
+
 			bool hFlip = (flags & 0x40) != 0;
 			bool vFlip = (flags & 0x80) != 0;
 
@@ -1724,7 +1884,7 @@ bool SnesHdPackSpriteNearbyCondition::InternalCheckCondition(int x, int y, SnesH
 
 			bool isTileMatch = false;
 			uint64_t actualTileHash = 0;
-
+			// MOUCHARD : Si l'émulateur croise la tuile 101, il écrit son vrai hash
 			if(this->MemoryHash <= 0xFFFF) {
 				isTileMatch = (this->MemoryHash == subTileIndex);
 			} else {
@@ -1734,7 +1894,7 @@ bool SnesHdPackSpriteNearbyCondition::InternalCheckCondition(int x, int y, SnesH
 				if(subTileIndex >= 256) {
 					tileAddress += state.OamAddressOffset;
 				}
-
+				// Calcul de l'adresse de départ de la sous-tuile dans la VRAM
 				uint32_t tileStart = tileAddress + ((subTileIndex % 256) * 4 * bpp);
 
 				uint8_t tileBuffer[32];
@@ -1751,9 +1911,14 @@ bool SnesHdPackSpriteNearbyCondition::InternalCheckCondition(int x, int y, SnesH
 				isTileMatch = (this->MemoryHash == actualTileHash);
 			}
 
-
-			if(isTileMatch && (this->IgnorePalette || this->PaletteHash == snesPalette )) {
-
+			// 5. Vérification finale du match avec la palette
+			//if(isTileMatch && (this->IgnorePalette || this->PaletteHash == snesPalette )) {
+			
+			
+			if(isTileMatch && (  this->IgnorePalette 
+									|| this->PaletteHash == snesPalette 
+									|| this->PaletteHash == (snesPalette + 8))) // Normalisation : si la palette renseignée est entre 8 et 15, on la ramène entre 0 et 7
+			{
 				return true ;
 			}
 			

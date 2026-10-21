@@ -14,6 +14,8 @@
 
 #include "SNES/SnesPpu.h"
 #include "SNES/SnesPpuTypes.h"
+#include "Utilities/Patches/IpsPatcher.h"
+#include "Utilities/Patches/BpsPatcher.h"
 
 // --- DÉCODEUR VIDÉO MPEG-1 ---
 #define PL_MPEG_IMPLEMENTATION
@@ -685,13 +687,28 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 							// C'est un petit Index
 							memHash = HexUtilities::FromHex(hashStr);
 						}
-
+						/*
 						uint32_t palHash = 0;
 						bool ignorePal = (tokens[5] == "ignore");
 
 						if(!ignorePal) {
 							palHash = HexUtilities::FromHex(tokens[5]);
 						}
+						*/
+						//fix palette 21/10/2026
+						uint32_t palHash = 0;
+						bool ignorePal = (StringUtilities::ToLower(StringUtilities::Trim(tokens[5])) == "ignore");
+
+						if(!ignorePal) {
+							try {
+								// Lecture en décimal standard (0 à 15)
+								palHash = std::stoul(StringUtilities::Trim(tokens[5]));
+							} catch(...) {
+								// Fallback en hexadécimal si l'utilisateur a écrit A, B, C, D, E, F
+								palHash = HexUtilities::FromHex(tokens[5]);
+							}
+						}
+						
 
 						// 4. Initialisation selon le type
 						if(isSprite) {
@@ -1338,7 +1355,10 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			}
 		}// END parsing MSU2OGG
 
-
+		else if(lineContent.substr(0, 7) == "<patch>") {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(7), ',');
+			ProcessPatchTag(tokens, rootFolder, outData, lineLocation);
+		}
 
 /// PARSING <VIDEO> TAGS --------------------------------
 		else if(lineContent.substr(0, 7) == "<video>") {
@@ -1376,7 +1396,18 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				// 6. Loop (Optionnel)
 				if(tokens.size() >= 6) {
 					std::string loopStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[5]));
-					video->Loop = (loopStr == "true" || loopStr == "1" || loopStr == "yes");
+					if(loopStr == "false" || loopStr == "0" || loopStr == "no") {
+						video->LoopTargetFrame = 0; // No Loop
+					} else if(loopStr == "true" || loopStr == "yes") {
+						video->LoopTargetFrame = -1; // infinite Loop since beginning
+					} else {
+						// Si c'est un nombre, c'est la frame cible de rebouclage
+						try {
+							video->LoopTargetFrame = std::stoi(loopStr);
+						} catch(...) {
+							video->LoopTargetFrame = -1; // Fallback infini
+						}
+					}
 				}
 
 				// 7 & 8. Coordonnées X et Y (Optionnel)
@@ -1398,18 +1429,34 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 						video->ZIndex = 99; // Fallback par défaut si la valeur est invalide
 					}
 				}
+				// 10. Alpha Enable (Optionnel, true par défaut)
+				if(tokens.size() >= 10) {
+					std::string alphaStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[9]));
+					video->AlphaEnable = !(alphaStr == "false" || alphaStr == "0" || alphaStr == "no");
+				}
+
+				// 11. Stretch (Optionnel, false par défaut)
+				if(tokens.size() >= 11) {
+					std::string stretchStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[10]));
+					video->Stretch = (stretchStr == "true" || stretchStr == "1" || stretchStr == "yes");
+				}
+
 
 				// MOUCHARD PARSEUR
 				MessageManager::Log("[SnesHDPack] Line " + lineLocation +
-					" - [HD VIDEO] Tag found : " + video->Filename +
-					" | PlayOnlyOnce: " + (video->PlayOnlyOnce ? "YES" : "NO") +
-					" | Z-Index: " + std::to_string(video->ZIndex));
+									" - [HD VIDEO] Tag found : " + video->Filename +
+									" | PlayOnlyOnce: " + (video->PlayOnlyOnce ? "YES" : "NO") +
+									" | LoopTarget: " + std::to_string(video->LoopTargetFrame) +
+									" | Alpha: " + (video->AlphaEnable ? "YES" : "NO") +
+									" | Stretch: " + (video->Stretch ? "YES" : "NO"));
 
 				video->Conditions = currentConditions;
 				outData->Videos.push_back(std::move(video));
 			}
 		}
 		// End Parsing VIDEOS ----------
+
+
 
 	}		
 
@@ -1427,10 +1474,37 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 
 //-----------------------------------------------------------------------------------------------------
+bool ApplyRomPatch(const std::string& patchPath, std::vector<uint8_t>& romData)
+{
+	std::string ext = StringUtilities::ToLower(FolderUtilities::GetExtension(patchPath));
+	std::vector<uint8_t> patchedOutput;
+	bool success = false;
+
+	if(ext == ".ips") {
+		success = IpsPatcher::PatchBuffer(patchPath, romData, patchedOutput);
+	} else if(ext == ".bps") {
+		success = BpsPatcher::PatchBuffer(patchPath, romData, patchedOutput);
+	} else {
+		MessageManager::Log("[SnesHDPack] Format de patch non supporté : " + ext);
+		return false;
+	}
+
+	if(success && !patchedOutput.empty()) {
+		romData = std::move(patchedOutput);
+		return true;
+	}
+
+	return false;
+}
 
 
 
 
+//-----------------------------------------------------------------------------------------------------
+/// <summary>
+/// Vide toutes les données du pack HD actuellement chargé, y compris les tuiles, images et conditions. 
+/// Cela permet de libérer la mémoire et de réinitialiser l'état du loader.
+/// </summary>
 void SnesHdPackLoader::Clear() {
     //_tileMap.clear();
     //_sheetImages.clear();
@@ -1438,6 +1512,9 @@ void SnesHdPackLoader::Clear() {
 	_isLoaded = false;
 }
 //-----------------------------------------------------------------------------------------------------
+/// <summary>	
+/// Recherche une tuile HD dans le pack actif en fonction des paramètres fournis.
+/// </summary>
 SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t paletteHash, SnesBpp bpp, bool isLargeTile, bool isSprite, bool isHFlip, bool isVFlip, int x, int y)
 {
 	if(ActivePack == nullptr) return nullptr;
@@ -1506,7 +1583,53 @@ SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t pa
 
 	return nullptr;
 }
+//-----------------------------------------------------------------------------------------------------
+/// <summary>
+/// Traite la balise <patch> d'un pack : valide les paramètres, résout le chemin du fichier de patch, vérifie le hash SHA1 et enregistre le patch dans outData si tout est correct.
+/// </summary>
+/// <param name="tokens">Les paramètres de la balise <patch> (nom du fichier, SHA1 optionnel).</param>
+///
+void SnesHdPackLoader::ProcessPatchTag(const std::vector<std::string>& tokens, const std::string& rootFolder, std::shared_ptr<SnesHdPackData>& outData, const std::string& lineLocation)
+{
+	if(tokens.empty()) {
+		MessageManager::Log("[SnesHDPack " + lineLocation + "] - Error : <patch> tag empty.");
+		return;
+	}
+
+	std::string patchFilename = StringUtilities::Trim(tokens[0]);
+	if(patchFilename.empty()) return;
+
+	std::replace(patchFilename.begin(), patchFilename.end(), '\\', '/');
+
+	std::string fullPatchPath = FolderUtilities::CombinePath(rootFolder, patchFilename);
+	VirtualFile patchFile(fullPatchPath);
+	if(!patchFile.IsValid()) {
+		MessageManager::Log("[SnesHDPack " + lineLocation + "] - File patch not found : " + fullPatchPath);
+		return;
+	}
+
+	// Cas 1 : SHA-1 absent ou joker -> Patch inconditionnel
+	if(tokens.size() == 1 || StringUtilities::Trim(tokens[1]).empty() || StringUtilities::Trim(tokens[1]) == "*") {
+		outData->PatchesByHash["FORCE"] = fullPatchPath;
+		MessageManager::Log("[SnesHDPack " + lineLocation + "] - Patch inconditionnel enregistre : " + patchFilename);
+		return;
+	}
+
+	// Cas 2 : SHA-1 spécifié -> Vérification du format (40 caractères hexadécimaux)
+	std::string targetSha1 = StringUtilities::ToUpper(StringUtilities::Trim(tokens[1]));
+	if(targetSha1.length() != 40) {
+		MessageManager::Log("[SnesHDPack " + lineLocation + "] - invalid SHA1 for patch (" + patchFilename + ") : " + targetSha1);
+		return;
+	}
+
+	outData->PatchesByHash[targetSha1] = fullPatchPath;
+	MessageManager::Log("[SnesHDPack " + lineLocation + "] - Patch enregistre pour le SHA1 " + targetSha1 + " -> " + patchFilename);
+}
+
 //----------------------------------------------------------------------------
+/// <summary>
+/// Récupère les informations d'une image (bitmap) dans le pack actif en fonction de l'index fourni.	
+/// </summary>
 SnesHdPackBitmapInfo* SnesHdPackLoader::GetSheet(uint32_t imageIndex)
 {
 	if(ActivePack != nullptr && imageIndex < ActivePack->ImageFileData.size()) {

@@ -66,6 +66,9 @@ private:
     void LogError(const std::string& msg);
 
 
+	 static void ProcessPatchTag(const std::vector<std::string>& tokens, const std::string& rootFolder, std::shared_ptr<SnesHdPackData>& outData, const std::string& lineLocation);
+	 
+	 bool ApplyRomPatch(const std::string& patchPath, std::vector<uint8_t>& romData);
 	 
 
     // -----------------------------------------------------------------------

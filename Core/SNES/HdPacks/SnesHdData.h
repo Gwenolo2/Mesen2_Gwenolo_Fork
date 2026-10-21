@@ -44,8 +44,13 @@ struct SnesHdVideoInfo
 	bool PlayOnlyOnce = false;
 	bool MuteAudio = false;
 
+
+	bool AlphaEnable = true; // true par défaut : le noir pur (#000000) est transparent
+	bool Stretch = false;     // false par défaut : étire la vidéo sur tout l'écran SNES visible
+
 	//  PARAMÈTRES PIP (Picture-in-Picture) ---
-	bool Loop = false;
+	int LoopTargetFrame = 0; // 0 = pas de boucle, -1 = boucle infinie, > 0 = frame de redémarrage
+	//bool Loop = false;
 	int X = 0;
 	int Y = 0;
 
@@ -707,6 +712,9 @@ public:
 	// MPEG1 videos
 	std::vector<std::unique_ptr<SnesHdVideoInfo>> Videos;
 
+
+	std::unordered_map<std::string, std::string> PatchesByHash;
+	
 
 	/*------------------------------------------------------------------------------------*/
 

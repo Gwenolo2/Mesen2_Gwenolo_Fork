@@ -70,15 +70,15 @@ SnesConsole::SnesConsole(Emulator *emu) {
 }
 
 SnesConsole::~SnesConsole() {}
-
+/*---------------------------------------------------------------*/
 void SnesConsole::Initialize() {
   // Laisse vide ! Mesen s'occupe du routage des notifications automatiquement.
 }
-
+/*---------------------------------------------------------------*/
 void SnesConsole::Release() {
   // Laisse vide !
 }
-
+/*---------------------------------------------------------------*/
 void SnesConsole::RunFrame() {
   UpdateRegion();
 
@@ -90,7 +90,7 @@ void SnesConsole::RunFrame() {
 
   _spc->ProcessEndFrame();
 }
-
+/*---------------------------------------------------------------*/
 void SnesConsole::ProcessEndOfFrame() {
   _cart->RunCoprocessors();
   if (_cart->GetCoprocessor()) {
@@ -110,7 +110,7 @@ void SnesConsole::ProcessEndOfFrame() {
   _internalRegisters->SetAutoJoypadReadClock();
   _frameRunning = false;
 }
-
+/*---------------------------------------------------------------*/
 void SnesConsole::Reset() {
   _dmaController->Reset();
   _internalRegisters->Reset();
@@ -128,7 +128,7 @@ void SnesConsole::Reset() {
   // get out of reset)
   _memoryManager->IncMasterClockStartup();
 }
-
+/*---------------------------------------------------------------*/
 LoadRomResult SnesConsole::LoadRom(VirtualFile &romFile) {
   SnesConfig config = _settings->GetSnesConfig();
   LoadRomResult loadResult = LoadRomResult::UnknownType;
@@ -176,7 +176,7 @@ LoadRomResult SnesConsole::LoadRom(VirtualFile &romFile) {
   _settings->SetSnesConfig(config);
   return loadResult;
 }
-
+/*---------------------------------------------------------------*/
 bool SnesConsole::LoadSpcFile(VirtualFile &romFile) {
   _spc->LoadSpcFile(_cart->GetSpcData());
   if (romFile.IsArchive()) {
@@ -203,17 +203,17 @@ bool SnesConsole::LoadSpcFile(VirtualFile &romFile) {
   _spcTrackNumber = (uint32_t)std::distance(_spcPlaylist.begin(), result);
   return true;
 }
-
+/*---------------------------------------------------------------*/
 uint64_t SnesConsole::GetMasterClock() {
   return _memoryManager->GetMasterClock();
 }
-
+/*---------------------------------------------------------------*/
 uint32_t SnesConsole::GetMasterClockRate() { return _masterClockRate; }
-
+/*---------------------------------------------------------------*/
 ConsoleRegion SnesConsole::GetRegion() { return _region; }
-
+/*---------------------------------------------------------------*/
 ConsoleType SnesConsole::GetConsoleType() { return ConsoleType::Snes; }
-
+/*---------------------------------------------------------------*/
 void SnesConsole::UpdateRegion() {
   switch (_settings->GetSnesConfig().Region) {
   case ConsoleRegion::Auto:
@@ -231,7 +231,7 @@ void SnesConsole::UpdateRegion() {
 
   _masterClockRate = _region == ConsoleRegion::Pal ? 21281370 : 21477270;
 }
-
+/*---------------------------------------------------------------*/
 double SnesConsole::GetFps() {
   if (_region == ConsoleRegion::Ntsc) {
     return 60.0988118623484;
@@ -239,7 +239,7 @@ double SnesConsole::GetFps() {
     return 50.0069789081886;
   }
 }
-
+/*---------------------------------------------------------------*/
 PpuFrameInfo SnesConsole::GetPpuFrame() {
   PpuFrameInfo frame = {};
   frame.FrameBuffer = (uint8_t *)_ppu->GetScreenBuffer();
@@ -252,14 +252,14 @@ PpuFrameInfo SnesConsole::GetPpuFrame() {
   frame.CycleCount = 341;
   return frame;
 }
-
+/*---------------------------------------------------------------*/
 TimingInfo SnesConsole::GetTimingInfo(CpuType cpuType) {
   if (cpuType == CpuType::Gameboy && _cart->GetGameboy()) {
     return _cart->GetGameboy()->GetTimingInfo(cpuType);
   }
   return IConsole::GetTimingInfo(cpuType);
 }
-
+/*---------------------------------------------------------------*/
 vector<CpuType> SnesConsole::GetCpuTypes() {
   vector<CpuType> cpuTypes = {CpuType::Snes, CpuType::Spc};
   if (_cart->GetGsu()) {
@@ -672,18 +672,38 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
 				SnesHdPackLoader::ActivePack = packData;
 				this->_hdPackData = packData;
 
-				// --- 1. AFFICHAGE DU MESSAGE ---
-				// Le 2ème paramètre est le contenu, le 1er est souvent le titre de la notification
+				// ==========================================================
+				// 1. APPLICATION DU PATCH (IPS / BPS) EN MÉMOIRE
+				// ==========================================================
+				std::string romSha1 = StringUtilities::ToUpper(romFile.GetSha1Hash());
+
+				// A. Recherche d'une correspondance exacte avec le SHA-1
+				auto it = packData->PatchesByHash.find(romSha1);
+
+				// B. Repli : si non trouvé, on cherche un patch inconditionnel ("FORCE")
+				if(it == packData->PatchesByHash.end()) {
+					it = packData->PatchesByHash.find("FORCE");
+				}
+
+				if(it != packData->PatchesByHash.end()) {
+					VirtualFile patchFile(it->second);
+					if(patchFile.IsValid()) {
+						romFile.ApplyPatch(patchFile);
+						MessageManager::Log("[SnesHDPack] Patch applique avec succes en memoire : " + it->second);
+					} else {
+						MessageManager::Log("[SnesHDPack] ECHEC : Fichier de patch introuvable : " + it->second);
+					}
+				}
+				// ==========================================================
+
+				// --- 2. AFFICHAGE DU MESSAGE ---
 				MessageManager::DisplayMessage("HD Pack", "LOADING HD PACK... PLEASE WAIT");
 
-				// --- 2. CHARGEMENT SYNCHRONE (Le jeu se met en pause ici) ---
+				// --- 3. CHARGEMENT SYNCHRONE ---
 				MessageManager::Log("[HD TRACE 0] Starting Synchronous loading...");
-
-				// Même si la fonction s'appelle "LoadAsync", si on l'appelle normalement 
-				// sans "std::thread", elle va bloquer l'exécution jusqu'à la fin !
 				packData->LoadAsync();
 
-				// --- 3. FIN DU CHARGEMENT, LE JEU DÉMARRE ---
+				// --- 4. FIN DU CHARGEMENT, LE JEU DÉMARRE ---
 				MessageManager::DisplayMessage("HD Pack", "HD PACK LOADED !");
 				MessageManager::Log("[HD TRACE 0] SUCCESS ! Synchronous loading finished.");
 			}
@@ -692,46 +712,46 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
 		}
 	}
 }
+
 /*void SnesConsole::LoadHdPack(VirtualFile& romFile)
 {
 	MessageManager::Log("[HD TRACE 0] Starting SNES LoadHdPack");
-	
 
 	// On nettoie l'ancien pack (globale ET console)
 	SnesHdPackLoader::ActivePack = nullptr;
 	this->_hdPackData = nullptr;
 
-
-	// 1. On vérifie si la case est bien cochée
-	//bool optionActivee = _settings->GetSnesConfig().EnableHdPacks;
 	bool optionActivee = true;
 	MessageManager::Log("[HD TRACE 0] EnableHdPacks value is: " + std::string(optionActivee ? "TRUE" : "FALSE"));
 
 	if(optionActivee) {
-		// 2. Méthode 100% sûre : on cherche dans le dossier de la ROM
 		string romPath = romFile.GetFilePath();
 		string folder = FolderUtilities::GetFolderName(romPath);
 		string packFile = FolderUtilities::CombinePath(folder, "snes_hires.txt");
 
-		// 3. On affiche l'endroit exact où l'émulateur va lire !
 		MessageManager::Log("[HD TRACE 0] Looking for File : " + packFile);
 
-		// 4. Lecture et chargement
 		if(ifstream(packFile)) {
 			std::shared_ptr<SnesHdPackData> packData;
 			if(SnesHdPackLoader::LoadHdPack(packFile, packData)) {
-				
-				// --- LE FAMEUX BRANCHEMENT du hdPackData---
-				SnesHdPackLoader::ActivePack = packData; // Pour le filtre vidéo global
-				this->_hdPackData = packData;            // Pour le PPU !
-				// -----------------------------
 
+				SnesHdPackLoader::ActivePack = packData;
+				this->_hdPackData = packData;
 
-				std::thread([packData]() {
-					packData->LoadAsync();
-				}).detach();
+				// --- 1. AFFICHAGE DU MESSAGE ---
+				// Le 2ème paramètre est le contenu, le 1er est souvent le titre de la notification
+				MessageManager::DisplayMessage("HD Pack", "LOADING HD PACK... PLEASE WAIT");
 
-				MessageManager::Log("[HD TRACE 0] SUCCESS ! Asynchron loading started.");
+				// --- 2. CHARGEMENT SYNCHRONE (Le jeu se met en pause ici) ---
+				MessageManager::Log("[HD TRACE 0] Starting Synchronous loading...");
+
+				// Même si la fonction s'appelle "LoadAsync", si on l'appelle normalement
+				// sans "std::thread", elle va bloquer l'exécution jusqu'à la fin !
+				packData->LoadAsync();
+
+				// --- 3. FIN DU CHARGEMENT, LE JEU DÉMARRE ---
+				MessageManager::DisplayMessage("HD Pack", "HD PACK LOADED !");
+				MessageManager::Log("[HD TRACE 0] SUCCESS ! Synchronous loading finished.");
 			}
 		} else {
 			MessageManager::Log("[HD TRACE 0] ECHEC : Le fichier snes_hires.txt est introuvable a cet emplacement.");
