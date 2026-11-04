@@ -116,6 +116,10 @@ private:
   static std::unordered_map<uint32_t, std::vector<SnesHdTileImage>>
       _paletteTiles;
 
+
+  static uint32_t _sheetWidth;
+  static uint32_t _sheetHeight;
+
   // to collect meta data in Json files when building the snes_hires.txt
   inline static std::vector<HdMetadataItem> _metadataCollection;
 

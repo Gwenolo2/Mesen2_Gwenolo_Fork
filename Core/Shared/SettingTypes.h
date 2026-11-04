@@ -623,6 +623,10 @@ struct HdPackBuilderOptions
 	bool UpdateIfExists = false; 
 	bool BuildFromPngFolder = false;
 
+	//paramètres pour les dimensions des planches PNG
+	uint32_t SheetWidth;  // Nombre de tuiles en largeur (1 - 256, défaut : 16)
+	uint32_t SheetHeight; // Nombre de tuiles en hauteur (1 - 256, défaut : 16)
+
 };
 
 struct NesConfig

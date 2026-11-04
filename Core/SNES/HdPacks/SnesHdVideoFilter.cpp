@@ -91,6 +91,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	uint32_t scale = SnesHdPackLoader::ActivePack->Scale;
 	uint32_t* out = GetOutputBuffer();
 
+
 	OverscanDimensions overscan = GetOverscan();
 	bool stretch = SnesHdPackLoader::ActivePack->OverscanStretch;
 
@@ -116,6 +117,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	SnesHdPixelData* hdBuffer = console->GetPpu()->GetHdScreenBuffer();
 	SnesHdPixelData* hdSubBuffer = console->GetPpu()->GetHdSubScreenOutputBuffer();
 	SnesHdPixelData* hdBehindBuffer = console->GetPpu()->GetHdBehindScreenBuffer();
+	// Index des queues (sprites + additions) fige par SnesPpu::SendFrame, lu UNE fois ici
+	// en meme temps que les buffers HD pour que tout corresponde a la meme frame.
+	int hdReadIndex = SnesHdPackLoader::ActivePack->ActiveSpriteQueueReadIndex;
 
 	if(_zBuffer.size() != outWidth * hdHeight) {
 		_zBuffer.resize(outWidth * hdHeight);
@@ -248,10 +252,18 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						: _calculatedPalette[currentSnesPixel];
 
 					sdColorRow[x].color = sdColor;
-					if(applyColorMath) {
-						sdColorRow[x].diffR = ((sdColor >> 16) & 0xFF) - baseR;
-						sdColorRow[x].diffG = ((sdColor >> 8) & 0xFF) - baseG;
-						sdColorRow[x].diffB = (sdColor & 0xFF) - baseB;
+					// Color math PAR PIXEL : on compare la couleur SD finale (apres fenetres /
+					// color math) a la couleur Mode 7 brute de CE pixel. Sans color math, l'ecart
+					// est nul. Avant, la reference etait le 1er pixel Mode 7 de la ligne, ce qui
+					// injectait les variations de la texture SD dans l'image HD.
+					// Pixels ou le Mode 7 n'est pas au premier plan (sprite devant) : pas d'ecart,
+					// sinon les couleurs du sprite teinteraient le decor.
+					const SnesHdPixelData& m7Px = hdBuffer[currentOffset];
+					if(applyColorMath && m7Px.IsMode7 && !SnesHdPackLoader::ActivePack->IsColorMathDisabled) {
+						uint32_t pxBase = _calculatedPalette[m7Px.BaseColor];
+						sdColorRow[x].diffR = ((sdColor >> 16) & 0xFF) - (int)((pxBase >> 16) & 0xFF);
+						sdColorRow[x].diffG = ((sdColor >> 8) & 0xFF) - (int)((pxBase >> 8) & 0xFF);
+						sdColorRow[x].diffB = (sdColor & 0xFF) - (int)(pxBase & 0xFF);
 					} else {
 						sdColorRow[x].diffR = 0;
 						sdColorRow[x].diffG = 0;
@@ -622,7 +634,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 				bool alreadyCaptured = false;
 				for(int i = (int)tilesToExpand.size() - 1; i >= 0; i--) {
-					if(tilesToExpand[i].Tile == hdData.Tile && tilesToExpand[i].startX == startX && tilesToExpand[i].startY == startY) {
+					if(tilesToExpand[i].Tile == hdData.Tile &&
+					   tilesToExpand[i].startX == startX &&
+					   tilesToExpand[i].startY == startY &&
+					   tilesToExpand[i].oamIndex == hdData.OamIndex) {
 						alreadyCaptured = true;
 						break;
 					}
@@ -646,7 +661,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 					bool alreadyCaptured = false;
 					for(int i = (int)tilesToExpand.size() - 1; i >= 0; i--) {
-						if(tilesToExpand[i].Tile == hdBehindData.Tile && tilesToExpand[i].startX == startX && tilesToExpand[i].startY == startY) {
+						if(tilesToExpand[i].Tile == hdBehindData.Tile &&
+						   tilesToExpand[i].startX == startX &&
+						   tilesToExpand[i].startY == startY &&
+						   tilesToExpand[i].oamIndex == hdBehindData.OamIndex) {
 							alreadyCaptured = true;
 							break;
 						}
@@ -661,21 +679,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				}
 			}
 
-			bool hasHdReplacement = (hdData.Tile != nullptr && !hdData.Tile->HdTileData.empty());
-			bool isTileDisabled = (hdData.Tile != nullptr && hdData.Tile->IsDisabled);
-			bool hideNative = hasHdReplacement || isTileDisabled;
-
-			if(hdData.IsSprite && SnesHdPackLoader::ActivePack->DisableOriginalSprites) {
-				hideNative = true;
-			} else if(!hdData.IsSprite && SnesHdPackLoader::ActivePack->DisableOriginalTiles) {
-				hideNative = true;
-			}
-
-
-			if(hideNative) {
-				continue;
-			}  
-
+			// Rendu standard du pixel : ApplyFilterSpritesStandard gère l'effacement du sprite natif
+			// et la restauration de UnderlyingColor (évite les empreintes noires sous les sprites HD).
 			ApplyFilterSpritesStandard(outX, outY, scale, outWidth, sdColor, hdData, pixelZ, out);
 		}
 	} 
@@ -686,7 +691,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	if(SnesHdPackLoader::ActivePack) {
 		bool overscanFrame = console->GetPpu()->GetState().OverscanMode;
 
-		for(const auto& add : SnesHdPackLoader::ActivePack->ActiveAdditionsQueue) {
+		// Queues figees par SnesPpu::SendFrame (hdReadIndex lu au debut du filtre)
+		for(const auto& add : SnesHdPackLoader::ActivePack->ActiveAdditionsQueues[hdReadIndex]) {
 			SnesHdPackTileInfo* hdTile = SnesHdPackLoader::GetHdTile(
 				add.MemoryHash,
 				add.PaletteHash,
@@ -714,6 +720,49 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					128
 				});
 			}
+		}
+
+		// ====================================================================
+		// INJECTION DE TOUS LES SPRITES HD DE LA FRAME (ActiveSpritesQueues - double-buffered)
+		// Résout la superposition de 3+ sprites (mini-map Mario Kart, Zelda, etc.)
+		// ====================================================================
+		const uint8_t* pSpritePri = console->GetPpu()->GetCurrentSpritePriorities();
+
+		for(const auto& spr : SnesHdPackLoader::ActivePack->ActiveSpritesQueues[hdReadIndex]) {
+			if(spr.HdTile == nullptr || spr.HdTile->HdTileData.empty()) continue;
+
+			// Coordonnées exactes de la tuile 8x8 dans le repère de tilesToExpand
+			int tileStartX = spr.StartX + sprOffsetX;
+			int tileStartY = spr.StartY + sprOffsetY;
+
+			// Déduplication : évite d'ajouter deux fois la même tuile pour le même sprite au même emplacement
+			bool alreadyCaptured = false;
+			for(int i = (int)tilesToExpand.size() - 1; i >= 0; i--) {
+				if(tilesToExpand[i].Tile == spr.HdTile &&
+				   tilesToExpand[i].startX == tileStartX &&
+				   tilesToExpand[i].startY == tileStartY &&
+				   tilesToExpand[i].oamIndex == spr.OamIndex) {
+					alreadyCaptured = true;
+					break;
+				}
+			}
+			if(alreadyCaptured) continue;
+
+			// Calcul du Z-index cohérent avec Step 1
+			uint8_t mappedPrio = pSpritePri[spr.SnesPriority & 3];
+			uint8_t sprPixelZ  = 20 + (mappedPrio * 4);
+			if(spr.SnesPriority >= 2) sprPixelZ += 2;
+
+			tilesToExpand.push_back({
+				spr.HdTile,
+				tileStartX,
+				tileStartY,
+				sprPixelZ,
+				spr.HFlip,
+				spr.VFlip,
+				0,
+				spr.OamIndex
+			});
 		}
 	}
 
@@ -749,6 +798,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 		return a.oamIndex > b.oamIndex;
 	});
+
 
 	uint32_t hdWidth = outWidth;
 
@@ -1426,13 +1476,19 @@ void SnesHdVideoFilter::ApplyFilterSpritesStandard(uint32_t x, uint32_t y, uint3
 				uint32_t currentOutColor = out[pixelIndex];
 
 				if((currentOutColor & 0x00FFFFFF) != 0) {
-					// 1. Un décor HD (Mode 7 ou <background>) a déjà été dessiné : on le conserve !
-					finalColor = currentOutColor;
-				} else if(!hdData.IsSprite || SnesHdPackLoader::ActivePack->DisableOriginalSprites || SnesHdPackLoader::ActivePack->DisableOriginalTiles) {
-					// 2. Pas de décor HD et décors originaux/sprites désactivés : transparent (0x00000000)
+					// 1. Un décor HD (Mode 7 ou <background>) a déjà été dessiné : on le conserve,
+					// COULEUR ET Z-BUFFER. Remettre le Z à 0 ici laissait les passes suivantes
+					// (ex : <background> de Z bas) repeindre le décor là où le sprite SD avait des
+					// pixels mais où le PNG HD du sprite est transparent ("empreintes" sur le Mode 7).
+					continue;
+				} else if(hdData.IsSprite) {
+					// 2. Pour un sprite : restauration de la couleur du décor cachée sous le sprite
+					finalColor = _calculatedPalette[hdData.UnderlyingColor] | 0xFF000000;
+				} else if(SnesHdPackLoader::ActivePack->DisableOriginalTiles) {
+					// 3. Pour une tuile de décor désactivée : transparent
 					finalColor = 0x00000000;
 				} else {
-					// 3. Mode standard avec décors originaux activés : restauration de la couleur d'arrière-plan
+					// 4. Restauration standard de l'arrière-plan
 					finalColor = _calculatedPalette[hdData.UnderlyingColor] | 0xFF000000;
 				}
 
@@ -1818,10 +1874,39 @@ bool SnesHdPackSpriteNearbyCondition::InternalCheckCondition(int x, int y, SnesH
 	static constexpr uint8_t oamHeight[16] = { 8, 8, 8, 16, 16, 32, 32, 32, 16, 32, 64, 32, 64, 64, 64, 32 };
 	static constexpr uint16_t sign[2] = { 0x0000, 0xFF00 };
 
-	int targetX = CheckAnyX ? -1 : (x + OffsetX);
-	int targetY = CheckAnyY ? -1 : (y + OffsetY);
-
 	SnesPpuState& state = _screenInfo->Ppu->GetStateRef();
+
+	// Flip de la tile porteuse de la condition (convention Mesen NES, comme TileNearby) :
+	// les decalages s'inversent quand la tile evaluee est retournee.
+	// 1) Cas normal : le PPU transmet l'orientation reelle via 'tile' (GetHdTile).
+	// 2) Repli (appel sans contexte, ex. additions) : on cherche dans l'OAM le premier
+	//    sprite qui recouvre (x, y) - moins fiable si des sprites se chevauchent.
+	bool evaluatingHFlip = false;
+	bool evaluatingVFlip = false;
+	if(tile != nullptr) {
+		evaluatingHFlip = tile->HFlip;
+		evaluatingVFlip = tile->VFlip;
+	} else for(uint8_t si = 0; si < 128; si++) {
+		int soff = si * 4;
+		uint8_t htv = oamRam[0x200 | (si >> 2)] >> ((si << 1) & 0x06);
+		int16_t sx = (int16_t)(sign[htv & 0x01] | oamRam[soff]);
+		uint8_t sy_raw = oamRam[soff + 1];
+		if(sy_raw >= 240 && sy_raw != 255) continue;
+		uint8_t smd = state.OamMode | ((htv & 0x02) << 2); // << 2 (et non << 4) : index 0-15 dans oamWidth/oamHeight
+		int sw = oamWidth[smd];
+		int sh = oamHeight[smd];
+		if(x >= (int)sx && x < (int)(sx + sw) && y >= (int)sy_raw && y < (int)(sy_raw + sh)) {
+			uint8_t fl = oamRam[soff + 3];
+			evaluatingHFlip = (fl & 0x40) != 0;
+			evaluatingVFlip = (fl & 0x80) != 0;
+			break;
+		}
+	}
+
+	int xSign = evaluatingHFlip ? -1 : 1;
+	int ySign = evaluatingVFlip ? -1 : 1;
+	int targetX = CheckAnyX ? -1 : (x + OffsetX * xSign);
+	int targetY = CheckAnyY ? -1 : (y + OffsetY * ySign);
 
 	// --- LOG DE DÉBOGAGE SUR FICHIER HARDCODÉ ---
 	/*

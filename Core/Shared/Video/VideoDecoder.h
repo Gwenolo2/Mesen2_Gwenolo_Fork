@@ -64,6 +64,12 @@ public:
 
 	void WaitForAsyncFrameDecode();
 
+	// HD PACK : attente active (sans sleep) de la fin du decodage de la frame precedente.
+	// Meme attente que celle faite au debut de UpdateFrame, mais appelable AVANT, pour que
+	// le PPU puisse figer ses donnees HD sans toucher a celles en cours de lecture.
+	void WaitForPreviousDecode() { while(_frameChanged) {} }
+	bool IsDecoding() { return _frameChanged; }
+
 	bool IsRunning();
 	void StartThread();
 	void StopThread();

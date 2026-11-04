@@ -38,6 +38,10 @@ struct SpriteInfo {
   bool VerticalMirror; // ← flag & 0x80 de l'OAM
   // Pointeur ultra-léger vers l'image en RAM (nullptr par défaut)
   SnesHdPackTileInfo *HdTile = nullptr;
+  // HD PACK : index OAM du sprite dont la tile est en cours de fetch.
+  // Fige dans FetchSpriteAttributes : Index est deja ecrase par FetchSpritePosition
+  // (sprite suivant) avant le 2e cycle de FetchSpriteTile de la derniere colonne.
+  uint8_t FetchOamIndex = 0xFF;
 
   bool IsVisible(uint16_t scanline, bool interlace) {
     if (X != -256 && (X + Width <= 0 || X > 255)) {

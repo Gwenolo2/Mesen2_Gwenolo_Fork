@@ -151,6 +151,19 @@ struct ActiveHdAddition
 	bool HFlip;
 	bool VFlip;
 };
+//-------------------------------------------------------------------
+// Structure qui référence TOUS les sprites HD actifs sur la frame.
+// Permet de gérer les chevauchements de 3+ sprites (mini-map MK, Zelda, etc.)
+struct ActiveHdSprite
+{
+	SnesHdPackTileInfo* HdTile; // Pointeur vers la tuile HD (nullptr = pas de remplacement)
+	int StartX;                 // Coordonnée X exacte (DrawX) du groupe de 8px
+	int StartY;                 // Coordonnée Y exacte de la tuile 8x8 dans le buffer d'image final
+	uint8_t SnesPriority;       // Priorité OAM brute (0-3), sera convertie par la table de priorité
+	uint8_t OamIndex;           // Index OAM (0 = priorité la plus haute en SNES)
+	bool HFlip;
+	bool VFlip;
+};
 // ---------------------------------------------------------
 namespace std
 {
@@ -687,7 +700,21 @@ public:
 	std::unordered_map<uint64_t, std::vector<SnesHdPackAddition>> Additions;
 
 	// Liste des additions qui doivent être dessinées sur la frame en cours
-	std::vector<ActiveHdAddition> ActiveAdditionsQueue;
+	// Double-bufferisee comme ActiveSpritesQueues (meme index d'ecriture / de lecture).
+	std::vector<ActiveHdAddition> ActiveAdditionsQueues[2];
+
+	// Liste de TOUS les sprites HD actifs sur la frame en cours (double-bufferisée).
+	// - Le PPU écrit dans ActiveSpritesQueues[ActiveSpriteQueueWriteIndex].
+	// - SnesPpu::SendFrame() fige ActiveSpriteQueueReadIndex = WriteIndex : c'est la queue
+	//   de la frame envoyée au thread vidéo.
+	// - Le filtre lit ActiveSpritesQueues[ActiveSpriteQueueReadIndex].
+	// - Au scanline 0, le PPU ne bascule sur l'autre queue que si la queue courante a été
+	//   remise au filtre (WriteIndex == ReadIndex), puis la vide.
+	// Ainsi la queue lue par le filtre correspond toujours à la frame décodée, et n'est
+	// jamais vidée pendant sa lecture.
+	std::vector<ActiveHdSprite> ActiveSpritesQueues[2];
+	int ActiveSpriteQueueWriteIndex = 0;
+	int ActiveSpriteQueueReadIndex = 1;
 
 	// Le dictionnaire qui fait le lien entre la Piste (1, 2, 3...) et l'audio HD
 	// Avant : std::unordered_map<int, SnesHdMsuTrack> MsuTracks;

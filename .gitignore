@@ -17,6 +17,8 @@ Core/SNES/HdPacks/*.md
 Core/SNES/*.md
 git_repo_structure.txt
 _push_to_Git.bat.txt
+docs/
+CLAUDE.md
 
 # Build results
 
@@ -201,3 +203,11 @@ packages/*
 
 TestHelper/*
 UI/Dependencies.zip
+
+# --- Archives de sauvegarde, partout dans le depot (ajout 2026-11-04) ---
+# (les .7z deja suivis dans Core/ restent suivis tant qu'on ne les retire pas avec git rm --cached)
+*.zip
+*.7z
+
+# --- Sauvegardes temporaires des sessions Claude ---
+_backup_claude/

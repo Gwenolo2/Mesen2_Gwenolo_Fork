@@ -97,6 +97,9 @@ void SnesPpu::PowerOn() {
   _currentHdBuffer = _hdOutputBuffers[0];
   _currentHdSubBuffer = _hdSubOutputBuffers[0];
   _currentHdBehindBuffer = _hdBehindOutputBuffers[0];
+  _readyHdBuffer = _currentHdBuffer;
+  _readyHdSubBuffer = _currentHdSubBuffer;
+  _readyHdBehindBuffer = _currentHdBehindBuffer;
 
 
   _state = {};
@@ -649,10 +652,17 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t &hClock) {
         _mosaicScanlineCounter =
             _state.MosaicEnabled ? _state.MosaicSize + 1 : 0;
 
-		  // --- NOUVEAU : RESET DES ADDITIONS POUR LA FRAME ---
+		  // --- NOUVEAU : RESET DES ADDITIONS ET DES SPRITES HD POUR LA FRAME ---
 		  memset(_additionTriggered, 0, sizeof(_additionTriggered));
 		  if(SnesHdPackLoader::ActivePack) {
-			  SnesHdPackLoader::ActivePack->ActiveAdditionsQueue.clear();
+			  // Double-buffering : on ne bascule que si la queue courante a ete remise
+			  // au filtre par SendFrame (sinon frame non envoyee : on la reutilise).
+			  SnesHdPackData* hdPack = SnesHdPackLoader::ActivePack.get();
+			  if(hdPack->ActiveSpriteQueueWriteIndex == hdPack->ActiveSpriteQueueReadIndex) {
+				  hdPack->ActiveSpriteQueueWriteIndex ^= 1;
+			  }
+			  hdPack->ActiveSpritesQueues[hdPack->ActiveSpriteQueueWriteIndex].clear();
+			  hdPack->ActiveAdditionsQueues[hdPack->ActiveSpriteQueueWriteIndex].clear();
 		  }
 
         // Update overclock timings once per frame
@@ -988,6 +998,9 @@ void SnesPpu::FetchSpriteAttributes(uint16_t oamAddress)
 		_timeOver = true;
 	}
 
+	// HD PACK : on fige l'index OAM de CETTE tile (cf. SpriteInfo::FetchOamIndex)
+	_currentSprite.FetchOamIndex = (uint8_t)((oamAddress >> 2) & 0x7F);
+
 	uint8_t flags = _oamRam[oamAddress + 1];
 	bool useSecondTable = (flags & 0x01) != 0;
 	_currentSprite.Palette = (flags >> 1) & 0x07;
@@ -1165,7 +1178,7 @@ void SnesPpu::FetchSpriteAttributes(uint16_t oamAddress)
 					activeAdd.HFlip = hFlip;
 					activeAdd.VFlip = vFlip;
 
-					pack->ActiveAdditionsQueue.push_back(activeAdd);
+					pack->ActiveAdditionsQueues[pack->ActiveSpriteQueueWriteIndex].push_back(activeAdd);
 				}
 			}
 		}
@@ -1193,6 +1206,39 @@ void SnesPpu::FetchSpriteTile(bool secondCycle) {
     _currentSprite.FetchAddress = (_currentSprite.FetchAddress + 8) & 0x7FFF;
   } else {
     int16_t xPos = _currentSprite.DrawX;
+
+    // HD PACK : Enregistrement de cette tuile (groupe de 8px) dans la file globale de la frame.
+    // On ne le fait qu'une fois par tuile 8x8 (dédupliquée sur ses 8 scanlines).
+    // Les coordonnées StartX et StartY sont calculées exactement selon la même formule que Step 1.
+    if(_currentSprite.HdTile != nullptr && SnesHdPackLoader::ActivePack != nullptr) {
+      auto& sprQueue = SnesHdPackLoader::ActivePack->ActiveSpritesQueues[SnesHdPackLoader::ActivePack->ActiveSpriteQueueWriteIndex];
+      int startX = (int)xPos;
+      int visualY = _currentSprite.VerticalMirror ? (7 - _currentSprite.TileY) : _currentSprite.TileY;
+      int startY = (_overscanFrame ? (int)_scanline : ((int)_scanline + 7)) - visualY;
+
+      bool alreadyQueued = false;
+      for(int qi = (int)sprQueue.size() - 1; qi >= 0 && qi >= (int)sprQueue.size() - 64; qi--) {
+        if(sprQueue[qi].HdTile == _currentSprite.HdTile &&
+           sprQueue[qi].StartX == startX &&
+           sprQueue[qi].StartY == startY &&
+           sprQueue[qi].OamIndex == _currentSprite.FetchOamIndex) {
+          alreadyQueued = true;
+          break;
+        }
+      }
+      if(!alreadyQueued) {
+        ActiveHdSprite entry;
+        entry.HdTile       = _currentSprite.HdTile;
+        entry.StartX       = startX;
+        entry.StartY       = startY;
+        entry.SnesPriority = _currentSprite.Priority;
+        entry.OamIndex     = _currentSprite.FetchOamIndex;
+        entry.HFlip        = _currentSprite.HorizontalMirror;
+        entry.VFlip        = _currentSprite.VerticalMirror;
+        sprQueue.push_back(entry);
+      }
+    }
+
     for (int x = 0; x < 8; x++) {
       if (xPos + x < 0 || xPos + x > 255) {
         continue;
@@ -1216,7 +1262,7 @@ void SnesPpu::FetchSpriteTile(bool secondCycle) {
             _currentSprite.HdTile, xOffset, _currentSprite.TileY,
             _currentSprite.HorizontalMirror, _currentSprite.VerticalMirror};
         // Propagation du vrai index OAM (0=priorité la plus haute) pour le tri dans le filtre HD
-        _hdSpriteBufferCopy[targetX].OamIndex = _currentSprite.Index;
+        _hdSpriteBufferCopy[targetX].OamIndex = _currentSprite.FetchOamIndex;
         _hdSpriteBufferCopy[targetX].IsSprite = true;
         _hdSpriteBufferCopy[targetX].SnesPriorityLevel = _currentSprite.Priority;
         _hdSpriteBufferCopy[targetX].IsHighPriority = (_currentSprite.Priority >= 2);
@@ -1233,7 +1279,7 @@ void SnesPpu::FetchSpriteTile(bool secondCycle) {
             _currentSprite.HdTile, xOffset, _currentSprite.TileY,
             _currentSprite.HorizontalMirror, _currentSprite.VerticalMirror};
         // Propagation du vrai index OAM même pour les pixels transparents HD
-        _hdSpriteBufferCopy[targetX].OamIndex = _currentSprite.Index;
+        _hdSpriteBufferCopy[targetX].OamIndex = _currentSprite.FetchOamIndex;
         _hdSpriteBufferCopy[targetX].IsSprite = true;
         _hdSpriteBufferCopy[targetX].SnesPriorityLevel = _currentSprite.Priority;
         _hdSpriteBufferCopy[targetX].IsHighPriority = (_currentSprite.Priority >= 2);
@@ -1328,7 +1374,7 @@ void SnesPpu::ScanSpritesForHdAdditions(SnesHdPackData* pack)
 					activeAdd.HFlip = hFlip;
 					activeAdd.VFlip = vFlip;
 
-					pack->ActiveAdditionsQueue.push_back(activeAdd);
+					pack->ActiveAdditionsQueues[pack->ActiveSpriteQueueWriteIndex].push_back(activeAdd);
 				}
 			}
 		}
@@ -1430,7 +1476,7 @@ void SnesPpu::ScanSpritesForHdAdditions(SnesHdPackData* pack)
 					activeAdd.HFlip = hFlip;
 					activeAdd.VFlip = vFlip;
 
-					pack->ActiveAdditionsQueue.push_back(activeAdd);
+					pack->ActiveAdditionsQueues[pack->ActiveSpriteQueueWriteIndex].push_back(activeAdd);
 
 					// =================================================================
 					// ECRITURE DES DETAILS DANS LE MOUCHARD
@@ -1873,6 +1919,8 @@ void SnesPpu::RenderBgColor() {
 
 void SnesPpu::RenderSprites(const uint8_t priority[4])
 {
+	memcpy(_currentSpritePriorities, priority, 4);
+
 	if(!IsRenderRequired(SnesPpu::SpriteLayerIndex)) {
 		return;
 	}
@@ -2872,6 +2920,23 @@ void SnesPpu::SendFrame() {
     FillInterlacedFrame();
   }
   _needFullFrame = false;
+
+  // HD PACK : on fige les donnees HD de CETTE frame pour le thread video
+  // (le PPU continue d'emuler et basculera sur les autres buffers au scanline 0).
+  // On attend d'abord la fin du decodage de la frame precedente : sinon, si le filtre
+  // est encore en train de la traiter (scrolling rapide, scale 4...), on lui changerait
+  // ses buffers / sa queue en plein milieu -> sprites dedoubles.
+  if (!_emu->IsRunAheadFrame()) {
+    _emu->GetVideoDecoder()->WaitForPreviousDecode();
+    _readyHdBuffer = _currentHdBuffer;
+    _readyHdSubBuffer = _currentHdSubBuffer;
+    _readyHdBehindBuffer = _currentHdBehindBuffer;
+    memcpy(_readySpritePriorities, _currentSpritePriorities, sizeof(_readySpritePriorities));
+    if (SnesHdPackLoader::ActivePack) {
+      SnesHdPackLoader::ActivePack->ActiveSpriteQueueReadIndex =
+          SnesHdPackLoader::ActivePack->ActiveSpriteQueueWriteIndex;
+    }
+  }
 
   RenderedFrame frame(_currentBuffer, width, height,
                       _useHighResOutput ? 0.5 : 1.0, _frameCount,

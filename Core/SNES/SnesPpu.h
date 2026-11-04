@@ -55,6 +55,7 @@ private:
 	uint8_t _spriteCount = 0;
 	uint8_t _spriteTileCount = 0;
 	bool _hasSpritePriority[4] = {};
+	uint8_t _currentSpritePriorities[4] = { 2, 4, 6, 7 };
 
 	uint16_t _scanline = 0;
 	uint32_t _frameCount = 0;
@@ -99,6 +100,14 @@ private:
 
 	SnesHdPixelData* _hdBehindOutputBuffers[2] = {};
 	SnesHdPixelData* _currentHdBehindBuffer = nullptr;
+
+	// Buffers HD de la DERNIERE frame envoyee au decodeur video (figes dans SendFrame).
+	// Le filtre HD (thread video) doit lire ceux-ci et non les _current* que le PPU
+	// est peut-etre deja en train de remplir pour la frame suivante.
+	SnesHdPixelData* _readyHdBuffer = nullptr;
+	SnesHdPixelData* _readyHdSubBuffer = nullptr;
+	SnesHdPixelData* _readyHdBehindBuffer = nullptr;
+	uint8_t _readySpritePriorities[4] = { 2, 4, 7, 10 };
 
 	bool _isHdPackActive = false;
 
@@ -303,12 +312,13 @@ public:
 	void Serialize(Serializer &s) override;
  
 
-	SnesHdPixelData* GetHdScreenBuffer() { return _currentHdBuffer; }
+	SnesHdPixelData* GetHdScreenBuffer() { return _readyHdBuffer; }
 	SnesHdPixelData* GetHdSubScreenBuffer() { return _hdSubScreenBuffer; }
-	SnesHdPixelData* GetHdSubScreenOutputBuffer() { return _currentHdSubBuffer; }
+	SnesHdPixelData* GetHdSubScreenOutputBuffer() { return _readyHdSubBuffer; }
 	// Buffer des sprites en second plan (sous un sprite plus prioritaire)
 	SnesHdPixelData* GetHdSpriteBehindBuffer() { return _hdSpriteBufferBehind; }
-	SnesHdPixelData* GetHdBehindScreenBuffer() { return _currentHdBehindBuffer; }
+	SnesHdPixelData* GetHdBehindScreenBuffer() { return _readyHdBehindBuffer; }
+	const uint8_t* GetCurrentSpritePriorities() const { return _readySpritePriorities; }
 
 
 	void ScanSpritesForHdAdditions(SnesHdPackData* pack);

@@ -1528,11 +1528,22 @@ SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t pa
 	key.IsHFlip = isHFlip;
 	key.IsVFlip = isVFlip;
 
+	// Contexte transmis aux conditions : orientation REELLE de la tile a l'ecran.
+	// Permet a hmirror / vmirror / tileNearby / spriteNearby de connaitre le flip
+	// (convention Mesen NES : les decalages des conditions "nearby" sont relatifs a
+	// l'orientation de la tile et s'inversent quand elle est retournee).
+	// Reste valable dans les fallbacks 3a/3b (PNG non flippe) : la tile est toujours
+	// retournee a l'ecran.
+	SnesHdPixelData condCtx;
+	condCtx.HFlip = isHFlip;
+	condCtx.VFlip = isVFlip;
+	condCtx.IsSprite = isSprite;
+
 	// 1. Recherche prioritaire : Palette spécifique explicite
 	auto it = ActivePack->TileByKey.find(key);
 	if(it != ActivePack->TileByKey.end()) {
 		for(SnesHdPackTileInfo* tile : it->second) {
-			if(tile->MatchesCondition(x, y, nullptr)) {
+			if(tile->MatchesCondition(x, y, &condCtx)) {
 				return tile; // Trouvé et condition validée !
 			}
 		}
@@ -1544,7 +1555,7 @@ SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t pa
 		it = ActivePack->TileByKey.find(key);
 		if(it != ActivePack->TileByKey.end()) {
 			for(SnesHdPackTileInfo* tile : it->second) {
-				if(tile->MatchesCondition(x, y, nullptr)) {
+				if(tile->MatchesCondition(x, y, &condCtx)) {
 					return tile;
 				}
 			}
@@ -1561,7 +1572,7 @@ SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t pa
 		it = ActivePack->TileByKey.find(key);
 		if(it != ActivePack->TileByKey.end()) {
 			for(SnesHdPackTileInfo* tile : it->second) {
-				if(tile->MatchesCondition(x, y, nullptr)) {
+				if(tile->MatchesCondition(x, y, &condCtx)) {
 					return tile;
 				}
 			}
@@ -1573,7 +1584,7 @@ SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t pa
 			it = ActivePack->TileByKey.find(key);
 			if(it != ActivePack->TileByKey.end()) {
 				for(SnesHdPackTileInfo* tile : it->second) {
-					if(tile->MatchesCondition(x, y, nullptr)) {
+					if(tile->MatchesCondition(x, y, &condCtx)) {
 						return tile;
 					}
 				}

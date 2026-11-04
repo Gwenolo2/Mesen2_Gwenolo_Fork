@@ -21,6 +21,11 @@
 #include <sstream>
 #include <ctime>
 
+
+uint32_t SnesHdPackBuilder::_sheetWidth = 16;
+uint32_t SnesHdPackBuilder::_sheetHeight = 16;
+
+
 std::string GetCurrentDateTimeString()
 {
 	auto now = std::chrono::system_clock::now();
@@ -120,6 +125,11 @@ void SnesHdPackBuilder::StartRecording(HdPackBuilderOptions options) {
   _processedTiles.clear();
   _paletteTiles.clear();
   _isActive = true;
+
+
+  // Validation et repli sur 16 si les valeurs sont hors limites
+  _sheetWidth = (options.SheetWidth >= 1 && options.SheetWidth <= 256) ? options.SheetWidth : 16;
+  _sheetHeight = (options.SheetHeight >= 1 && options.SheetHeight <= 256) ? options.SheetHeight : 16;
 
   // Log de confirmation
   std::string logPath =
@@ -684,8 +694,16 @@ void SnesHdPackBuilder::StopRecording()
 	if(scale < 1) scale = 4;
 
 	int tileSize = 8 * scale;
-	int tilesPerRow = 16;
+
+
+	/*int tilesPerRow = 16;
 	int maxTilesPerSheet = 256;
+	*/
+	// Dimensions dynamiques des planches
+	int tilesPerRow = (int)_sheetWidth;
+	int tilesPerColumn = (int)_sheetHeight;
+	int maxTilesPerSheet = tilesPerRow * tilesPerColumn;
+
 
 	for(auto& entry : _paletteTiles) {
 		uint32_t paletteIndex = entry.first;
@@ -828,7 +846,7 @@ void SnesHdPackBuilder::StopRecording()
 				int count = std::min(maxTilesPerSheet, (int)tiles.size() - i);
 				int rows = (count + tilesPerRow - 1) / tilesPerRow;
 				int sheetWidth = tilesPerRow * tileSize;
-				int sheetHeight = rows * tileSize;
+				int sheetHeight = rows * tileSize; // ou tilesPerColumn * tileSize si tu souhaites une hauteur fixe
 
 				std::vector<uint32_t> sheetPixels(sheetWidth * sheetHeight, 0);
 
@@ -850,7 +868,6 @@ void SnesHdPackBuilder::StopRecording()
 					}
 
 					tileDefinitions.push_back({ tile.MemoryHash, paletteIndex, currentImageIndex, tx * tileSize, ty * tileSize, tile.VramTileIndex });
-
 					if(_options.GenerateHdPackMetadata) {
 
 						// GESTION DYNAMIQUE DU TAG TILE

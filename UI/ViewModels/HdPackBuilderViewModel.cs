@@ -21,7 +21,7 @@ namespace Mesen.ViewModels
 	{
 		[Reactive] public string SaveFolder { get; set; }
 
-		// NOUVEAU : Propriété pour le dossier d'entrée des PNG
+		// NEW for SNES : Propriété pour le dossier d'entrée des PNG
 		[Reactive] public string InputPngFolder { get; set; }
 
 		[Reactive] public bool IsRecording { get; set; }
@@ -46,7 +46,7 @@ namespace Mesen.ViewModels
 			Config = ConfigManager.Config.HdPackBuilder;
 			SaveFolder = Path.Join(ConfigManager.HdPackFolder, EmuApi.GetRomInfo().GetRomName());
 
-			// NOUVEAU : Initialisation par défaut du dossier d'entrée (peut être le même que SaveFolder ou un sous-dossier)
+			// NEW FOR SNES : Initialisation par défaut du dossier d'entrée (peut être le même que SaveFolder ou un sous-dossier)
 			InputPngFolder = Path.Join(SaveFolder, "Input_PNGs");
 
 			UpdateFilterDropdown();
@@ -109,7 +109,7 @@ namespace Mesen.ViewModels
 			IsRecording = true;
 
 			Task.Run(() => {
-				// NOUVEAU : On passe le InputPngFolder à ToInterop !
+				// NEW FOR SNES : On passe le InputPngFolder à ToInterop !
 				HdPackBuilderOptions options = Config.ToInterop(SaveFolder, InputPngFolder);
 
 				if(!IsBankSizeVisible) {

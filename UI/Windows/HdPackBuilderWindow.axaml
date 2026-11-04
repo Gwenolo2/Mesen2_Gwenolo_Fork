@@ -86,6 +86,21 @@
 					<Image Stretch="None" Margin="5 0" Source="/Assets/Help.png" ToolTip.Tip="Maps generated tiles directly to existing PNGs in the target folder based on pixel similarity. Incompatible with 'Update Hd Pack'." ToolTip.Placement="Right" ToolTip.ShowDelay="100" />
 				</WrapPanel>
 
+				<!-- Dimensions de la planche PNG (largeur x hauteur en tuiles) -->
+				<Grid ColumnDefinitions="Auto,80,Auto,80" RowDefinitions="Auto" Margin="0,5" IsVisible="{Binding IsSnes}">
+					<TextBlock Text="Largeur (tuiles) :" VerticalAlignment="Center" Margin="0,0,5,0" />
+					<TextBox Grid.Column="1"
+								Text="{Binding Config.SheetWidth}"
+								VerticalAlignment="Center"
+								HorizontalContentAlignment="Center" />
+
+					<TextBlock Grid.Column="2" Text="Hauteur (tuiles) :" VerticalAlignment="Center" Margin="10,0,5,0" />
+					<TextBox Grid.Column="3"
+								Text="{Binding Config.SheetHeight}"
+								VerticalAlignment="Center"
+								HorizontalContentAlignment="Center" />
+				</Grid>
+
 			</c:OptionSection>
 		</Grid>
 	</DockPanel>

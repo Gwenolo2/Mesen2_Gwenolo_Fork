@@ -50,6 +50,27 @@ namespace Mesen.Config
 				}
 			}
 		}
+
+
+		// ====================================================================
+		// DIMENSIONS DES PLANCHES PNG (Largeur et Hauteur en tuiles de 8x8)
+		// ====================================================================
+		private uint _sheetWidth = 16;
+		public uint SheetWidth
+		{
+			get => _sheetWidth;
+			set => _sheetWidth = Math.Clamp(value, 1u, 256u);
+		}
+
+		private uint _sheetHeight = 16;
+		public uint SheetHeight
+		{
+			get => _sheetHeight;
+			set => _sheetHeight = Math.Clamp(value, 1u, 256u);
+		}
+
+
+
 		// ====================================================================
 
 		public HdPackBuilderOptions ToInterop(string saveFolder, string inputPngFolder = "")
@@ -71,7 +92,10 @@ namespace Mesen.Config
 				PreventVMirroredSpritesGrabbing = true,
 				GenerateHdPackMetadata = GenerateHdPackMetadata,
 				UpdateIfExists = UpdateIfExists,
-				BuildFromPngFolder = BuildFromPngFolder // NOUVEAU
+				BuildFromPngFolder = BuildFromPngFolder,
+				// Transmission des dimensions de planches au Core C++
+				SheetWidth = SheetWidth,
+				SheetHeight = SheetHeight
 			};
 		}
 	}
@@ -114,5 +138,9 @@ namespace Mesen.Config
 		[MarshalAs(UnmanagedType.I1)] public bool UpdateIfExists;
 
 		[MarshalAs(UnmanagedType.I1)] public bool BuildFromPngFolder;
+
+		public uint SheetWidth;
+		public uint SheetHeight;
+
 	}
 }
