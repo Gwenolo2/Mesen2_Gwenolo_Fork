@@ -109,6 +109,20 @@ private:
 	SnesHdPixelData* _readyHdBehindBuffer = nullptr;
 	uint8_t _readySpritePriorities[4] = { 2, 4, 7, 10 };
 
+	// HD PACK : masque de la color window de la frame en cours (1 = pixel dans la fenetre),
+	// rempli dans ApplyColorMath, decoupe en zones dans SendFrame.
+	uint8_t _colorWindowMask[256 * 240] = {};
+	uint16_t _cwRowFixedColor[240] = {};
+	uint8_t _cwRowOp[240] = {};
+	// Couleur de l'ecran principal AVANT color math, pour les pixels de la fenetre (double-bufferise :
+	// le filtre HD lit la frame figee pendant que le PPU remplit la suivante)
+	uint16_t _cwPreMathBuffers[2][256 * 240] = {};
+	uint16_t* _currentCwPreMath = _cwPreMathBuffers[0];
+	uint16_t* _readyCwPreMath = _cwPreMathBuffers[0];
+	std::string _lastColorWindowSignature;
+	uint32_t _lastColorWindowLogFrame = 0;
+	void UpdateColorWindowRegions();
+
 	bool _isHdPackActive = false;
 
 
@@ -319,6 +333,7 @@ public:
 	SnesHdPixelData* GetHdSpriteBehindBuffer() { return _hdSpriteBufferBehind; }
 	SnesHdPixelData* GetHdBehindScreenBuffer() { return _readyHdBehindBuffer; }
 	const uint8_t* GetCurrentSpritePriorities() const { return _readySpritePriorities; }
+	const uint16_t* GetColorWindowPreMathBuffer() const { return _readyCwPreMath; }
 
 
 	void ScanSpritesForHdAdditions(SnesHdPackData* pack);

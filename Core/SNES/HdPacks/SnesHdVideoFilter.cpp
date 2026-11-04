@@ -208,6 +208,41 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// en meme temps que les buffers HD pour que tout corresponde a la meme frame.
 	int hdReadIndex = SnesHdPackLoader::ActivePack->ActiveSpriteQueueReadIndex;
 
+	// ------------------------------------------------------------------
+	// COLOR WINDOW : zones dont l'effet SD est supprime (<disableAllColorMathWindow>,
+	// <disableColorMathWindow>HASH). Dans ces zones, on utilise la couleur de l'ecran
+	// principal AVANT color math (memorisee par le PPU) a la place du pixel SD final.
+	// ------------------------------------------------------------------
+	const uint16_t* cwPreMath = console->GetPpu()->GetColorWindowPreMathBuffer();
+	const auto& cwRegions = SnesHdPackLoader::ActivePack->ColorWindowRegions;
+	const auto& cwLabels = SnesHdPackLoader::ActivePack->ColorWindowLabels;
+	std::vector<char> cwOff(cwRegions.size(), 0);
+	bool anyCwOff = false;
+	if(!cwRegions.empty() && cwLabels.size() == 256 * 240 && _baseFrameInfo.Width == 256 && cwPreMath) {
+		auto condsOk = [](const std::vector<SnesHdPackCondition*>& conds) {
+			for(auto* c : conds) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+			return true;
+		};
+		bool all = false;
+		for(const auto& conds : SnesHdPackLoader::ActivePack->DisableAllColorMathWindowRules) {
+			if(condsOk(conds)) { all = true; break; }
+		}
+		for(size_t i = 0; i < cwRegions.size(); i++) {
+			if(all) { cwOff[i] = 1; }
+			else {
+				for(const auto& rule : SnesHdPackLoader::ActivePack->DisableColorMathWindowRules) {
+					if(rule.Hash == cwRegions[i].Hash && condsOk(rule.Conditions)) { cwOff[i] = 1; break; }
+				}
+			}
+			if(cwOff[i]) anyCwOff = true;
+		}
+	}
+	auto cwPixel = [&](uint32_t row, uint32_t col, uint16_t px) -> uint16_t {
+		if(!anyCwOff || row >= 240 || col >= 256) return px;
+		int16_t l = cwLabels[row * 256 + col];
+		return (l >= 0 && l < (int16_t)cwOff.size() && cwOff[l]) ? cwPreMath[row * 256 + col] : px;
+	};
+
 	if(_zBuffer.size() != outWidth * hdHeight) {
 		_zBuffer.resize(outWidth * hdHeight);
 	}
@@ -470,13 +505,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			fitReport += "[lignes " + std::to_string(y0) + "-" + std::to_string(y1 - 1) + " : " + verdict + (n >= 5 ? std::string(buf) : std::string()) + "] ";
 			y0 = y1;
 		}
-		{
-			static std::string s_lastFitPattern;
-			if(fitPattern != s_lastFitPattern) {
-				s_lastFitPattern = fitPattern;
-				if(!fitPattern.empty()) MessageManager::Log("[HD-MODE7] Lissage perspective : " + fitReport);
-			}
-		}
+		// (Journal du lissage retire : decommenter pour diagnostiquer)
+		// MessageManager::Log("[HD-MODE7] Lissage perspective : " + fitReport);
+		(void)fitPattern; (void)fitReport;
 	}
 
 	// ====================================================================
@@ -506,7 +537,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			uint32_t currentOffset = snesY * _baseFrameInfo.Width + x + srcX;
 			uint32_t sdColor = SnesHdPackLoader::ActivePack->IsColorMathDisabled
 				? baseSdColor
-				: _calculatedPalette[ppuOutputBuffer[currentOffset]];
+				: _calculatedPalette[cwPixel(snesY, x + srcX, ppuOutputBuffer[currentOffset])];
 			sdColorRow[x].color = sdColor;
 			// Color math PAR PIXEL (couleur SD finale - couleur Mode 7 brute de ce pixel),
 			// seulement si le Mode 7 est au premier plan (pas sous un sprite).
@@ -855,7 +886,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			uint32_t outX = x + dstX;
 
 			uint32_t bufferOffset = snesY * _baseFrameInfo.Width + snesX;
-			uint16_t snesPixel = ppuOutputBuffer[bufferOffset];
+			uint16_t snesPixel = cwPixel(snesY, snesX, ppuOutputBuffer[bufferOffset]);
 
 			SnesHdPixelData hdDataMain = hdBuffer[bufferOffset];
 			SnesHdPixelData hdDataSub = hdSubBuffer[bufferOffset];

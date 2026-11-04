@@ -663,6 +663,7 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t &hClock) {
 			  }
 			  hdPack->ActiveSpritesQueues[hdPack->ActiveSpriteQueueWriteIndex].clear();
 			  hdPack->ActiveAdditionsQueues[hdPack->ActiveSpriteQueueWriteIndex].clear();
+			  memset(_colorWindowMask, 0, sizeof(_colorWindowMask));
 		  }
 
         // Update overclock timings once per frame
@@ -684,6 +685,7 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t &hClock) {
                                        ? _hdBehindOutputBuffers[1]
                                        : _hdBehindOutputBuffers[0];
           memset(_currentHdBehindBuffer, 0, 512 * 478 * sizeof(SnesHdPixelData));
+          _currentCwPreMath = (_currentCwPreMath == _cwPreMathBuffers[0]) ? _cwPreMathBuffers[1] : _cwPreMathBuffers[0];
 
           if (_interlacedFrame) {
             memcpy(_currentBuffer, GetPreviousScreenBuffer(),
@@ -2591,10 +2593,31 @@ void SnesPpu::ApplyColorMath() {
       (uint8_t)_state.Window[1].ActiveLayers[SnesPpu::ColorWindowIndex];
   bool hiResMode = _state.HiResMode || _state.BgMode == 5 || _state.BgMode == 6;
 
+  // HD PACK : capture de la forme de la color window, seulement quand elle agit vraiment
+  // (fenetre active + mode de decoupe ou de blocage du color math dependant de la fenetre)
+  uint8_t *cwRow = nullptr;
+  uint16_t *cwPreRow = nullptr;
+  if (SnesHdPackLoader::ActivePack && activeWindowCount > 0) {
+    auto usesWindow = [](ColorWindowMode m) {
+      return m == ColorWindowMode::InsideWindow || m == ColorWindowMode::OutsideWindow;
+    };
+    if (usesWindow(_state.ColorMathClipMode) || usesWindow(_state.ColorMathPreventMode)) {
+      int row = _overscanFrame ? ((int)_scanline - 1) : ((int)_scanline + 6);
+      if (row >= 0 && row < 240) {
+        cwRow = _colorWindowMask + row * 256;
+        cwPreRow = _currentCwPreMath + row * 256;
+        _cwRowFixedColor[row] = _state.FixedColor;
+        _cwRowOp[row] = (_state.ColorMathSubtractMode ? 1 : 0) | (_state.ColorMathHalveResult ? 2 : 0) |
+                        (_state.ColorMathAddSubscreen ? 4 : 0);
+      }
+    }
+  }
+
   if (hiResMode) {
     for (int x = _drawStartX; x <= _drawEndX; x++) {
       bool isInsideWindow =
           ProcessMaskWindow<SnesPpu::ColorWindowIndex>(activeWindowCount, x);
+      if (cwRow && x < 256) { cwRow[x] = isInsideWindow ? 1 : 0; cwPreRow[x] = _mainScreenBuffer[x]; }
 
       // Keep original subscreen color, which is used to apply color math to the
       // main screen after
@@ -2611,6 +2634,7 @@ void SnesPpu::ApplyColorMath() {
     for (int x = _drawStartX; x <= _drawEndX; x++) {
       bool isInsideWindow =
           ProcessMaskWindow<SnesPpu::ColorWindowIndex>(activeWindowCount, x);
+      if (cwRow && x < 256) { cwRow[x] = isInsideWindow ? 1 : 0; cwPreRow[x] = _mainScreenBuffer[x]; }
       ApplyColorMathToPixel(_mainScreenBuffer[x], _subScreenBuffer[x], x,
                             isInsideWindow);
     }
@@ -2932,9 +2956,11 @@ void SnesPpu::SendFrame() {
     _readyHdSubBuffer = _currentHdSubBuffer;
     _readyHdBehindBuffer = _currentHdBehindBuffer;
     memcpy(_readySpritePriorities, _currentSpritePriorities, sizeof(_readySpritePriorities));
+    _readyCwPreMath = _currentCwPreMath;
     if (SnesHdPackLoader::ActivePack) {
       SnesHdPackLoader::ActivePack->ActiveSpriteQueueReadIndex =
           SnesHdPackLoader::ActivePack->ActiveSpriteQueueWriteIndex;
+      UpdateColorWindowRegions();
     }
   }
 
@@ -4066,4 +4092,93 @@ void SnesPpu::RenderTilemapMode7() {
     RenderTilemapMode7<layerIndex, normalPriority, highPriority, applyMosaic,
                        false>();
   }
+}
+//------------------------------------------------------------------------
+// HD PACK : decoupe le masque de la color window de la frame en ZONES separees
+// (pixels voisins, 8-connexite), avec cadre, nombre de pixels et hash de forme
+// (independant de la position). Resultat dans ActivePack->ColorWindowRegions,
+// lu par la condition 'colorWindow'. Appele dans SendFrame (apres la fin du
+// decodage precedent : personne ne lit la liste pendant qu'on l'ecrit).
+//------------------------------------------------------------------------
+void SnesPpu::UpdateColorWindowRegions() {
+  SnesHdPackData* pack = SnesHdPackLoader::ActivePack.get();
+  if (!pack) return;
+
+  static constexpr int W = 256, H = 240;
+  static std::vector<int16_t> label(W * H);
+  static std::vector<int> stack;
+  std::vector<SnesHdColorWindowRegion> regions;
+
+  bool anyPixel = false;
+  for (int i = 0; i < W * H; i++) { if (_colorWindowMask[i]) { anyPixel = true; break; } }
+
+  if (anyPixel) {
+    std::fill(label.begin(), label.end(), (int16_t)-1);
+    for (int start = 0; start < W * H && regions.size() < 32; start++) {
+      if (!_colorWindowMask[start] || label[start] >= 0) continue;
+      int16_t id = (int16_t)regions.size();
+      SnesHdColorWindowRegion r;
+      int minX = W, minY = H, maxX = -1, maxY = -1;
+      uint32_t count = 0;
+      stack.clear();
+      stack.push_back(start);
+      label[start] = id;
+      while (!stack.empty()) {
+        int p = stack.back(); stack.pop_back();
+        int px = p % W, py = p / W;
+        count++;
+        minX = std::min(minX, px); maxX = std::max(maxX, px);
+        minY = std::min(minY, py); maxY = std::max(maxY, py);
+        for (int dy = -1; dy <= 1; dy++) {
+          int ny = py + dy;
+          if (ny < 0 || ny >= H) continue;
+          for (int dx = -1; dx <= 1; dx++) {
+            int nx = px + dx;
+            if ((dx == 0 && dy == 0) || nx < 0 || nx >= W) continue;
+            int q = ny * W + nx;
+            if (_colorWindowMask[q] && label[q] < 0) { label[q] = id; stack.push_back(q); }
+          }
+        }
+      }
+      r.X = minX; r.Y = minY; r.W = maxX - minX + 1; r.H = maxY - minY + 1;
+      r.PixelCount = count;
+      r.FullScreen = count > (uint32_t)(W * 224 * 8 / 10);
+      // Hash FNV-1a de la forme (bits de la zone dans son cadre)
+      uint32_t h = 2166136261u;
+      auto mix = [&h](uint32_t v) { h ^= v & 0xFF; h *= 16777619u; };
+      mix((uint32_t)r.W); mix((uint32_t)r.W >> 8); mix((uint32_t)r.H); mix((uint32_t)r.H >> 8);
+      for (int y = minY; y <= maxY; y++) {
+        uint32_t acc = 0; int bits = 0;
+        for (int x = minX; x <= maxX; x++) {
+          acc = (acc << 1) | (label[y * W + x] == id ? 1u : 0u);
+          if (++bits == 8) { mix(acc); acc = 0; bits = 0; }
+        }
+        if (bits) mix(acc << (8 - bits));
+      }
+      r.Hash = h;
+      r.FixedColor = _cwRowFixedColor[minY];
+      r.Op = _cwRowOp[minY];
+      regions.push_back(r);
+    }
+  }
+
+  // Journal : liste des zones des qu'elle change (au plus toutes les 15 frames)
+  std::string sig, shapeSig; // shapeSig : forme + position seulement (la couleur peut pulser)
+  for (const auto &r : regions) {
+    shapeSig += HexUtilities::ToHex(r.Hash) + "@" + std::to_string(r.X) + "," + std::to_string(r.Y) + " ";
+    sig += "[hash=" + HexUtilities::ToHex(r.Hash) + " x=" + std::to_string(r.X) + " y=" + std::to_string(r.Y) +
+           " " + std::to_string(r.W) + "x" + std::to_string(r.H) + " couleur=" + HexUtilities::ToHex(r.FixedColor) +
+           " op=" + std::string((r.Op & 1) ? "sub" : "add") + ((r.Op & 2) ? "/2" : "") + ((r.Op & 4) ? " src=sub-screen" : " src=fixe") +
+           (r.FullScreen ? " plein-ecran" : "") + "] ";
+  }
+  if (shapeSig != _lastColorWindowSignature && (_frameCount - _lastColorWindowLogFrame >= 15 || _lastColorWindowLogFrame == 0)) {
+    _lastColorWindowSignature = shapeSig;
+    _lastColorWindowLogFrame = _frameCount;
+    MessageManager::Log(regions.empty() ? std::string("[HD-WINDOW] aucune color window")
+                                        : ("[HD-WINDOW] " + std::to_string(regions.size()) + " zone(s) : " + sig));
+  }
+
+  if (regions.empty()) pack->ColorWindowLabels.clear();
+  else pack->ColorWindowLabels.assign(label.begin(), label.end());
+  pack->ColorWindowRegions = std::move(regions);
 }

@@ -810,6 +810,47 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 					}
 
 					// -------------------------------------------------------------
+					// PARSING COLOR WINDOW : nom,colorWindow,HASH|any|full,X|*[,Y|*[,tolerance]]
+					// -------------------------------------------------------------
+					else if(conditionType == "colorWindow") {
+						condition.reset(new SnesHdPackColorWindowCondition());
+						SnesHdPackColorWindowCondition* cw = (SnesHdPackColorWindowCondition*)condition.get();
+						std::string hashStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[2]));
+						if(hashStr == "any") cw->Mode = SnesHdPackColorWindowCondition::MatchMode::Any;
+						else if(hashStr == "full") cw->Mode = SnesHdPackColorWindowCondition::MatchMode::Full;
+						else cw->Hash = (uint32_t)HexUtilities::FromHex(hashStr);
+						auto parsePos = [](const std::string& t, bool& any, int& v) {
+							std::string s = StringUtilities::Trim(t);
+							if(s == "*" || s == "all" || s == "any" || s.empty()) { any = true; } else { any = false; v = std::stoi(s); }
+						};
+						parsePos(tokens[3], cw->AnyX, cw->X);
+						if(tokens.size() > 4) parsePos(tokens[4], cw->AnyY, cw->Y);
+						if(tokens.size() > 5) {
+							std::string tol = StringUtilities::Trim(tokens[5]);
+							if(!tol.empty() && tol != "*") cw->Tolerance = std::stoi(tol);
+						}
+						if(tokens.size() > 6) {
+							std::string col = StringUtilities::Trim(tokens[6]);
+							if(!col.empty() && col != "*" && col != "any") {
+								cw->AnyColor = false;
+								size_t amp = col.find('&');
+								if(amp != std::string::npos) {
+									cw->Color = (uint16_t)HexUtilities::FromHex(StringUtilities::Trim(col.substr(0, amp)));
+									cw->ColorMask = (uint16_t)(HexUtilities::FromHex(StringUtilities::Trim(col.substr(amp + 1))) & 0x7FFF);
+								} else {
+									cw->Color = (uint16_t)HexUtilities::FromHex(col);
+								}
+							}
+						}
+
+						condition->Name = conditionName;
+						SnesHdPackCondition* condPtr = condition.get();
+						condPtr->Initialize(&outData->ScreenInfo, outData.get());
+						conditionsByName[conditionName] = condPtr;
+						outData->Conditions.emplace_back(std::move(condition));
+					}
+
+					// -------------------------------------------------------------
 					// PARSING SPRITE ATPOSITION 
 					// -------------------------------------------------------------
 					else if(conditionType == "spriteAtPosition") {
@@ -1295,6 +1336,23 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			outData->HasDisableSubLayerTag = true;
 			outData->DisableSubLayerConditions = currentConditions;
 			MessageManager::Log("[SnesHDPack] Tag found : <disableSubLayer>");
+		}
+
+		/// PARSING <disableAllColorMathWindow> / <disableColorMathWindow>HASH -----------
+		// Supprime l'effet SD des zones de color window (toutes, ou celles de cette forme)
+		else if(StringUtilities::Trim(lineContent) == "<disableAllColorMathWindow>") {
+			outData->DisableAllColorMathWindowRules.push_back(currentConditions);
+		}
+		else if(lineContent.rfind("<disableColorMathWindow>", 0) == 0) {
+			std::string hashStr = StringUtilities::Trim(lineContent.substr(24));
+			if(hashStr.empty()) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <disableColorMathWindow> : hash manquant.");
+			} else {
+				SnesHdDisableColorWindowRule rule;
+				rule.Hash = (uint32_t)HexUtilities::FromHex(hashStr);
+				rule.Conditions = currentConditions;
+				outData->DisableColorMathWindowRules.push_back(rule);
+			}
 		}
 
 		/// PARSING <disableColorMath> TAG --------------------------------

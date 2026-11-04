@@ -440,3 +440,50 @@ public:
 
 	bool InternalCheckCondition(int x, int y, SnesHdPixelData* tile) override;
 };
+
+// ---------------------------------------------------------
+// COLOR WINDOW : vraie si une zone de color window (fenetre PPU + color math) de la
+// frame a la forme demandee (hash), eventuellement a une position donnee.
+// <condition>nom,colorWindow,HASH|any|full,X|*[,Y|*[,tolerance[,couleur|*]]]
+//   couleur = couleur fixe COLDATA de la zone, en BGR555 hexadecimal (comme les couleurs SNES)
+//             'VALEUR&MASQUE' : seuls les bits du masque sont compares
+//             (ex. 0000&7FE0 = rouge quelconque, vert et bleu a 0 ; 001F = rouge, 03E0 = vert, 7C00 = bleu)
+// ---------------------------------------------------------
+struct SnesHdPackColorWindowCondition : public SnesHdPackCondition
+{
+	enum class MatchMode { Hash, Any, Full };
+	MatchMode Mode = MatchMode::Hash;
+	uint32_t Hash = 0;
+	bool AnyX = true, AnyY = true;
+	int X = 0, Y = 0;
+	int Tolerance = 2;
+	bool AnyColor = true;
+	uint16_t Color = 0;
+	uint16_t ColorMask = 0x7FFF;
+
+	SnesHdPackConditionType GetConditionType() override { return SnesHdPackConditionType::ColorWindow; }
+	string GetConditionName() override { return "colorWindow"; }
+	string ToString() override
+	{
+		stringstream out;
+		out << "<condition>" << Name << ",colorWindow,";
+		if(Mode == MatchMode::Any) out << "any"; else if(Mode == MatchMode::Full) out << "full"; else out << HexUtilities::ToHex(Hash);
+		out << "," << (AnyX ? string("*") : std::to_string(X)) << "," << (AnyY ? string("*") : std::to_string(Y)) << "," << Tolerance;
+		out << "," << (AnyColor ? string("*") : (HexUtilities::ToHex(Color) + (ColorMask != 0x7FFF ? "&" + HexUtilities::ToHex(ColorMask) : string())));
+		return out.str();
+	}
+
+	bool InternalCheckCondition(int x, int y, SnesHdPixelData* tile) override
+	{
+		if(!_hdPack) return false;
+		for(const SnesHdColorWindowRegion& r : _hdPack->ColorWindowRegions) {
+			if(Mode == MatchMode::Full && !r.FullScreen) continue;
+			if(Mode == MatchMode::Hash && r.Hash != Hash) continue;
+			if(!AnyX && std::abs(r.X - X) > Tolerance) continue;
+			if(!AnyY && std::abs(r.Y - Y) > Tolerance) continue;
+			if(!AnyColor && (r.FixedColor & ColorMask) != (Color & ColorMask)) continue;
+			return true;
+		}
+		return false;
+	}
+};

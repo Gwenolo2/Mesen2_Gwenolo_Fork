@@ -302,7 +302,8 @@ enum class SnesHdPackConditionType
 	SpriteOnScreen,
 	TileOnScreen,
 	TileNearby,    
-	SpriteNearby
+	SpriteNearby,
+	ColorWindow
 };
 //-----------------------------------------------------------------------
 struct SnesHdPackCondition
@@ -634,6 +635,26 @@ struct SnesHdMsuTrack
 
 
 // ---------------------------------------------------------
+// Zone de color window (fenetre PPU appliquee au color math) visible sur la frame :
+// transparences/masques dessines par fenetres, ex. numero de position de Mario Kart.
+struct SnesHdColorWindowRegion
+{
+	int X = 0, Y = 0, W = 0, H = 0; // cadre (pixels SNES, lignes du buffer de sortie)
+	uint32_t PixelCount = 0;
+	uint32_t Hash = 0;               // hash de la forme, independant de la position
+	bool FullScreen = false;         // > 80% de l'ecran (fondu, voile...)
+	uint16_t FixedColor = 0;         // couleur fixe COLDATA (BGR555) sur la 1re ligne de la zone
+	uint8_t Op = 0;                  // bit0 = soustraction, bit1 = resultat / 2, bit2 = source sub-screen
+};
+
+// Regle <disableColorMathWindow>HASH (avec ses conditions)
+struct SnesHdDisableColorWindowRule
+{
+	uint32_t Hash = 0;
+	std::vector<SnesHdPackCondition*> Conditions;
+};
+
+// ---------------------------------------------------------
 class SnesHdPackData
 {
 private:
@@ -726,6 +747,16 @@ public:
 	std::vector<ActiveHdSprite> ActiveSpritesQueues[2];
 	int ActiveSpriteQueueWriteIndex = 0;
 	int ActiveSpriteQueueReadIndex = 1;
+
+	// Zones de color window de la derniere frame envoyee (SnesPpu::UpdateColorWindowRegions)
+	std::vector<SnesHdColorWindowRegion> ColorWindowRegions;
+	// Numero de zone par pixel (256 x 240, -1 = hors zone) ; vide s'il n'y a aucune zone
+	std::vector<int16_t> ColorWindowLabels;
+
+	// <disableAllColorMathWindow> : une entree par ligne du pack (conditions de cette ligne)
+	std::vector<std::vector<SnesHdPackCondition*>> DisableAllColorMathWindowRules;
+	// <disableColorMathWindow>HASH
+	std::vector<SnesHdDisableColorWindowRule> DisableColorMathWindowRules;
 
 	// Le dictionnaire qui fait le lien entre la Piste (1, 2, 3...) et l'audio HD
 	// Avant : std::unordered_map<int, SnesHdMsuTrack> MsuTracks;
