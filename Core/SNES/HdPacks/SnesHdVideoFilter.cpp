@@ -74,7 +74,7 @@ bool SnesHdLayerOrderRule::MatchesCondition(int x, int y, SnesHdPixelData* tile)
 // Mipmaps[0] reste vide, Mipmaps[i] = niveau i (dimension mapDim >> i).
 // Reduction 2x2 ponderee par l'alpha (evite les franges sombres autour des zones transparentes).
 //---------------------------------------------------------------------------------------------------------------
-static void BuildMode7MipChain(SnesHdPackBitmapInfo* bmp, uint32_t mapDim)
+void BuildMode7MipChain(SnesHdPackBitmapInfo* bmp, uint32_t mapDim)
 {
 	if(!bmp->Mipmaps.empty()) return;
 	bmp->Mipmaps.emplace_back(); // niveau 0 = PixelData
@@ -119,7 +119,7 @@ static void BuildMode7MipChain(SnesHdPackBitmapInfo* bmp, uint32_t mapDim)
 // MODE 7 HD : mipmaps d'une tile individuelle (<m7tiles>). La tile (8*Scale pixels de cote, a la
 // position X,Y de son atlas) est extraite puis reduite par 2 jusqu'a 1x1. Construit une seule fois.
 //---------------------------------------------------------------------------------------------------------------
-static void BuildMode7TileMips(SnesHdMode7Image* img)
+void BuildMode7TileMips(SnesHdMode7Image* img)
 {
 	if(!img || !img->TileMips.empty() || !img->Bitmap || img->Bitmap->PixelData.empty()) return;
 	const SnesHdPackBitmapInfo* bmp = img->Bitmap;
@@ -1449,7 +1449,13 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			if(!video->IsPlaying && !video->HasPlayed) {
 				std::string fullPath = FolderUtilities::CombinePath(SnesHdPackLoader::ActivePack->RootFolder, video->Filename);
 
-				video->VideoPlayer = plm_create_with_filename(fullPath.c_str());
+				// Lecture depuis la memoire si le fichier a ete precharge par LoadAsync, sinon depuis le disque.
+				// (free_when_done = 0 : les donnees restent disponibles pour une relecture)
+				if(video->FileData && !video->FileData->empty()) {
+					video->VideoPlayer = plm_create_with_memory(video->FileData->data(), video->FileData->size(), 0);
+				} else {
+					video->VideoPlayer = plm_create_with_filename(fullPath.c_str());
+				}
 				if(video->VideoPlayer != nullptr) {
 					video->VideoWidth = plm_get_width(video->VideoPlayer);
 					video->VideoHeight = plm_get_height(video->VideoPlayer);

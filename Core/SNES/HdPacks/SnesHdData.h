@@ -72,6 +72,9 @@ struct SnesHdVideoInfo
 	// LE LECTEUR VIDÉO :
 	plm_t* VideoPlayer = nullptr;
 
+	// Contenu du fichier video precharge en memoire par LoadAsync (vide = lecture depuis le disque)
+	std::shared_ptr<std::vector<uint8_t>> FileData;
+
 	std::vector<SnesHdPackCondition*> Conditions;
 
 	bool MatchesCondition();
@@ -601,6 +604,12 @@ struct SnesHdMode7Image
 };
 
 //----------------------------------------------------------
+// Mipmaps Mode 7 (definis dans SnesHdVideoFilter.cpp) : appeles au chargement du pack (LoadAsync)
+// et, par securite, a la premiere utilisation dans le filtre.
+void BuildMode7MipChain(SnesHdPackBitmapInfo* bmp, uint32_t mapDim);
+void BuildMode7TileMips(SnesHdMode7Image* img);
+
+//----------------------------------------------------------
 struct SnesHdMsuTrack
 {
 	std::string Filename;
@@ -758,6 +767,53 @@ public:
 			for(auto* tile : entry.second) {
 				tile->Init(Scale);
 				if(_cancelLoad) return;
+			}
+		}
+
+		// Mode 7 : mipmaps des cartes <m7img> et des tiles <m7tiles>.
+		// (sinon construits a la premiere image Mode 7 affichee -> saccade de plusieurs secondes en scale 8/16)
+		size_t m7MapCount = 0, m7TileCount = 0;
+		for(auto& pair : Mode7Maps) {
+			for(auto& img : pair.second) {
+				if(_cancelLoad) return;
+				if(!img || !img->Bitmap) continue;
+				img->Bitmap->Init();
+				if(img->Bitmap->PixelData.empty()) continue;
+				uint32_t mapDim = 1024 * img->Scale;
+				if(img->X == 0 && img->Y == 0 && img->Bitmap->Width == mapDim && img->Bitmap->Height == mapDim) {
+					BuildMode7MipChain(img->Bitmap, mapDim);
+					m7MapCount++;
+				} else {
+					BuildMode7TileMips(img.get());
+					m7TileCount++;
+				}
+			}
+		}
+		if(m7MapCount + m7TileCount > 0) {
+			MessageManager::Log("[HD-MODE7] Prechargement : " + std::to_string(m7MapCount) + " carte(s) <m7img>, " +
+				std::to_string(m7TileCount) + " tile(s) <m7tiles> avec mipmaps.");
+		}
+
+		// Videos <video> : prechargement du fichier en memoire (evite l'acces disque au lancement de la video).
+		// Au-dela de 512 Mo, la video reste lue depuis le disque.
+		for(auto& video : Videos) {
+			if(_cancelLoad) return;
+			if(!video || video->Filename.empty()) continue;
+			std::string fullPath = FolderUtilities::CombinePath(PackFolderPath, video->Filename);
+			VirtualFile vFile(fullPath);
+			if(!vFile.IsValid()) {
+				MessageManager::Log("[HD-VIDEO] Fichier introuvable : " + fullPath);
+				continue;
+			}
+			if(vFile.GetSize() > (size_t)512 * 1024 * 1024) {
+				MessageManager::Log("[HD-VIDEO] " + video->Filename + " : plus de 512 Mo, lecture depuis le disque.");
+				continue;
+			}
+			auto data = std::make_shared<std::vector<uint8_t>>();
+			if(vFile.ReadFile(*data) && !data->empty()) {
+				video->FileData = data;
+				MessageManager::Log("[HD-VIDEO] Precharge en memoire : " + video->Filename + " (" +
+					std::to_string(data->size() / 1024) + " Ko)");
 			}
 		}
 
