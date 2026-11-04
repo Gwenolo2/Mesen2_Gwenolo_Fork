@@ -211,3 +211,7 @@ UI/Dependencies.zip
 
 # --- Sauvegardes temporaires des sessions Claude ---
 _backup_claude/
+
+# --- Runtime PGO de MSVC (copie temporaire pendant PGO Profile) ---
+UI/Dependencies/pgort140.dll
+pgort140.dll
