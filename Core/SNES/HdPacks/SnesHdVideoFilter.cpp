@@ -1236,26 +1236,38 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 	uint32_t hdWidth = outWidth;
 
+	// Preparation SEQUENTIELLE des backgrounds (image d'animation courante + PNG charge),
+	// avant de repartir la composition sur plusieurs coeurs.
+	std::vector<char> bgReady(SnesHdPackLoader::ActivePack->Backgrounds.size(), 0);
+	for(const auto& task : tasks) {
+		if(task.type != 0) continue;
+		auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[task.index];
+		if(bg->IsAnimated && !bg->AnimFrames.empty() && bg->FramesBetweenSteps > 0) {
+			uint32_t currentFrame = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
+			int totalFrames = (int)bg->AnimFrames.size();
+			int currentAnimIndex = (currentFrame / bg->FramesBetweenSteps) % totalFrames;
+			bg->Bitmap = bg->AnimFrames[currentAnimIndex];
+		}
+		if(bg->Bitmap == nullptr) continue;
+		bg->Bitmap->Init();
+		if(bg->Bitmap->PixelData.empty() || bg->Bitmap->Width == 0 || bg->Bitmap->Height == 0) continue;
+		bgReady[task.index] = 1;
+	}
+
+	// Composition d'une BANDE de lignes HD [bandY0, bandY1[ : toutes les taches dans l'ordre
+	// (backgrounds + tiles/sprites tries par Z). Les bandes sont disjointes -> resultat identique
+	// a un rendu sequentiel, mais reparti sur plusieurs coeurs.
+	auto composeBand = [&](uint32_t bandY0, uint32_t bandY1) {
 	for(const auto& task : tasks) {
 		if(task.type == 0) {
 			auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[task.index];
-
-			if(bg->IsAnimated && !bg->AnimFrames.empty() && bg->FramesBetweenSteps > 0) {
-				uint32_t currentFrame = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
-				int totalFrames = (int)bg->AnimFrames.size();
-				int currentAnimIndex = (currentFrame / bg->FramesBetweenSteps) % totalFrames;
-				bg->Bitmap = bg->AnimFrames[currentAnimIndex];
-			}
-			if(bg->Bitmap == nullptr) continue;
-
-			bg->Bitmap->Init();
-			if(bg->Bitmap->PixelData.empty() || bg->Bitmap->Width == 0 || bg->Bitmap->Height == 0) continue;
+			if(!bgReady[task.index]) continue;
 
 			int bgWidth = bg->Bitmap->Width;
 			int bgHeight = bg->Bitmap->Height;
 			int bgIndex = bg->MasterScrollLayer - 1;
 
-			for(uint32_t hdY = 0; hdY < hdHeight; hdY++) {
+			for(uint32_t hdY = bandY0; hdY < bandY1; hdY++) {
 				uint32_t sdY = hdY / scale;
 				int masterScrollX = 0, masterScrollY = 0;
 
@@ -1354,7 +1366,12 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			bool doHFlip = item.hFlip && !item.Tile->IsHFlip;
 			bool doVFlip = item.vFlip && !item.Tile->IsVFlip;
 
-			for(uint32_t py = 0; py < pngHeight; py++) {
+			// Seules les lignes de la tile situees dans la bande
+			int32_t tileBaseY = item.startY * (int32_t)scale;
+			int32_t pyStart = std::max<int32_t>(0, (int32_t)bandY0 - tileBaseY);
+			int32_t pyEnd = std::min<int32_t>((int32_t)pngHeight, (int32_t)bandY1 - tileBaseY);
+			for(int32_t pyi = pyStart; pyi < pyEnd; pyi++) {
+				uint32_t py = (uint32_t)pyi;
 				for(uint32_t px = 0; px < pngWidth; px++) {
 
 					int32_t screenX = (item.startX * scale) + px;
@@ -1399,6 +1416,26 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					}
 				}
 			}
+		}
+	}
+	};
+
+	{
+		unsigned hc = std::thread::hardware_concurrency();
+		int nThreads = std::clamp((int)hc - 2, 1, 8);
+		if(nThreads <= 1 || hdHeight < 64 || tasks.empty()) {
+			composeBand(0, hdHeight);
+		} else {
+			uint32_t bandH = (hdHeight + nThreads - 1) / nThreads;
+			std::vector<std::thread> workers;
+			workers.reserve(nThreads);
+			for(int t = 0; t < nThreads; t++) {
+				uint32_t b0 = (uint32_t)t * bandH;
+				uint32_t b1 = std::min(hdHeight, b0 + bandH);
+				if(b0 >= b1) break;
+				workers.emplace_back([&composeBand, b0, b1]() { composeBand(b0, b1); });
+			}
+			for(auto& w : workers) w.join();
 		}
 	}
 
