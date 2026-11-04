@@ -507,6 +507,8 @@ struct SnesHdMode7Image
 	bool UseBilinearFilter() const { return FilterMode == Mode7FilterMode::Bilinear; }
 
 	std::vector<std::vector<uint32_t>> Mipmaps;
+	// <m7tiles> : mipmaps de la tile extraite de l'atlas (construits par le filtre HD)
+	std::vector<std::vector<uint32_t>> TileMips;
 	int X = 0;
 	int Y = 0;
 

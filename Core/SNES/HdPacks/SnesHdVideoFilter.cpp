@@ -1,6 +1,9 @@
 #include "pch.h"
 #include <vector>
 #include <algorithm>
+#include <thread>
+#include <cmath>
+#include <cstdio>
 #include "SNES/HdPacks/SnesHdVideoFilter.h"
 #include "SNES/HdPacks/SnesHdPackLoader.h"
 #include "SNES/SnesConsole.h"
@@ -65,6 +68,90 @@ bool SnesHdLayerOrderRule::MatchesCondition(int x, int y, SnesHdPixelData* tile)
 
 //---------------------------------------------------------------------------------------------------------------
 //---------------------------------------------------------------------------------------------------------------
+//---------------------------------------------------------------------------------------------------------------
+// MODE 7 HD : chaine de mipmaps COMPLETE (jusqu'a 1x1), construite une seule fois par image.
+// Convention : le niveau 0 est Bitmap->PixelData (pas de copie, l'image peut faire 1 Go en scale 16) ;
+// Mipmaps[0] reste vide, Mipmaps[i] = niveau i (dimension mapDim >> i).
+// Reduction 2x2 ponderee par l'alpha (evite les franges sombres autour des zones transparentes).
+//---------------------------------------------------------------------------------------------------------------
+static void BuildMode7MipChain(SnesHdPackBitmapInfo* bmp, uint32_t mapDim)
+{
+	if(!bmp->Mipmaps.empty()) return;
+	bmp->Mipmaps.emplace_back(); // niveau 0 = PixelData
+
+	if(bmp->Width != mapDim || bmp->Height != mapDim || (mapDim & (mapDim - 1)) != 0 ||
+	   bmp->PixelData.size() < (size_t)mapDim * mapDim) {
+		MessageManager::Log("[HD-MODE7] Image " + bmp->PngName + " : dimensions inattendues, mipmaps desactives.");
+		return;
+	}
+
+	uint32_t prevDim = mapDim;
+	const uint32_t* prev = bmp->PixelData.data();
+	while(prevDim > 1) {
+		uint32_t dim = prevDim / 2;
+		std::vector<uint32_t> mip((size_t)dim * dim, 0);
+		for(uint32_t my = 0; my < dim; my++) {
+			const uint32_t* row0 = prev + (size_t)(my * 2) * prevDim;
+			const uint32_t* row1 = row0 + prevDim;
+			for(uint32_t mx = 0; mx < dim; mx++) {
+				uint32_t p[4] = { row0[mx * 2], row0[mx * 2 + 1], row1[mx * 2], row1[mx * 2 + 1] };
+				uint32_t sumA = 0, r = 0, g = 0, b = 0;
+				for(uint32_t q : p) {
+					uint32_t a = q >> 24;
+					sumA += a;
+					r += ((q >> 16) & 0xFF) * a;
+					g += ((q >> 8) & 0xFF) * a;
+					b += (q & 0xFF) * a;
+				}
+				if(sumA > 0) {
+					mip[(size_t)my * dim + mx] = ((sumA / 4) << 24) | ((r / sumA) << 16) | ((g / sumA) << 8) | (b / sumA);
+				}
+			}
+		}
+		bmp->Mipmaps.push_back(std::move(mip));
+		prev = bmp->Mipmaps.back().data();
+		prevDim = dim;
+	}
+	MessageManager::Log("[HD-MODE7] " + bmp->PngName + " : " + std::to_string(bmp->Mipmaps.size()) + " niveaux de mipmap.");
+}
+
+//---------------------------------------------------------------------------------------------------------------
+// MODE 7 HD : mipmaps d'une tile individuelle (<m7tiles>). La tile (8*Scale pixels de cote, a la
+// position X,Y de son atlas) est extraite puis reduite par 2 jusqu'a 1x1. Construit une seule fois.
+//---------------------------------------------------------------------------------------------------------------
+static void BuildMode7TileMips(SnesHdMode7Image* img)
+{
+	if(!img || !img->TileMips.empty() || !img->Bitmap || img->Bitmap->PixelData.empty()) return;
+	const SnesHdPackBitmapInfo* bmp = img->Bitmap;
+	uint32_t dim = 8 * img->Scale;
+	std::vector<uint32_t> lvl((size_t)dim * dim, 0);
+	for(uint32_t y = 0; y < dim; y++) {
+		uint32_t sy = (uint32_t)img->Y + y;
+		if(sy >= bmp->Height) continue;
+		for(uint32_t x = 0; x < dim; x++) {
+			uint32_t sx = (uint32_t)img->X + x;
+			if(sx < bmp->Width) lvl[(size_t)y * dim + x] = bmp->PixelData[(size_t)sy * bmp->Width + sx];
+		}
+	}
+	img->TileMips.push_back(std::move(lvl));
+	while(dim > 1 && (dim % 2) == 0) {
+		uint32_t nd = dim / 2;
+		const std::vector<uint32_t>& prev = img->TileMips.back();
+		std::vector<uint32_t> mip((size_t)nd * nd, 0);
+		for(uint32_t my = 0; my < nd; my++) {
+			for(uint32_t mx = 0; mx < nd; mx++) {
+				uint32_t p[4] = { prev[(size_t)(my * 2) * dim + mx * 2], prev[(size_t)(my * 2) * dim + mx * 2 + 1],
+									  prev[(size_t)(my * 2 + 1) * dim + mx * 2], prev[(size_t)(my * 2 + 1) * dim + mx * 2 + 1] };
+				uint32_t sumA = 0, r = 0, g = 0, b = 0;
+				for(uint32_t q : p) { uint32_t a = q >> 24; sumA += a; r += ((q >> 16) & 0xFF) * a; g += ((q >> 8) & 0xFF) * a; b += (q & 0xFF) * a; }
+				if(sumA > 0) mip[(size_t)my * nd + mx] = ((sumA / 4) << 24) | ((r / sumA) << 16) | ((g / sumA) << 8) | (b / sumA);
+			}
+		}
+		img->TileMips.push_back(std::move(mip));
+		dim = nd;
+	}
+}
+
 void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 {
 	static bool filterLog = false;
@@ -138,285 +225,629 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		int diffB;
 	};
 
-	SdColorCache sdColorRow[256];
+
+	// ====================================================================
+	// MODE 7 HD - TILES INDIVIDUELLES (<m7tiles>) VISIBLES CETTE FRAME
+	// Carte Mode 7 = grille de 128 x 128 cases de 8x8 texels. On releve, a partir des pixels
+	// SNES ou la console affiche une tile HD (buffers main et sub), quelle tile occupe quelle
+	// case. Le rendu HD de la piste echantillonne ensuite ces tiles a la resolution HD
+	// (contours nets, perspective lissee, mipmaps) au lieu de les dessiner bloc par bloc.
+	// ====================================================================
+	std::vector<SnesHdMode7Image*> m7CellTile;
+	SnesHdMode7Image* m7OutsideTile = nullptr; // tile affichee hors de la carte (Mode 7 "fill with tile 0")
+	bool anyM7Cell = false;
+	{
+		std::unordered_map<uint32_t, SnesHdMode7Image*> imgByHash;
+		auto scanTiles = [&](const SnesHdPixelData* buf) {
+			if(!buf) return;
+			for(uint32_t yy = 0; yy < cropHeight; yy++) {
+				const SnesHdPixelData* row = buf + (yy + srcY) * _baseFrameInfo.Width + srcX;
+				for(uint32_t xx = 0; xx < cropWidth; xx++) {
+					const SnesHdPixelData& p = row[xx];
+					if(!p.IsMode7Tile) continue;
+					SnesHdMode7Image* img;
+					auto it = imgByHash.find(p.M7TileHash);
+					if(it != imgByHash.end()) {
+						img = it->second;
+					} else {
+						img = SnesHdPackLoader::ActivePack->GetMode7Image(p.M7TileHash);
+						BuildMode7TileMips(img);
+						imgByHash[p.M7TileHash] = img;
+					}
+					if(!img || img->TileMips.empty()) continue;
+					int32_t mx = p.M7XValue >> 8, my = p.M7YValue >> 8;
+					if(m7CellTile.empty()) m7CellTile.assign(128 * 128, nullptr);
+					if(mx < 0 || my < 0 || mx > 1023 || my > 1023) {
+						m7OutsideTile = img;
+					} else {
+						m7CellTile[(size_t)(my >> 3) * 128 + (mx >> 3)] = img;
+					}
+					anyM7Cell = true;
+				}
+			}
+		};
+		scanTiles(hdBuffer);
+		scanTiles(hdSubBuffer);
+	}
+
+	// ====================================================================
+	// MODE 7 HD - PHASE 1 (sequentielle) : preparation de chaque ligne
+	// (ligne de reference, image HD selon les conditions, mipmaps, derivee verticale)
+	// ====================================================================
+	struct M7Line
+	{
+		SnesHdMode7Image* Img = nullptr;
+		SnesHdPixelData Ref;
+		SnesHdPixelData Next;
+		uint32_t RefX = 0;
+		uint32_t NextRefX = 0;
+		bool HasNext = false;
+		float Dy[4] = { 0, 0, 0, 0 }; // ecart ligne SNES suivante : d0x, d0y, gradX, gradY (8.8, texels SNES)
+		bool UseFit = false;           // parametres lisses actifs sur cette ligne
+		bool FitFirst = false, FitLast = false; // premiere / derniere ligne de sa zone
+		double Inv = 0;                // 1/echelle lissee
+		double DirX = 1, DirY = 0;     // direction lissee du pas
+		double U[2] = { 0 }, V[2] = { 0 }, W[2] = { 0 }; // origine locale : P = U + V*s + W*(l - ligne)
+	};
+	std::vector<M7Line> m7Lines(cropHeight);
+	bool anyMode7 = false;
+	{
+		bool haveLastDy = false;
+		float lastDy[4] = { 0, 0, 0, 0 };
+		for(uint32_t y = 0; y < cropHeight; y++) {
+			uint32_t snesY = y + srcY;
+			M7Line& L = m7Lines[y];
+
+			bool found = false;
+			for(uint32_t tx = 0; tx < cropWidth; tx++) {
+				uint32_t offset = snesY * _baseFrameInfo.Width + tx + srcX;
+				if(hdBuffer[offset].IsMode7) { L.Ref = hdBuffer[offset]; L.RefX = tx; found = true; break; }
+			}
+			if(!found) continue;
+
+			if(snesY + 1 < _baseFrameInfo.Height) {
+				for(uint32_t tx = 0; tx < cropWidth; tx++) {
+					uint32_t offset = (snesY + 1) * _baseFrameInfo.Width + tx + srcX;
+					if(hdBuffer[offset].IsMode7) { L.Next = hdBuffer[offset]; L.NextRefX = tx; L.HasNext = true; break; }
+				}
+			}
+			if(!L.HasNext) { L.Next = L.Ref; L.NextRefX = L.RefX; }
+
+			SnesHdMode7Image* img = SnesHdPackLoader::ActivePack->GetMode7Image(L.Ref.M7MapHash);
+			if(!img || !img->Bitmap || img->Bitmap->PixelData.empty()) continue;
+			BuildMode7MipChain(img->Bitmap, 1024 * img->Scale);
+			L.Img = img;
+			anyMode7 = true;
+
+			int32_t sX = L.Ref.M7XValue - (L.Ref.M7A * (int32_t)L.RefX);
+			int32_t sY = L.Ref.M7YValue - (L.Ref.M7C * (int32_t)L.RefX);
+			int32_t nX = L.Next.M7XValue - (L.Next.M7A * (int32_t)L.NextRefX);
+			int32_t nY = L.Next.M7YValue - (L.Next.M7C * (int32_t)L.NextRefX);
+			float d0x = (float)(nX - sX), d0y = (float)(nY - sY);
+			float gx = (float)(L.Next.M7A - L.Ref.M7A), gy = (float)(L.Next.M7C - L.Ref.M7C);
+			float lenSd = std::sqrt(d0x * d0x + d0y * d0y) / 256.0f;
+			bool discontinuity = !L.HasNext || L.Next.M7MapHash != L.Ref.M7MapHash || lenSd > 256.0f;
+			if(discontinuity) {
+				if(haveLastDy) { d0x = lastDy[0]; d0y = lastDy[1]; gx = lastDy[2]; gy = lastDy[3]; }
+			} else {
+				lastDy[0] = d0x; lastDy[1] = d0y; lastDy[2] = gx; lastDy[3] = gy; haveLastDy = true;
+			}
+			L.Dy[0] = d0x; L.Dy[1] = d0y; L.Dy[2] = gx; L.Dy[3] = gy;
+		}
+
+		// ------------------------------------------------------------------
+		// LISSAGE DES PARAMETRES MODE 7 (anti-ondulation des droites)
+		// Le jeu calcule A/C et l'origine de chaque ligne avec des arrondis : d'une ligne a
+		// l'autre ces petites erreurs font onduler les droites en HD. Pour chaque ligne, on
+		// ajuste localement (fenetre de 9 lignes) :
+		//   - 1/echelle : polynome de degre 2 (Savitzky-Golay)  -> suit la perspective du jeu
+		//   - direction du pas : moyenne des directions
+		//   - origine : P = U + V*s + W*(l - lc)                 -> relation d'un plan en perspective
+		// Aucune hypothese globale sur la camera (Mario Kart deforme volontairement sa perspective).
+		// Zone conservee en valeurs brutes si une ligne s'ecarte trop des valeurs du jeu.
+		// ------------------------------------------------------------------
+		auto solve3 = [](double M[3][3], const double B[3], double X[3]) -> bool {
+			double a[3][4];
+			for(int r = 0; r < 3; r++) { for(int c = 0; c < 3; c++) a[r][c] = M[r][c]; a[r][3] = B[r]; }
+			for(int c = 0; c < 3; c++) {
+				int piv = c;
+				for(int r = c + 1; r < 3; r++) if(std::abs(a[r][c]) > std::abs(a[piv][c])) piv = r;
+				if(std::abs(a[piv][c]) < 1e-12) return false;
+				if(piv != c) for(int k = 0; k < 4; k++) std::swap(a[c][k], a[piv][k]);
+				for(int r = 0; r < 3; r++) {
+					if(r == c) continue;
+					double fct = a[r][c] / a[c][c];
+					for(int k = c; k < 4; k++) a[r][k] -= fct * a[c][k];
+				}
+			}
+			for(int r = 0; r < 3; r++) X[r] = a[r][3] / a[r][r];
+			return true;
+		};
+
+		std::string fitReport;   // ex: "[lignes 35-113 : CORRIGEE (...)]"
+		std::string fitPattern;  // idem sans les valeurs (journal uniquement aux changements)
+		uint32_t y0 = 0;
+		while(y0 < cropHeight) {
+			if(!m7Lines[y0].Img) { y0++; continue; }
+			uint32_t y1 = y0 + 1;
+			while(y1 < cropHeight && m7Lines[y1].Img == m7Lines[y0].Img &&
+					m7Lines[y1].Ref.M7MapHash == m7Lines[y0].Ref.M7MapHash && m7Lines[y1 - 1].HasNext) {
+				y1++;
+			}
+			const int n = (int)(y1 - y0);
+			std::string verdict = "trop courte";
+			double maxErrP = 0, maxErrS = 0;
+			if(n >= 5) {
+				verdict = "rejetee";
+				std::vector<double> l(n), sx(n), sy(n), px(n), py(n), inv(n), invS(n), s(n), dX(n), dY(n), U0(n), U1(n), V0(n), V1(n), W0(n), W1(n);
+				std::vector<char> linePass(n, 0);
+				bool ok = true;
+				for(int i = 0; i < n && ok; i++) {
+					const M7Line& L = m7Lines[y0 + i];
+					l[i] = (double)(y0 + i);
+					sx[i] = (double)L.Ref.M7A;
+					sy[i] = (double)L.Ref.M7C;
+					px[i] = (double)L.Ref.M7XValue - (double)L.Ref.M7A * (double)L.RefX;
+					py[i] = (double)L.Ref.M7YValue - (double)L.Ref.M7C * (double)L.RefX;
+					double mag = std::sqrt(sx[i] * sx[i] + sy[i] * sy[i]);
+					if(mag < 1.0) { ok = false; break; }
+					inv[i] = 1.0 / mag;
+				}
+				const int halfW = 4;
+				for(int i = 0; i < n && ok; i++) {
+					int a = std::max(0, i - halfW), b = std::min(n - 1, i + halfW);
+					// 1/echelle : regression quadratique centree sur la ligne i
+					double m[3][3] = { { 0 } }, rhs[3] = { 0 }, c[3];
+					double ux = 0, uy = 0;
+					for(int j = a; j <= b; j++) {
+						double d = l[j] - l[i];
+						double f[3] = { 1.0, d, d * d };
+						for(int r = 0; r < 3; r++) { for(int q = 0; q < 3; q++) m[r][q] += f[r] * f[q]; rhs[r] += f[r] * inv[j]; }
+						double mg = 1.0 / inv[j];
+						ux += sx[j] / mg; uy += sy[j] / mg;
+					}
+					invS[i] = ((b - a) >= 2 && solve3(m, rhs, c) && c[0] > 0) ? c[0] : inv[i];
+					double un = std::sqrt(ux * ux + uy * uy);
+					if(un < 1e-9) { ok = false; break; }
+					dX[i] = ux / un; dY[i] = uy / un;
+					s[i] = 1.0 / invS[i];
+				}
+				for(int i = 0; i < n && ok; i++) {
+					int a = std::max(0, i - halfW), b = std::min(n - 1, i + halfW);
+					// Origine : P = a0 + a1*(s - s_i) + a2*(l - l_i)
+					double m[3][3] = { { 0 } }, bxv[3] = { 0 }, byv[3] = { 0 }, cx[3], cy[3];
+					for(int j = a; j <= b; j++) {
+						double f[3] = { 1.0, s[j] - s[i], l[j] - l[i] };
+						for(int r = 0; r < 3; r++) { for(int q = 0; q < 3; q++) m[r][q] += f[r] * f[q]; bxv[r] += f[r] * px[j]; byv[r] += f[r] * py[j]; }
+					}
+					if(solve3(m, bxv, cx) && solve3(m, byv, cy)) {
+						U0[i] = cx[0] - cx[1] * s[i]; V0[i] = cx[1]; W0[i] = cx[2];
+						U1[i] = cy[0] - cy[1] * s[i]; V1[i] = cy[1]; W1[i] = cy[2];
+					} else {
+						// Echelle constante sur la fenetre (carte plane) : P = a0 + a2*(l - l_i)
+						double sw = 0, sl = 0, sll = 0, spx = 0, spy = 0, slpx = 0, slpy = 0;
+						for(int j = a; j <= b; j++) {
+							double d = l[j] - l[i];
+							sw += 1; sl += d; sll += d * d; spx += px[j]; spy += py[j]; slpx += d * px[j]; slpy += d * py[j];
+						}
+						double den = sw * sll - sl * sl;
+						if(std::abs(den) < 1e-9) { ok = false; break; }
+						W0[i] = (sw * slpx - sl * spx) / den; U0[i] = (spx - W0[i] * sl) / sw; V0[i] = 0;
+						W1[i] = (sw * slpy - sl * spy) / den; U1[i] = (spy - W1[i] * sl) / sw; V1[i] = 0;
+					}
+					// Verification par rapport aux valeurs du jeu
+					double fx = U0[i] + V0[i] * s[i], fy = U1[i] + V1[i] * s[i];
+					double errP = std::sqrt((fx - px[i]) * (fx - px[i]) + (fy - py[i]) * (fy - py[i])) / 256.0;
+					double fsx = dX[i] * s[i], fsy = dY[i] * s[i];
+					double magS = 1.0 / inv[i];
+					double errS = std::sqrt((fsx - sx[i]) * (fsx - sx[i]) + (fsy - sy[i]) * (fsy - sy[i])) / magS;
+					// Ecart de position exprime en PIXELS d'ecran (pres de l'horizon, 1 pixel = beaucoup de texels)
+					double errPix = errP / std::max(magS / 256.0, 1e-6);
+					linePass[i] = (errPix <= 1.0 && errS <= 0.04) ? 1 : 0;
+					maxErrP = std::max(maxErrP, errPix); maxErrS = std::max(maxErrS, errS);
+				}
+				if(ok) {
+					int passed = 0;
+					for(int i = 0; i < n; i++) passed += linePass[i];
+					verdict = (passed == n) ? std::string("CORRIGEE") :
+						("CORRIGEE " + std::to_string(passed) + "/" + std::to_string(n) + " lignes");
+					if(passed == 0) verdict = "rejetee";
+					for(int i = 0; i < n; i++) {
+						M7Line& L = m7Lines[y0 + i];
+						if(!linePass[i]) continue; // cette ligne garde les valeurs brutes du jeu
+						L.UseFit = true;
+						L.Inv = invS[i]; L.DirX = dX[i]; L.DirY = dY[i];
+						L.U[0] = U0[i]; L.V[0] = V0[i]; L.W[0] = W0[i];
+						L.U[1] = U1[i]; L.V[1] = V1[i]; L.W[1] = W1[i];
+						L.FitFirst = (i == 0);
+						L.FitLast = (i == n - 1);
+					}
+				}
+			}
+			fitPattern += "[" + std::to_string(y0) + "-" + std::to_string(y1 - 1) + " " + verdict.substr(0, 8) + "] ";
+			char buf[96];
+			snprintf(buf, sizeof(buf), " (ecart max %.2f pixel, %.1f%%)", maxErrP, maxErrS * 100.0);
+			fitReport += "[lignes " + std::to_string(y0) + "-" + std::to_string(y1 - 1) + " : " + verdict + (n >= 5 ? std::string(buf) : std::string()) + "] ";
+			y0 = y1;
+		}
+		{
+			static std::string s_lastFitPattern;
+			if(fitPattern != s_lastFitPattern) {
+				s_lastFitPattern = fitPattern;
+				if(!fitPattern.empty()) MessageManager::Log("[HD-MODE7] Lissage perspective : " + fitReport);
+			}
+		}
+	}
+
+	// ====================================================================
+	// MODE 7 HD - PHASE 2 (parallele) : rendu d'une ligne SNES (= 'scale' lignes HD)
+	// Filtrage : trilineaire ('bilinear') ou anisotrope ('anisotropic', jusqu'a 8 echantillons).
+	// Unites : positions et pas en 8.8, en texels du niveau 0.
+	// ====================================================================
+	auto renderMode7Line = [&](uint32_t y) {
+		const M7Line& L = m7Lines[y];
+		const SnesHdPixelData& refM7Data = L.Ref;
+		const SnesHdPixelData& nextRefM7Data = L.Next;
+		SnesHdMode7Image* m7Img = L.Img;
+		uint32_t snesY = y + srcY;
+		uint32_t outY = y + dstY;
+
+		SdColorCache sdColorRow[256];
+		uint32_t outScale = scale;
+		uint32_t imgScale = m7Img->Scale;
+		uint32_t mapDim = 1024 * imgScale;
+
+		bool applyColorMath = !m7Img->IgnoreColorMath;
+		uint8_t pixelZ = 20 + (refM7Data.SnesPriorityLevel * 4);
+		if(refM7Data.IsHighPriority) pixelZ += 2;
+		uint32_t baseSdColor = _calculatedPalette[refM7Data.BaseColor];
+
+		for(uint32_t x = 0; x < cropWidth; x++) {
+			uint32_t currentOffset = snesY * _baseFrameInfo.Width + x + srcX;
+			uint32_t sdColor = SnesHdPackLoader::ActivePack->IsColorMathDisabled
+				? baseSdColor
+				: _calculatedPalette[ppuOutputBuffer[currentOffset]];
+			sdColorRow[x].color = sdColor;
+			// Color math PAR PIXEL (couleur SD finale - couleur Mode 7 brute de ce pixel),
+			// seulement si le Mode 7 est au premier plan (pas sous un sprite).
+			const SnesHdPixelData& m7Px = hdBuffer[currentOffset];
+			if(applyColorMath && (m7Px.IsMode7 || m7Px.IsMode7Tile) && !SnesHdPackLoader::ActivePack->IsColorMathDisabled) {
+				uint32_t pxBase = _calculatedPalette[m7Px.BaseColor];
+				sdColorRow[x].diffR = ((sdColor >> 16) & 0xFF) - (int)((pxBase >> 16) & 0xFF);
+				sdColorRow[x].diffG = ((sdColor >> 8) & 0xFF) - (int)((pxBase >> 8) & 0xFF);
+				sdColorRow[x].diffB = (sdColor & 0xFF) - (int)(pxBase & 0xFF);
+			} else {
+				sdColorRow[x].diffR = sdColorRow[x].diffG = sdColorRow[x].diffB = 0;
+			}
+		}
+
+		const int numLevels = std::min((int)m7Img->Bitmap->Mipmaps.size(), 32);
+		const uint32_t* levelPx[32];
+		for(int lv = 0; lv < numLevels; lv++) {
+			levelPx[lv] = (lv == 0) ? m7Img->Bitmap->PixelData.data() : m7Img->Bitmap->Mipmaps[lv].data();
+		}
+		const bool largeMap = refM7Data.M7LargeMap;
+		const Mode7FilterMode filterMode = m7Img->FilterMode;
+		static constexpr int kMaxAniso = 8;
+		// Biais de niveau de detail (< 0 = plus net). -0.5 : compromis nettete / scintillement.
+		static constexpr float kLodBias = -0.5f;
+
+		auto addBilinear = [&](int32_t sX, int32_t sY, int lv, float w, float& aR, float& aG, float& aB, float& aA) {
+			const uint32_t dim = mapDim >> lv;
+			const uint32_t mask = dim - 1;
+			const uint32_t* px = levelPx[lv];
+			int32_t lX = (sX >> lv) - 128; // -128 : centre des texels
+			int32_t lY = (sY >> lv) - 128;
+			int32_t ix = lX >> 8, iy = lY >> 8;
+			float fx = (lX & 0xFF) * (1.0f / 256.0f);
+			float fy = (lY & 0xFF) * (1.0f / 256.0f);
+			const float wq[4] = { (1 - fx) * (1 - fy) * w, fx * (1 - fy) * w, (1 - fx) * fy * w, fx * fy * w };
+			const int32_t qx[4] = { ix, ix + 1, ix, ix + 1 };
+			const int32_t qy[4] = { iy, iy, iy + 1, iy + 1 };
+			for(int q = 0; q < 4; q++) {
+				if(wq[q] <= 0.0f) continue;
+				uint32_t c;
+				if(largeMap) {
+					if(qx[q] < 0 || qy[q] < 0 || qx[q] >= (int32_t)dim || qy[q] >= (int32_t)dim) continue;
+					c = px[(size_t)qy[q] * dim + qx[q]];
+				} else {
+					c = px[(size_t)(qy[q] & mask) * dim + (qx[q] & mask)];
+				}
+				float a = (float)(c >> 24) * wq[q];
+				if(a <= 0.0f) continue;
+				aA += a;
+				aR += ((c >> 16) & 0xFF) * a;
+				aG += ((c >> 8) & 0xFF) * a;
+				aB += (c & 0xFF) * a;
+			}
+		};
+
+		// Parametres lisses a la position continue (ligne y, fraction tt dans [0,1[) :
+		// pas S (8.8 texels SNES / pixel SNES), origine P, et leurs derivees par ligne SNES.
+		auto evalSmooth = [&](double tt, double& Sx, double& Sy, double& Px, double& Py,
+									 double& dPx, double& dPy, double& dSx, double& dSy) {
+			const M7Line& A = L;
+			const bool hasB = !A.FitLast && (y + 1 < cropHeight) && m7Lines[y + 1].UseFit;
+			const M7Line& B = hasB ? m7Lines[y + 1] : A;
+			double invA = A.Inv, invB;
+			if(hasB) invB = B.Inv;
+			else if(!A.FitFirst && y > 0 && m7Lines[y - 1].UseFit) invB = 2.0 * invA - m7Lines[y - 1].Inv;
+			else invB = invA;
+			double iv = invA + tt * (invB - invA);
+			if(iv <= 1e-9) iv = invA;
+			double sc = 1.0 / iv;
+			double ds = -(invB - invA) * sc * sc;
+			double dx = A.DirX + tt * (B.DirX - A.DirX), dy = A.DirY + tt * (B.DirY - A.DirY);
+			double dn = std::sqrt(dx * dx + dy * dy); if(dn > 1e-9) { dx /= dn; dy /= dn; }
+			Sx = dx * sc; Sy = dy * sc; dSx = dx * ds; dSy = dy * ds;
+			double pAx = A.U[0] + A.V[0] * sc + A.W[0] * tt, pAy = A.U[1] + A.V[1] * sc + A.W[1] * tt;
+			double dAx = A.V[0] * ds + A.W[0], dAy = A.V[1] * ds + A.W[1];
+			if(hasB) {
+				double pBx = B.U[0] + B.V[0] * sc + B.W[0] * (tt - 1.0), pBy = B.U[1] + B.V[1] * sc + B.W[1] * (tt - 1.0);
+				double dBx = B.V[0] * ds + B.W[0], dBy = B.V[1] * ds + B.W[1];
+				Px = (1.0 - tt) * pAx + tt * pBx; Py = (1.0 - tt) * pAy + tt * pBy;
+				dPx = (1.0 - tt) * dAx + tt * dBx + (pBx - pAx);
+				dPy = (1.0 - tt) * dAy + tt * dBy + (pBy - pAy);
+			} else {
+				Px = pAx; Py = pAy; dPx = dAx; dPy = dAy;
+			}
+		};
+
+		// Derivee verticale par ligne HD (texels niveau 0, 8.8)
+		const float k = (float)imgScale / (float)outScale;
+		const float rawDy0X = L.Dy[0] * k, rawDy0Y = L.Dy[1] * k, rawDyGradX = L.Dy[2] * k, rawDyGradY = L.Dy[3] * k;
+
+		int32_t startX_y = refM7Data.M7XValue - (refM7Data.M7A * (int32_t)L.RefX);
+		int32_t startY_y = refM7Data.M7YValue - (refM7Data.M7C * (int32_t)L.RefX);
+		int32_t startX_next = nextRefM7Data.M7XValue - (nextRefM7Data.M7A * (int32_t)L.NextRefX);
+		int32_t startY_next = nextRefM7Data.M7YValue - (nextRefM7Data.M7C * (int32_t)L.NextRefX);
+
+		for(uint32_t sy = 0; sy < outScale; sy++) {
+			double t = ((double)sy + 0.5) / (double)outScale; // centre de la ligne HD
+
+			double curM7A_d = refM7Data.M7A;
+			if(refM7Data.M7A != nextRefM7Data.M7A && refM7Data.M7A > 0 && nextRefM7Data.M7A > 0) {
+				double invA1 = 1.0 / (double)refM7Data.M7A;
+				double invA2 = 1.0 / (double)nextRefM7Data.M7A;
+				curM7A_d = 1.0 / (invA1 + t * (invA2 - invA1));
+			} else {
+				curM7A_d = (double)refM7Data.M7A + t * ((double)nextRefM7Data.M7A - (double)refM7Data.M7A);
+			}
+			double curM7C_d = refM7Data.M7C;
+			if(refM7Data.M7C != nextRefM7Data.M7C && refM7Data.M7C != 0 && nextRefM7Data.M7C != 0) {
+				double invC1 = 1.0 / (double)refM7Data.M7C;
+				double invC2 = 1.0 / (double)nextRefM7Data.M7C;
+				curM7C_d = 1.0 / (invC1 + t * (invC2 - invC1));
+			} else {
+				curM7C_d = (double)refM7Data.M7C + t * ((double)nextRefM7Data.M7C - (double)refM7Data.M7C);
+			}
+
+			int32_t lineStartX = startX_y + (int32_t)std::round(t * (startX_next - startX_y));
+			int32_t lineStartY = startY_y + (int32_t)std::round(t * (startY_next - startY_y));
+			int32_t stepX = (int32_t)std::round((curM7A_d * (double)imgScale) / (double)outScale);
+			int32_t stepY = (int32_t)std::round((curM7C_d * (double)imgScale) / (double)outScale);
+
+			uint32_t hdRowIdx = (outY * outScale + sy) * outWidth;
+			int32_t exactX = lineStartX * (int32_t)imgScale + (stepX >> 1); // centre du 1er pixel HD
+			int32_t exactY = lineStartY * (int32_t)imgScale + (stepY >> 1);
+
+			float lineDy0X = rawDy0X, lineDy0Y = rawDy0Y, lineDyGradX = rawDyGradX, lineDyGradY = rawDyGradY;
+			if(L.UseFit) {
+				double Sx, Sy, Px, Py, dPx, dPy, dSx, dSy;
+				evalSmooth(t, Sx, Sy, Px, Py, dPx, dPy, dSx, dSy);
+				double hk = (double)imgScale / (double)outScale;
+				stepX = (int32_t)std::lround(Sx * hk);
+				stepY = (int32_t)std::lround(Sy * hk);
+				// Derivee verticale par ligne HD (texels niveau 0)
+				lineDy0X = (float)(dPx * hk); lineDy0Y = (float)(dPy * hk);
+				lineDyGradX = (float)(dSx * hk); lineDyGradY = (float)(dSy * hk);
+			}
+
+			const float lenX = std::sqrt((float)stepX * stepX + (float)stepY * stepY) / 256.0f;
+
+			// Accumulation precise (16.16) : un pas arrondi a 1/256 de texel derivait de ~2 texels
+			// en fin de ligne, differemment a chaque ligne -> bords obliques ondules.
+			int64_t posFX, posFY, stepFX, stepFY;
+			{
+				double stXd, stYd, p0Xd, p0Yd;
+				if(L.UseFit) {
+					double Sx, Sy, Px, Py, dPx, dPy, dSx, dSy;
+					evalSmooth(t, Sx, Sy, Px, Py, dPx, dPy, dSx, dSy);
+					double hk = (double)imgScale / (double)outScale;
+					stXd = Sx * hk; stYd = Sy * hk;
+					p0Xd = Px * imgScale; p0Yd = Py * imgScale;
+				} else {
+					stXd = (curM7A_d * (double)imgScale) / (double)outScale;
+					stYd = (curM7C_d * (double)imgScale) / (double)outScale;
+					p0Xd = ((double)startX_y + t * (double)(startX_next - startX_y)) * imgScale;
+					p0Yd = ((double)startY_y + t * (double)(startY_next - startY_y)) * imgScale;
+				}
+				stepFX = (int64_t)std::llround(stXd * 256.0);
+				stepFY = (int64_t)std::llround(stYd * 256.0);
+				posFX = (int64_t)std::llround((p0Xd + stXd * 0.5) * 256.0);
+				posFY = (int64_t)std::llround((p0Yd + stYd * 0.5) * 256.0);
+			}
+			exactX = (int32_t)(posFX >> 8);
+			exactY = (int32_t)(posFY >> 8);
+
+			for(uint32_t x = 0; x < cropWidth; x++) {
+				const SdColorCache& cache = sdColorRow[x];
+				uint32_t outIdx = hdRowIdx + ((x + dstX) * outScale);
+
+				// --- Niveau de detail : calcule UNE fois par pixel SNES (identique pour ses 'scale' pixels HD) ---
+				float xSd = (float)x + 0.5f;
+				float dyX = lineDy0X + xSd * lineDyGradX;
+				float dyY = lineDy0Y + xSd * lineDyGradY;
+				float lenY = std::sqrt(dyX * dyX + dyY * dyY) / 256.0f;
+				float pMax = std::max(lenX, lenY);
+				float pMin = std::max(std::min(lenX, lenY), 0.0001f);
+
+				int taps = 1;
+				float lambda;
+				if(filterMode == Mode7FilterMode::Anisotropic) {
+					taps = std::clamp((int)std::ceil(pMax / pMin), 1, kMaxAniso);
+					lambda = std::log2(std::max(pMax / (float)taps, 1e-6f)) + kLodBias;
+				} else {
+					lambda = std::log2(std::max(pMax, 1e-6f)) + kLodBias;
+				}
+				if(lambda < 0.0f) lambda = 0.0f;
+				int L0 = (int)lambda;
+				float frac = lambda - (float)L0;
+				const double tileLambdaBase = (double)lambda; // niveau de detail pour les <m7tiles> (avant ajustements)
+				if(L0 >= numLevels - 1) { L0 = numLevels - 1; frac = 0.0f; }
+				// Melange de 2 niveaux seulement dans la zone de transition (economise ~40% des lectures)
+				if(frac < 0.25f) frac = 0.0f;
+				else if(frac > 0.75f) { L0++; frac = 0.0f; }
+				else frac = (frac - 0.25f) * 2.0f;
+
+				float majX, majY;
+				if(lenX >= lenY) { majX = (float)stepX; majY = (float)stepY; } else { majX = dyX; majY = dyY; }
+				const float wTap = 1.0f / (float)taps;
+
+				for(uint32_t sx = 0; sx < outScale; sx++) {
+					uint32_t hdColorFromPng = 0;
+
+					if(filterMode == Mode7FilterMode::Nearest) {
+						int32_t lX = exactX >> L0, lY = exactY >> L0;
+						int32_t ix = lX >> 8, iy = lY >> 8;
+						uint32_t dim = mapDim >> L0;
+						if(!(largeMap && (ix < 0 || iy < 0 || ix >= (int32_t)dim || iy >= (int32_t)dim))) {
+							hdColorFromPng = levelPx[L0][(size_t)(iy & (dim - 1)) * dim + (ix & (dim - 1))];
+						}
+					} else {
+						float aR = 0, aG = 0, aB = 0, aA = 0;
+						for(int i = 0; i < taps; i++) {
+							float o = (taps == 1) ? 0.0f : (((float)i + 0.5f) / (float)taps - 0.5f);
+							int32_t sX = exactX + (int32_t)(majX * o);
+							int32_t sY = exactY + (int32_t)(majY * o);
+							if(frac == 0.0f) {
+								addBilinear(sX, sY, L0, wTap, aR, aG, aB, aA);
+							} else {
+								addBilinear(sX, sY, L0, wTap * (1.0f - frac), aR, aG, aB, aA);
+								addBilinear(sX, sY, L0 + 1, wTap * frac, aR, aG, aB, aA);
+							}
+						}
+						if(aA > 0.5f) {
+							float inv = 1.0f / aA;
+							uint32_t a = (uint32_t)std::min(aA + 0.5f, 255.0f);
+							uint32_t r = (uint32_t)std::min(aR * inv + 0.5f, 255.0f);
+							uint32_t g = (uint32_t)std::min(aG * inv + 0.5f, 255.0f);
+							uint32_t b = (uint32_t)std::min(aB * inv + 0.5f, 255.0f);
+							hdColorFromPng = (a << 24) | (r << 16) | (g << 8) | b;
+						}
+					}
+
+					// --- Tile Mode 7 individuelle presente dans cette case de la carte ? ---
+					if(anyM7Cell) {
+						const int64_t W16 = (int64_t)1024 << 16;
+						int64_t mX = posFX / (int64_t)imgScale; // coordonnee carte, 16.16 texels SNES
+						int64_t mY = posFY / (int64_t)imgScale;
+						SnesHdMode7Image* timg = nullptr;
+						int64_t lx16, ly16; // position dans la case (16.16 texels SNES, 0..8)
+						bool outside = (mX < 0 || mY < 0 || mX >= W16 || mY >= W16);
+						if(outside && largeMap) {
+							timg = m7OutsideTile;
+							const int64_t C16 = (int64_t)8 << 16;
+							lx16 = ((mX % C16) + C16) % C16; ly16 = ((mY % C16) + C16) % C16;
+						} else {
+							int64_t wx = ((mX % W16) + W16) % W16, wy = ((mY % W16) + W16) % W16;
+							int64_t cx = wx >> 19, cy = wy >> 19;
+							timg = m7CellTile[(size_t)cy * 128 + (size_t)cx];
+							lx16 = wx - (cx << 19); ly16 = wy - (cy << 19);
+						}
+						if(timg) {
+							const uint32_t tScale = timg->Scale;
+							const int tLevels = (int)timg->TileMips.size();
+							int lt = (int)std::lround(tileLambdaBase + std::log2((double)tScale / (double)imgScale));
+							lt = std::clamp(lt, 0, tLevels - 1);
+							const uint32_t dim = (8 * tScale) >> lt;
+							const uint32_t* tp = timg->TileMips[lt].data();
+							// 8.8 texels de la tile au niveau lt, centre des texels
+							int32_t tx = (int32_t)((lx16 * (int64_t)tScale) >> (8 + lt)) - 128;
+							int32_t ty = (int32_t)((ly16 * (int64_t)tScale) >> (8 + lt)) - 128;
+							int32_t ix = tx >> 8, iy = ty >> 8;
+							float fx = (tx & 0xFF) * (1.0f / 256.0f), fy = (ty & 0xFF) * (1.0f / 256.0f);
+							float tA = 0, tR = 0, tG = 0, tB = 0;
+							const float wq[4] = { (1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy };
+							const int32_t qx[4] = { ix, ix + 1, ix, ix + 1 };
+							const int32_t qy[4] = { iy, iy, iy + 1, iy + 1 };
+							for(int q = 0; q < 4; q++) {
+								int32_t cxq = std::clamp(qx[q], 0, (int32_t)dim - 1), cyq = std::clamp(qy[q], 0, (int32_t)dim - 1);
+								uint32_t c = tp[(size_t)cyq * dim + cxq];
+								float a = (float)(c >> 24) * wq[q];
+								tA += a; tR += ((c >> 16) & 0xFF) * a; tG += ((c >> 8) & 0xFF) * a; tB += (c & 0xFF) * a;
+							}
+							if(tA > 0.5f) {
+								// Tile par-dessus la piste (alpha de la tile)
+								float ta = std::min(tA, 255.0f) / 255.0f;
+								float r = tR / tA, g = tG / tA, b = tB / tA;
+								float ma = (float)(hdColorFromPng >> 24) / 255.0f;
+								float mr = (float)((hdColorFromPng >> 16) & 0xFF), mg = (float)((hdColorFromPng >> 8) & 0xFF), mb = (float)(hdColorFromPng & 0xFF);
+								float oa = ta + ma * (1.0f - ta);
+								if(oa > 0.0f) {
+									float k1 = ta / oa, k2 = ma * (1.0f - ta) / oa;
+									uint32_t orr = (uint32_t)std::min(r * k1 + mr * k2 + 0.5f, 255.0f);
+									uint32_t og = (uint32_t)std::min(g * k1 + mg * k2 + 0.5f, 255.0f);
+									uint32_t ob = (uint32_t)std::min(b * k1 + mb * k2 + 0.5f, 255.0f);
+									uint32_t oA = (uint32_t)std::min(oa * 255.0f + 0.5f, 255.0f);
+									hdColorFromPng = (oA << 24) | (orr << 16) | (og << 8) | ob;
+								}
+							}
+						}
+					}
+
+					uint32_t finalColor;
+					if((hdColorFromPng >> 24) > 0) {
+						if(applyColorMath) {
+							int outR = std::clamp(((int)(hdColorFromPng >> 16) & 0xFF) + cache.diffR, 0, 255);
+							int outG = std::clamp(((int)(hdColorFromPng >> 8) & 0xFF) + cache.diffG, 0, 255);
+							int outB = std::clamp(((int)hdColorFromPng & 0xFF) + cache.diffB, 0, 255);
+							finalColor = (hdColorFromPng & 0xFF000000) | (outR << 16) | (outG << 8) | outB;
+						} else {
+							finalColor = hdColorFromPng | 0xFF000000;
+						}
+					} else {
+						finalColor = 0x00000000;
+					}
+
+					out[outIdx + sx] = finalColor;
+					_zBuffer[outIdx + sx] = ((finalColor >> 24) == 0) ? 0 : pixelZ;
+
+					posFX += stepFX;
+					posFY += stepFY;
+					exactX = (int32_t)(posFX >> 8);
+					exactY = (int32_t)(posFY >> 8);
+				}
+			}
+		}
+	};
+
+	if(anyMode7) {
+		// Lignes reparties sur plusieurs coeurs (entrelacees pour equilibrer la charge).
+		// On laisse 2 coeurs a l'emulation et au reste du systeme.
+		unsigned hc = std::thread::hardware_concurrency();
+		int nThreads = std::clamp((int)hc - 2, 1, 8);
+		if(nThreads <= 1 || cropHeight < 16) {
+			for(uint32_t y = 0; y < cropHeight; y++) {
+				if(m7Lines[y].Img) renderMode7Line(y);
+			}
+		} else {
+			std::vector<std::thread> workers;
+			workers.reserve(nThreads);
+			for(int t = 0; t < nThreads; t++) {
+				workers.emplace_back([&, t]() {
+					for(uint32_t y = (uint32_t)t; y < cropHeight; y += (uint32_t)nThreads) {
+						if(m7Lines[y].Img) renderMode7Line(y);
+					}
+				});
+			}
+			for(auto& w : workers) w.join();
+		}
+	}
 
 	for(uint32_t y = 0; y < cropHeight; y++) {
 		uint32_t snesY = y + srcY;
 		uint32_t outY = y + dstY;
-
-		bool hasMode7OnLine = false;
-		SnesHdPixelData refM7Data;
-		SnesHdPixelData nextRefM7Data;
-		uint32_t refX = 0;
-
-		// 1. Recherche du premier pixel Mode 7 sur la ligne actuelle
-		for(uint32_t tx = 0; tx < cropWidth; tx++) {
-			uint32_t offset = snesY * _baseFrameInfo.Width + tx + srcX;
-			if(hdBuffer[offset].IsMode7) {
-				refM7Data = hdBuffer[offset];
-				refX = tx;
-				hasMode7OnLine = true;
-				break;
-			}
-		}
-
-		if(hasMode7OnLine) {
-			// 2. Recherche du premier pixel Mode 7 sur la ligne suivante
-			bool hasNextLine = false;
-			uint32_t nextRefX = 0;
-			if(snesY + 1 < _baseFrameInfo.Height) {
-				for(uint32_t tx = 0; tx < cropWidth; tx++) {
-					uint32_t offset = (snesY + 1) * _baseFrameInfo.Width + tx + srcX;
-					if(hdBuffer[offset].IsMode7) {
-						nextRefM7Data = hdBuffer[offset];
-						nextRefX = tx;
-						hasNextLine = true;
-						break;
-					}
-				}
-			}
-			if(!hasNextLine) {
-				nextRefM7Data = refM7Data;
-				nextRefX = refX;
-			}
-
-			SnesHdMode7Image* m7Img = SnesHdPackLoader::ActivePack->GetMode7Image(refM7Data.M7MapHash);
-
-			if(m7Img && m7Img->Bitmap && !m7Img->Bitmap->PixelData.empty()) {
-				uint32_t outScale = scale;
-				uint32_t imgScale = m7Img->Scale;
-				uint32_t mapDim = 1024 * imgScale;
-
-
-			/*
-			// version buguée avec load async
-			// Filet de sécurité : exécuté uniquement si LoadAsync a été annulé ou ignoré
-				if(m7Img->Bitmap->Mipmaps.empty()) {
-						bool dummyCancel = false;
-						m7Img->Init(dummyCancel);
-				}
-				*/
-				
-				//--------- backup -----------
-				if(m7Img->Bitmap->Mipmaps.empty()) {
-					m7Img->Bitmap->Mipmaps.push_back(m7Img->Bitmap->PixelData);
-					uint32_t currentDim = mapDim;
-					for(int level = 1; level <= 3; level++) {
-						uint32_t prevDim = currentDim;
-						currentDim /= 2;
-						std::vector<uint32_t> nextMip(currentDim * currentDim, 0);
-						const std::vector<uint32_t>& prevMip = m7Img->Bitmap->Mipmaps[level - 1];
-
-						for(uint32_t my = 0; my < currentDim; my++) {
-							for(uint32_t mx = 0; mx < currentDim; mx++) {
-								uint32_t p00 = prevMip[(my * 2) * prevDim + (mx * 2)];
-								uint32_t p10 = prevMip[(my * 2) * prevDim + (mx * 2 + 1)];
-								uint32_t p01 = prevMip[(my * 2 + 1) * prevDim + (mx * 2)];
-								uint32_t p11 = prevMip[(my * 2 + 1) * prevDim + (mx * 2 + 1)];
-
-								uint32_t a1 = p00 >> 24, a2 = p10 >> 24, a3 = p01 >> 24, a4 = p11 >> 24;
-								uint32_t sumA = a1 + a2 + a3 + a4;
-
-								if(sumA == 0) {
-									nextMip[my * currentDim + mx] = 0x00000000;
-								} else {
-									uint32_t r = (((p00 >> 16) & 0xFF) * a1 + ((p10 >> 16) & 0xFF) * a2 + ((p01 >> 16) & 0xFF) * a3 + ((p11 >> 16) & 0xFF) * a4) / sumA;
-									uint32_t g = (((p00 >> 8) & 0xFF) * a1 + ((p10 >> 8) & 0xFF) * a2 + ((p01 >> 8) & 0xFF) * a3 + ((p11 >> 8) & 0xFF) * a4) / sumA;
-									uint32_t b = ((p00 & 0xFF) * a1 + (p10 & 0xFF) * a2 + (p01 & 0xFF) * a3 + (p11 & 0xFF) * a4) / sumA;
-									nextMip[my * currentDim + mx] = ((sumA / 4) << 24) | (r << 16) | (g << 8) | b;
-								}
-							}
-						}
-						m7Img->Bitmap->Mipmaps.push_back(nextMip);
-					}
-				}
-				//--------- end backup -----------
-				
-
-
-				bool applyColorMath = !m7Img->IgnoreColorMath;
-				uint8_t pixelZ = 20 + (refM7Data.SnesPriorityLevel * 4);
-				if(refM7Data.IsHighPriority) pixelZ += 2;
-
-				uint32_t baseSdColor = _calculatedPalette[refM7Data.BaseColor];
-				int baseR = (baseSdColor >> 16) & 0xFF;
-				int baseG = (baseSdColor >> 8) & 0xFF;
-				int baseB = baseSdColor & 0xFF;
-
-				for(uint32_t x = 0; x < cropWidth; x++) {
-					uint32_t snesX = x + srcX;
-					uint32_t currentOffset = snesY * _baseFrameInfo.Width + snesX;
-					uint16_t currentSnesPixel = ppuOutputBuffer[currentOffset];
-					uint32_t sdColor = SnesHdPackLoader::ActivePack->IsColorMathDisabled
-						? baseSdColor
-						: _calculatedPalette[currentSnesPixel];
-
-					sdColorRow[x].color = sdColor;
-					// Color math PAR PIXEL : on compare la couleur SD finale (apres fenetres /
-					// color math) a la couleur Mode 7 brute de CE pixel. Sans color math, l'ecart
-					// est nul. Avant, la reference etait le 1er pixel Mode 7 de la ligne, ce qui
-					// injectait les variations de la texture SD dans l'image HD.
-					// Pixels ou le Mode 7 n'est pas au premier plan (sprite devant) : pas d'ecart,
-					// sinon les couleurs du sprite teinteraient le decor.
-					const SnesHdPixelData& m7Px = hdBuffer[currentOffset];
-					if(applyColorMath && m7Px.IsMode7 && !SnesHdPackLoader::ActivePack->IsColorMathDisabled) {
-						uint32_t pxBase = _calculatedPalette[m7Px.BaseColor];
-						sdColorRow[x].diffR = ((sdColor >> 16) & 0xFF) - (int)((pxBase >> 16) & 0xFF);
-						sdColorRow[x].diffG = ((sdColor >> 8) & 0xFF) - (int)((pxBase >> 8) & 0xFF);
-						sdColorRow[x].diffB = (sdColor & 0xFF) - (int)(pxBase & 0xFF);
-					} else {
-						sdColorRow[x].diffR = 0;
-						sdColorRow[x].diffG = 0;
-						sdColorRow[x].diffB = 0;
-					}
-				}
-
-				int32_t startX_y = refM7Data.M7XValue - (refM7Data.M7A * (int32_t)refX);
-				int32_t startY_y = refM7Data.M7YValue - (refM7Data.M7C * (int32_t)refX);
-
-				int32_t startX_next = nextRefM7Data.M7XValue - (nextRefM7Data.M7A * (int32_t)nextRefX);
-				int32_t startY_next = nextRefM7Data.M7YValue - (nextRefM7Data.M7C * (int32_t)nextRefX);
-
-				for(uint32_t sy = 0; sy < outScale; sy++) {
-					double t = (double)sy / (double)outScale;
-
-					double curM7A_d = refM7Data.M7A;
-					if(refM7Data.M7A != nextRefM7Data.M7A && refM7Data.M7A > 0 && nextRefM7Data.M7A > 0) {
-						double invA1 = 1.0 / (double)refM7Data.M7A;
-						double invA2 = 1.0 / (double)nextRefM7Data.M7A;
-						curM7A_d = 1.0 / (invA1 + t * (invA2 - invA1));
-					} else {
-						curM7A_d = (double)refM7Data.M7A + t * ((double)nextRefM7Data.M7A - (double)refM7Data.M7A);
-					}
-
-					double curM7C_d = refM7Data.M7C;
-					if(refM7Data.M7C != nextRefM7Data.M7C && refM7Data.M7C != 0 && nextRefM7Data.M7C != 0) {
-						double invC1 = 1.0 / (double)refM7Data.M7C;
-						double invC2 = 1.0 / (double)nextRefM7Data.M7C;
-						curM7C_d = 1.0 / (invC1 + t * (invC2 - invC1));
-					} else {
-						curM7C_d = (double)refM7Data.M7C + t * ((double)nextRefM7Data.M7C - (double)refM7Data.M7C);
-					}
-
-					int32_t lineStartX = startX_y + (int32_t)std::round(t * (startX_next - startX_y));
-					int32_t lineStartY = startY_y + (int32_t)std::round(t * (startY_next - startY_y));
-
-					int32_t stepX = (int32_t)std::round((curM7A_d * (double)imgScale) / (double)outScale);
-					int32_t stepY = (int32_t)std::round((curM7C_d * (double)imgScale) / (double)outScale);
-
-					int64_t distSq = (((int64_t)stepX * stepX) + ((int64_t)stepY * stepY)) >> 16;
-					int lod = 0;
-					if(distSq > 16) lod = 3;
-					else if(distSq > 4) lod = 2;
-					else if(distSq > 1) lod = 1;
-					if(lod >= (int)m7Img->Bitmap->Mipmaps.size()) lod = (int)m7Img->Bitmap->Mipmaps.size() - 1;
-
-					uint32_t curDim = mapDim >> lod;
-					uint32_t curMask = curDim - 1;
-					const uint32_t* curPixels = m7Img->Bitmap->Mipmaps[lod].data();
-
-					uint32_t hdRowIdx = (outY * outScale + sy) * outWidth;
-
-					int32_t exactX = lineStartX * (int32_t)imgScale;
-					int32_t exactY = lineStartY * (int32_t)imgScale;
-
-					auto sampleBilinearFast = [&](int32_t sX, int32_t sY) -> uint32_t {
-						int32_t lX = sX >> lod;
-						int32_t lY = sY >> lod;
-						int32_t px = lX >> 8;
-						int32_t py = lY >> 8;
-
-						if(refM7Data.M7LargeMap && (px < 0 || px >= (int32_t)curDim || py < 0 || py >= (int32_t)curDim)) {
-							return 0;
-						}
-
-						uint32_t fx = lX & 0xFF;
-						uint32_t fy = lY & 0xFF;
-						uint32_t x0 = px & curMask;
-						uint32_t x1 = (px + 1) & curMask;
-						uint32_t y0 = py & curMask;
-						uint32_t y1 = (py + 1) & curMask;
-
-						uint32_t p00 = curPixels[y0 * curDim + x0];
-						uint32_t p10 = curPixels[y0 * curDim + x1];
-						uint32_t p01 = curPixels[y1 * curDim + x0];
-						uint32_t p11 = curPixels[y1 * curDim + x1];
-
-						uint32_t w00 = (256 - fx) * (256 - fy);
-						uint32_t w10 = fx * (256 - fy);
-						uint32_t w01 = (256 - fx) * fy;
-						uint32_t w11 = fx * fy;
-
-						uint32_t a = (((p00 >> 24) & 0xFF) * w00 + ((p10 >> 24) & 0xFF) * w10 + ((p01 >> 24) & 0xFF) * w01 + ((p11 >> 24) & 0xFF) * w11) >> 16;
-						if(a == 0) return 0;
-
-						uint32_t r = (((p00 >> 16) & 0xFF) * w00 + ((p10 >> 16) & 0xFF) * w10 + ((p01 >> 16) & 0xFF) * w01 + ((p11 >> 16) & 0xFF) * w11) >> 16;
-						uint32_t g = (((p00 >> 8) & 0xFF) * w00 + ((p10 >> 8) & 0xFF) * w10 + ((p01 >> 8) & 0xFF) * w01 + ((p11 >> 8) & 0xFF) * w11) >> 16;
-						uint32_t b = ((p00 & 0xFF) * w00 + (p10 & 0xFF) * w10 + (p01 & 0xFF) * w01 + (p11 & 0xFF) * w11) >> 16;
-
-						return (a << 24) | (r << 16) | (g << 8) | b;
-					};
-
-					int32_t halfStepX = stepX >> 1;
-					int32_t halfStepY = stepY >> 1;
-
-					for(uint32_t x = 0; x < cropWidth; x++) {
-						const SdColorCache& cache = sdColorRow[x];
-						uint32_t outX = x + dstX;
-						uint32_t outIdx = hdRowIdx + (outX * outScale);
-
-						for(uint32_t sx = 0; sx < outScale; sx++) {
-							uint32_t hdColorFromPng = 0;
-
-							if(m7Img->FilterMode == Mode7FilterMode::Anisotropic) {
-								uint32_t c1 = sampleBilinearFast(exactX - halfStepX, exactY - halfStepY);
-								uint32_t c2 = sampleBilinearFast(exactX + halfStepX, exactY + halfStepY);
-
-								uint32_t a1 = (c1 >> 24) & 0xFF, a2 = (c2 >> 24) & 0xFF;
-								uint32_t sumA = a1 + a2;
-								if(sumA > 0) {
-									uint32_t avgR = (((c1 >> 16) & 0xFF) * a1 + ((c2 >> 16) & 0xFF) * a2) / sumA;
-									uint32_t avgG = (((c1 >> 8) & 0xFF) * a1 + ((c2 >> 8) & 0xFF) * a2) / sumA;
-									uint32_t avgB = ((c1 & 0xFF) * a1 + (c2 & 0xFF) * a2) / sumA;
-									hdColorFromPng = ((sumA >> 1) << 24) | (avgR << 16) | (avgG << 8) | avgB;
-								}
-							} else if(m7Img->FilterMode == Mode7FilterMode::Bilinear) {
-								hdColorFromPng = sampleBilinearFast(exactX, exactY);
-							} else {
-								int32_t lodX = exactX >> lod;
-								int32_t lodY = exactY >> lod;
-								int32_t px = lodX >> 8;
-								int32_t py = lodY >> 8;
-
-								if(!(refM7Data.M7LargeMap && (px < 0 || px >= (int32_t)curDim || py < 0 || py >= (int32_t)curDim))) {
-									hdColorFromPng = curPixels[(py & curMask) * curDim + (px & curMask)];
-								}
-							}
-
-							uint32_t finalColor = cache.color;
-							if((hdColorFromPng >> 24) > 0) {
-								if(applyColorMath) {
-									int outR = std::clamp(((int)(hdColorFromPng >> 16) & 0xFF) + cache.diffR, 0, 255);
-									int outG = std::clamp(((int)(hdColorFromPng >> 8) & 0xFF) + cache.diffG, 0, 255);
-									int outB = std::clamp(((int)hdColorFromPng & 0xFF) + cache.diffB, 0, 255);
-									finalColor = (hdColorFromPng & 0xFF000000) | (outR << 16) | (outG << 8) | outB;
-								} else {
-									finalColor = hdColorFromPng | 0xFF000000;
-								}
-							} else {
-								finalColor = 0x00000000;
-							}
-
-							out[outIdx + sx] = finalColor;
-							_zBuffer[outIdx + sx] = ((finalColor >> 24) == 0) ? 0 : pixelZ;
-
-							exactX += stepX;
-							exactY += stepY;
-						}
-					}
-				}
-			}
-		}
 
 		// --- BOUCLE X POUR LES SPRITES ET TUILES DE BASE ---
 		for(uint32_t x = 0; x < cropWidth; x++) {
@@ -611,13 +1042,16 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 			// Si une tuile Mode 7 individuelle (<m7tiles>) se trouve sous le sprite (sauvegardée dans hdDataSub),
 			// on la dessine d'abord dans le buffer de sortie afin que le fond ne reste pas noir/transparent sous le sprite.
-			if(hdDataSub.IsMode7Tile) {
+			// Lignes rendues par la passe Mode 7 HD : les <m7tiles> y sont deja echantillonnees
+			// a la resolution HD. Le rendu bloc par bloc ne sert plus qu'aux autres lignes.
+			const bool m7LineDone = (m7Lines[y].Img != nullptr);
+			if(hdDataSub.IsMode7Tile && !m7LineDone) {
 				uint8_t m7PixelZ = 20 + (hdDataSub.SnesPriorityLevel * 4);
 				renderMode7Tile(hdDataSub, m7PixelZ, false);
 			}
 
 			if(hdData.IsMode7Tile) {
-				renderMode7Tile(hdData, pixelZ, true);
+				if(!m7LineDone) renderMode7Tile(hdData, pixelZ, true);
 				continue;
 			}
 
