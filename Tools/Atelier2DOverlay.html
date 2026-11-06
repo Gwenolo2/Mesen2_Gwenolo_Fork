@@ -1,0 +1,440 @@
+<title>Atelier 2DOverlay</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Silkscreen&display=swap">
+<style>
+/* Layout : aperçu SNES collant à gauche (écran + JSON), réglages groupés à droite ; une colonne sur téléphone */
+:root {
+  --bg: #F1F2F6; --panel: #FFFFFF; --line: #DADCE5; --fg: #1B1E2B; --muted: #5C6273;
+  --accent: #4F43AE; --accent-soft: #E7E5F7; --field: #F7F8FB;
+  --f-display: "Silkscreen", "Courier New", monospace;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #14151C; --panel: #1D1F29; --line: #2E3140; --fg: #E6E7EE; --muted: #9A9FB2;
+  --accent: #A59CFF; --accent-soft: #2A2750; --field: #171922; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #14151C; --panel: #1D1F29; --line: #2E3140; --fg: #E6E7EE; --muted: #9A9FB2;
+  --accent: #A59CFF; --accent-soft: #2A2750; --field: #171922; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 14px; line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 40px }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; max-width: 1280px; margin: 0 auto 18px }
+h1 { font-family: var(--f-display); font-weight: 400; font-size: 26px; margin: 0; letter-spacing: .02em; text-wrap: balance }
+h1 span { color: var(--accent) }
+header p { margin: 0; color: var(--muted); max-width: 62ch }
+.app { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 20px; max-width: 1280px; margin: 0 auto; align-items: start }
+@media (max-width: 920px) { .app { grid-template-columns: minmax(0, 1fr) } .left { position: static !important } }
+.left { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); display: flex; flex-direction: column; gap: 14px; min-width: 0 }
+.screen { background: #000; border-radius: 6px; overflow: hidden; border: 1px solid var(--line) }
+canvas#view { display: block; width: 100%; height: auto; image-rendering: pixelated; aspect-ratio: 256 / 224 }
+.bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center }
+.bar .stat { margin-left: auto; color: var(--muted); font-family: var(--f-mono); font-size: 12px; font-variant-numeric: tabular-nums }
+label.inline { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px }
+select, input[type=number], input[type=text], textarea {
+  font: inherit; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px }
+textarea { font-family: var(--f-mono); font-size: 12px; width: 100%; resize: vertical }
+button { font: inherit; font-weight: 500; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 11px; cursor: pointer }
+button:hover { border-color: var(--accent) }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--panel) }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; min-width: 0 }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; font-weight: 600 }
+.out { display: flex; flex-direction: column; gap: 8px }
+pre.code { margin: 0; font-family: var(--f-mono); font-size: 12px; background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 10px; overflow: auto; max-height: 340px; white-space: pre }
+.tagline { font-family: var(--f-mono); font-size: 12px; background: var(--accent-soft); border-radius: 4px; padding: 8px 10px; overflow-x: auto; white-space: nowrap }
+.presets { display: flex; flex-wrap: wrap; gap: 6px }
+.presets button { padding: 4px 10px; font-size: 13px }
+.presets button[aria-pressed=true] { background: var(--accent-soft); border-color: var(--accent) }
+.right { display: flex; flex-direction: column; gap: 14px; min-width: 0 }
+fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 7px }
+.row { display: grid; grid-template-columns: 132px minmax(0, 1fr) 72px; gap: 10px; align-items: center }
+.row > span { font-size: 13px }
+.row > span small { display: block; color: var(--muted); font-family: var(--f-mono); font-size: 11px }
+.row input[type=range] { width: 100%; accent-color: var(--accent) }
+.row input[type=number] { width: 72px; font-variant-numeric: tabular-nums; font-size: 13px }
+.row input[type=color] { width: 72px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--field) }
+.row .wide { grid-column: 2 / 4 }
+.hint { color: var(--muted); font-size: 12.5px; margin: 2px 0 0 }
+.toast { color: var(--accent); font-size: 12.5px; min-height: 1em }
+@media (max-width: 440px) { .row { grid-template-columns: 104px minmax(0, 1fr) 62px; gap: 8px } .row input[type=number], .row input[type=color] { width: 62px } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto } }
+</style>
+
+<header>
+  <h1>Atelier <span>2DOverlay</span></h1>
+  <p>Réglez un effet de particules, voyez-le sur un écran SNES 256 × 224, puis copiez le JSON dans le dossier <code>effets\</code> de votre pack. Même moteur que le filtre HD de Mesen.</p>
+</header>
+
+<div class="app">
+  <section class="left">
+    <div class="screen"><canvas id="view" width="1024" height="896"></canvas></div>
+    <div class="bar">
+      <label class="inline" for="scale">Échelle HD
+        <select id="scale"><option value="2">×2</option><option value="3">×3</option><option value="4" selected>×4</option><option value="6">×6</option></select></label>
+      <label class="inline" for="bg">Fond
+        <select id="bg"><option value="grass">Herbe</option><option value="dungeon">Donjon</option><option value="night">Nuit</option><option value="black">Noir</option><option value="shot">Capture…</option></select></label>
+      <input id="shotFile" type="file" accept="image/*" hidden>
+      <button id="restart" type="button">Relancer</button>
+      <button id="pause" type="button">Pause</button>
+      <span class="stat" id="stat">0 particules</span>
+    </div>
+    <div class="card out">
+      <h2>Ligne pour snes_hires.txt</h2>
+      <label class="inline" for="fname">Nom du fichier <input id="fname" type="text" value="mon_effet" size="16"> .json</label>
+      <div class="tagline" id="tag"></div>
+      <h2 style="margin-top:6px">JSON</h2>
+      <pre class="code" id="json"></pre>
+      <div class="bar">
+        <button class="primary" id="copy" type="button">Copier le JSON</button>
+        <button id="copyTag" type="button">Copier la ligne</button>
+        <span class="toast" id="toast" role="status"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="right">
+    <div class="card">
+      <h2>Préréglages</h2>
+      <div class="presets" id="presets"></div>
+    </div>
+    <div class="card"><h2>Naissance</h2><fieldset id="g-spawn"></fieldset></div>
+    <div class="card"><h2>Mouvement</h2><fieldset id="g-move"></fieldset>
+      <p class="hint">Angles : 0 = droite, 90 = bas, 180 = gauche, 270 = haut.</p></div>
+    <div class="card"><h2>Apparence</h2><fieldset id="g-look"></fieldset></div>
+    <div class="card"><h2>Balise et ancrage</h2><fieldset id="g-tag"></fieldset>
+      <p class="hint">« Défilement simulé » imite la couche d'ancrage qui défile, pour voir l'effet de SpeedX / SpeedY. Il n'est pas exporté.</p></div>
+    <div class="card out">
+      <h2>Importer un JSON</h2>
+      <textarea id="imp" rows="5" placeholder='Collez ici un JSON existant (ex. neige.json)'></textarea>
+      <div class="bar"><button id="doImp" type="button">Charger dans l'atelier</button><span class="toast" id="impMsg" role="status"></span></div>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+'use strict';
+// ---------- Définition des paramètres (mêmes clés et défauts que SnesHdPackLoader.cpp) ----------
+const P = [
+  ['spawn','rate','Naissances / s',0,600,1,60],
+  ['spawn','maxParticles','Maximum',1,5000,1,300],
+  ['spawn','lifeMin','Vie min (s)',0.05,20,0.05,2],
+  ['spawn','lifeMax','Vie max (s)',0.05,20,0.05,4],
+  ['spawn','spawnX','Zone X',0,1,0.01,0],
+  ['spawn','spawnY','Zone Y',0,1,0.01,0],
+  ['spawn','spawnW','Zone largeur',0,1,0.01,1],
+  ['spawn','spawnH','Zone hauteur',0,1,0.01,1],
+  ['spawn','prewarm','Écran déjà rempli','bool',true],
+  ['move','speedMin','Vitesse min',0,500,1,20],
+  ['move','speedMax','Vitesse max',0,500,1,40],
+  ['move','angleMin','Angle min (°)',0,360,1,80],
+  ['move','angleMax','Angle max (°)',0,360,1,100],
+  ['move','gravityX','Gravité X',-300,300,1,0],
+  ['move','gravityY','Gravité Y',-300,300,1,0],
+  ['move','windX','Vent X',-200,200,1,0],
+  ['move','windY','Vent Y',-200,200,1,0],
+  ['move','turbulence','Turbulence',0,100,0.5,0],
+  ['move','turbulenceFreq','Fréquence turb. (Hz)',0,5,0.05,0.5],
+  ['move','rotationMin','Rotation min (°)',0,360,1,0],
+  ['move','rotationMax','Rotation max (°)',0,360,1,0],
+  ['move','spinMin','Tournoiement min (°/s)',-720,720,5,0],
+  ['move','spinMax','Tournoiement max (°/s)',-720,720,5,0],
+  ['look','texture','Texture PNG','tex',''],
+  ['look','dotSize','Taille du point',0.25,16,0.05,2],
+  ['look','sizeStart','Taille début',0,8,0.05,1],
+  ['look','sizeEnd','Taille fin',0,8,0.05,1],
+  ['look','sizeRandom','Taille aléatoire',0,0.95,0.01,0],
+  ['look','alphaStart','Opacité début',0,1,0.01,1],
+  ['look','alphaEnd','Opacité fin',0,1,0.01,1],
+  ['look','fadeIn','Fondu entrée',0,1,0.01,0.1],
+  ['look','fadeOut','Fondu sortie',0,1,0.01,0.2],
+  ['look','colorStart','Couleur début','color','#FFFFFF'],
+  ['look','colorEnd','Couleur fin','color','#FFFFFF'],
+  ['look','blend','Mélange','blend','normal'],
+  ['tag','Z','Z-index',0,255,1,95],
+  ['tag','Layer','Couche d\'ancrage',0,4,1,1],
+  ['tag','SpeedX','SpeedX',-4,4,0.05,1],
+  ['tag','SpeedY','SpeedY',-4,4,0.05,1],
+  ['tag','Alpha','Alpha global',0,1,0.01,1],
+  ['tag','FieldW','Champ largeur (écrans)',0.25,4,0.05,1],
+  ['tag','FieldH','Champ hauteur (écrans)',0.25,4,0.05,1],
+  ['tag','scrollX','Défilement simulé X (px/s)',-200,200,1,0],
+  ['tag','scrollY','Défilement simulé Y (px/s)',-200,200,1,0],
+];
+const DEF = {}, META = {};
+for (const d of P) { const [g,k,label,a] = d; META[k] = d;
+  DEF[k] = (a==='bool'||a==='tex'||a==='color'||a==='blend') ? d[4] : d[6]; }
+const LOWER = {}; for (const k in DEF) LOWER[k.toLowerCase()] = k; LOWER['zindex'] = 'Z';
+const TAGKEYS = ['Z','Layer','SpeedX','SpeedY','Alpha','FieldW','FieldH','scrollX','scrollY'];
+let S = { ...DEF };
+let texImg = null; // {w,h,px:Uint32Array ARGB, name}
+
+const PRESETS = {
+  'Neige': { maxParticles:350, rate:70, lifeMin:4, lifeMax:7, speedMin:12, speedMax:25, windX:6, turbulence:10, turbulenceFreq:0.4,
+    dotSize:2.2, sizeRandom:0.5, alphaStart:0.9, alphaEnd:0.9 },
+  'Blizzard': { maxParticles:900, rate:260, lifeMin:2, lifeMax:4, speedMin:30, speedMax:60, angleMin:70, angleMax:95, windX:80,
+    turbulence:18, turbulenceFreq:0.8, dotSize:1.8, sizeRandom:0.6, alphaStart:0.85, alphaEnd:0.85 },
+  'Pluie': { maxParticles:500, rate:220, lifeMin:0.8, lifeMax:1.4, speedMin:220, speedMax:300, angleMin:100, angleMax:106,
+    dotSize:1.2, sizeRandom:0.3, alphaStart:0.55, alphaEnd:0.4, fadeIn:0.05, fadeOut:0.1, colorStart:'#B8C8FF', colorEnd:'#B8C8FF' },
+  'Lucioles': { maxParticles:60, rate:8, lifeMin:4, lifeMax:8, speedMin:2, speedMax:8, angleMin:0, angleMax:360, turbulence:14,
+    turbulenceFreq:0.25, dotSize:3.5, sizeRandom:0.4, alphaStart:1, alphaEnd:0.6, fadeIn:0.3, fadeOut:0.4,
+    colorStart:'#FFF27A', colorEnd:'#7AFF9A', blend:'additive' },
+  'Braises': { maxParticles:200, rate:25, lifeMin:2, lifeMax:4, spawnY:0.9, spawnH:0.1, speedMin:15, speedMax:35, angleMin:260, angleMax:280,
+    turbulence:12, turbulenceFreq:0.6, dotSize:2, sizeRandom:0.4, sizeEnd:0.5, alphaEnd:0, colorStart:'#FFB040', colorEnd:'#FF3000', blend:'additive' },
+  'Poussière': { maxParticles:80, rate:5, lifeMin:6, lifeMax:12, speedMin:1, speedMax:4, angleMin:0, angleMax:360, turbulence:4,
+    turbulenceFreq:0.15, dotSize:1.5, sizeRandom:0.3, alphaStart:0.5, alphaEnd:0.5, fadeIn:0.25, fadeOut:0.3, colorStart:'#FFF4D6', colorEnd:'#FFF4D6' },
+  'Bulles': { maxParticles:70, rate:7, lifeMin:3, lifeMax:6, spawnY:0.85, spawnH:0.15, speedMin:18, speedMax:35, angleMin:265, angleMax:275,
+    turbulence:8, turbulenceFreq:0.7, dotSize:3, sizeRandom:0.5, sizeStart:0.6, sizeEnd:1.2, alphaStart:0.6, alphaEnd:0.4, colorStart:'#CFEFFF', colorEnd:'#FFFFFF' },
+};
+
+// ---------- Construction de l'interface ----------
+const $ = id => document.getElementById(id);
+const inputs = {};
+function fmt(v, step) { const dec = step >= 1 ? 0 : (String(step).split('.')[1] || '').length; return Number(v).toFixed(dec); }
+for (const d of P) {
+  const [g,k,label,a] = d;
+  const row = document.createElement('div'); row.className = 'row';
+  const lab = document.createElement('span'); lab.innerHTML = label + '<small>' + k + '</small>'; row.appendChild(lab);
+  if (a === 'bool') {
+    const c = document.createElement('input'); c.type = 'checkbox'; c.id = 'p-' + k; c.className = 'wide';
+    c.style.justifySelf = 'start'; c.addEventListener('change', () => { S[k] = c.checked; changed(true); });
+    row.appendChild(c); inputs[k] = { set: v => c.checked = !!v };
+  } else if (a === 'color') {
+    const c = document.createElement('input'); c.type = 'color'; c.id = 'p-' + k; c.className = 'wide'; c.style.justifySelf = 'start';
+    c.addEventListener('input', () => { S[k] = c.value.toUpperCase(); changed(); });
+    row.appendChild(c); inputs[k] = { set: v => c.value = v.toLowerCase() };
+  } else if (a === 'blend') {
+    const s = document.createElement('select'); s.id = 'p-' + k; s.className = 'wide'; s.style.justifySelf = 'start';
+    s.innerHTML = '<option value="normal">normal</option><option value="additive">additive (lumineux)</option>';
+    s.addEventListener('change', () => { S[k] = s.value; changed(); });
+    row.appendChild(s); inputs[k] = { set: v => s.value = v };
+  } else if (a === 'tex') {
+    const wrap = document.createElement('div'); wrap.className = 'wide'; wrap.style.display = 'flex'; wrap.style.gap = '8px'; wrap.style.alignItems = 'center'; wrap.style.flexWrap = 'wrap';
+    const f = document.createElement('input'); f.type = 'file'; f.accept = 'image/png'; f.id = 'p-tex'; f.hidden = true;
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Choisir un PNG';
+    const n = document.createElement('span'); n.style.color = 'var(--muted)'; n.style.fontSize = '12px'; n.textContent = 'aucune (point doux)';
+    const x = document.createElement('button'); x.type = 'button'; x.textContent = 'Retirer'; x.hidden = true;
+    b.onclick = () => f.click();
+    x.onclick = () => { texImg = null; S.texture = ''; n.textContent = 'aucune (point doux)'; x.hidden = true; changed(); };
+    f.onchange = () => { const file = f.files[0]; if (!file) return; const url = URL.createObjectURL(file); const im = new Image();
+      im.onload = () => { const c = document.createElement('canvas'); c.width = im.width; c.height = im.height; const cx = c.getContext('2d');
+        cx.drawImage(im, 0, 0); const d = cx.getImageData(0, 0, im.width, im.height).data; const px = new Uint32Array(im.width * im.height);
+        for (let i = 0; i < px.length; i++) px[i] = ((d[i*4+3] << 24) | (d[i*4] << 16) | (d[i*4+1] << 8) | d[i*4+2]) >>> 0;
+        texImg = { w: im.width, h: im.height, px }; S.texture = 'effets/' + file.name;
+        n.textContent = file.name + ' (' + im.width + '×' + im.height + ' px HD)'; x.hidden = false; URL.revokeObjectURL(url); changed(); };
+      im.src = url; f.value = ''; };
+    wrap.append(b, n, x, f); row.appendChild(wrap);
+    inputs[k] = { set: v => { if (!v) { texImg = null; n.textContent = 'aucune (point doux)'; x.hidden = true; }
+      else if (!texImg) { n.textContent = v + ' (rechargez le PNG pour l\'aperçu)'; x.hidden = false; } } };
+  } else {
+    const [, , , min, max, step] = d;
+    const r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.id = 'r-' + k; r.setAttribute('aria-label', label);
+    const nb = document.createElement('input'); nb.type = 'number'; nb.min = min; nb.max = max; nb.step = step; nb.id = 'p-' + k; nb.setAttribute('aria-label', label);
+    const restart = (k === 'FieldW' || k === 'FieldH');
+    r.addEventListener('input', () => { S[k] = +r.value; nb.value = fmt(r.value, step); changed(restart); });
+    nb.addEventListener('change', () => { let v = +nb.value; if (isNaN(v)) v = DEF[k]; S[k] = v; r.value = v; changed(restart); });
+    row.append(r, nb); inputs[k] = { set: v => { r.value = v; nb.value = fmt(v, step); } };
+  }
+  $('g-' + g).appendChild(row);
+}
+function syncInputs() { for (const k in inputs) inputs[k].set(S[k]); }
+
+const presetBox = $('presets');
+for (const name in PRESETS) {
+  const b = document.createElement('button'); b.type = 'button'; b.textContent = name; b.setAttribute('aria-pressed', 'false');
+  b.onclick = () => { const keepTag = {}; for (const t of TAGKEYS) keepTag[t] = S[t];
+    S = { ...DEF, ...PRESETS[name], ...keepTag }; texImg = null;
+    for (const o of presetBox.children) o.setAttribute('aria-pressed', o === b ? 'true' : 'false');
+    $('fname').value = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    syncInputs(); changed(true); };
+  presetBox.appendChild(b);
+}
+
+// ---------- Export ----------
+function num(v) { return +(+v).toFixed(3); }
+function buildJson() {
+  const o = { type: 'particles' };
+  for (const d of P) { const [g,k] = d; if (g === 'tag') continue;
+    if (k === 'texture') { if (S.texture) o.texture = S.texture; continue; }
+    const v = S[k]; o[k] = (typeof v === 'number') ? num(v) : v; }
+  const lines = Object.entries(o).map(([k, v]) => '  "' + k + '": ' + JSON.stringify(v));
+  return '{\n' + lines.join(',\n') + '\n}\n';
+}
+function buildTag() {
+  const name = ($('fname').value.trim() || 'mon_effet').replace(/\.json$/i, '');
+  let t = '<2DOverlay>effets\\' + name + '.json,Z=' + num(S.Z) + ',Layer=' + num(S.Layer) + ',SpeedX=' + num(S.SpeedX) + ',SpeedY=' + num(S.SpeedY) + ',Alpha=' + num(S.Alpha);
+  if (S.FieldW !== 1) t += ',FieldW=' + num(S.FieldW);
+  if (S.FieldH !== 1) t += ',FieldH=' + num(S.FieldH);
+  return t;
+}
+function refreshText() { $('json').textContent = buildJson(); $('tag').textContent = buildTag(); }
+$('fname').addEventListener('input', refreshText);
+function copyText(text, el) {
+  const done = () => { $('toast').textContent = 'Copié.'; setTimeout(() => $('toast').textContent = '', 1800); };
+  const fallback = () => { const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    $('toast').textContent = 'Texte sélectionné : Ctrl+C pour copier.'; };
+  try { navigator.clipboard.writeText(text).then(done, fallback); } catch (e) { fallback(); }
+}
+$('copy').onclick = () => copyText($('json').textContent, $('json'));
+$('copyTag').onclick = () => copyText($('tag').textContent, $('tag'));
+
+// ---------- Import (même lecture "à plat" que le loader C++) ----------
+$('doImp').onclick = () => {
+  const txt = $('imp').value.replace(/\/\/[^\n]*/g, '');
+  const re = /"([^"]+)"\s*:\s*("(?:[^"\\]|\\.)*"|[^,}\n\r]+)/g; let m, n = 0; const next = { ...DEF };
+  for (const t of TAGKEYS) next[t] = S[t];
+  while ((m = re.exec(txt))) {
+    const key = LOWER[m[1].trim().toLowerCase()]; if (!key) continue;
+    let v = m[2].trim(); if (v[0] === '"') v = v.slice(1, -1).replace(/\\(["\\])/g, '$1');
+    const a = META[key][3];
+    if (a === 'bool') next[key] = /^(true|1|yes)$/i.test(v);
+    else if (a === 'color') { v = v.replace('#', ''); if (/^[0-9a-f]{6}$/i.test(v)) next[key] = '#' + v.toUpperCase(); }
+    else if (a === 'blend') next[key] = v.toLowerCase() === 'additive' ? 'additive' : 'normal';
+    else if (a === 'tex') next[key] = v;
+    else { const f = parseFloat(v); if (!isNaN(f)) next[key] = f; }
+    n++;
+  }
+  if (!n) { $('impMsg').textContent = 'Aucune clé reconnue. Vérifiez le format "clé": valeur.'; return; }
+  S = next; texImg = null; syncInputs(); changed(true);
+  for (const o of presetBox.children) o.setAttribute('aria-pressed', 'false');
+  $('impMsg').textContent = n + ' réglages chargés.';
+};
+
+// ---------- Simulation (portage de SnesHdVideoFilter.cpp) ----------
+const SNES_W = 256, SNES_H = 224, DT = 1 / 60, PI = Math.PI;
+let sim;
+function rngFactory(seed) { let r = seed >>> 0; return () => { r ^= r << 13; r >>>= 0; r ^= r >>> 17; r ^= r << 5; r >>>= 0; return (r & 0xFFFFFF) / 16777216; }; }
+function resetSim() {
+  sim = { parts: [], acc: 0, time: 0, offX: 0, offY: 0, rand: rngFactory(0x12345678 ^ 2654435761), fw: SNES_W * Math.max(0.25, S.FieldW), fh: SNES_H * Math.max(0.25, S.FieldH) };
+  if (S.prewarm) { const steps = Math.min(Math.max(S.lifeMin, S.lifeMax) * 60, 900); for (let i = 0; i < steps; i++) step(); }
+}
+const rr = (a, b) => a + (b - a) * sim.rand();
+function spawn() {
+  const sp = rr(S.speedMin, S.speedMax), ang = rr(S.angleMin, S.angleMax) * PI / 180;
+  const lifeMin = Math.max(0.05, S.lifeMin), lifeMax = Math.max(lifeMin, S.lifeMax);
+  sim.parts.push({
+    x: (S.spawnX + sim.rand() * S.spawnW) * sim.fw, y: (S.spawnY + sim.rand() * S.spawnH) * sim.fh,
+    vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, age: 0, life: Math.max(0.05, rr(lifeMin, lifeMax)),
+    size: 1 + Math.min(0.95, S.sizeRandom) * (sim.rand() * 2 - 1), rot: rr(S.rotationMin, S.rotationMax) * PI / 180,
+    spin: rr(S.spinMin, S.spinMax) * PI / 180, s1: sim.rand() * 2 * PI, s2: sim.rand() * 2 * PI });
+}
+function step() {
+  sim.time += DT; sim.acc += Math.max(0, S.rate) * DT;
+  while (sim.acc >= 1) { sim.acc -= 1; if (sim.parts.length < S.maxParticles) spawn(); }
+  const tw = 2 * PI * S.turbulenceFreq, P_ = sim.parts;
+  for (let k = 0; k < P_.length;) {
+    const p = P_[k]; p.age += DT;
+    if (p.age >= p.life) { P_[k] = P_[P_.length - 1]; P_.pop(); continue; }
+    p.vx += S.gravityX * DT; p.vy += S.gravityY * DT;
+    let tx = 0, ty = 0;
+    if (S.turbulence) { tx = S.turbulence * Math.sin(tw * sim.time + p.s1); ty = S.turbulence * Math.cos(tw * 0.73 * sim.time + p.s2); }
+    p.x += (p.vx + S.windX + tx) * DT; p.y += (p.vy + S.windY + ty) * DT; p.rot += p.spin * DT;
+    p.x %= sim.fw; if (p.x < 0) p.x += sim.fw; p.y %= sim.fh; if (p.y < 0) p.y += sim.fh;
+    k++;
+  }
+  // ancrage : le défilement simulé de la couche, multiplié par SpeedX/Y, s'ajoute
+  if (S.Layer >= 1) { sim.offX = (sim.offX + S.scrollX * DT * S.SpeedX) % sim.fw; sim.offY = (sim.offY + S.scrollY * DT * S.SpeedY) % sim.fh; }
+}
+
+// ---------- Fond ----------
+const view = $('view'), ctx = view.getContext('2d');
+let scale = 4, base = null, frame = null, shot = null;
+function makeBackground() {
+  const c = document.createElement('canvas'); c.width = SNES_W; c.height = SNES_H; const g = c.getContext('2d');
+  const kind = $('bg').value;
+  if (kind === 'shot' && shot) { g.imageSmoothingEnabled = false; g.drawImage(shot, 0, 0, SNES_W, SNES_H); }
+  else if (kind === 'grass') {
+    g.fillStyle = '#48A040'; g.fillRect(0, 0, SNES_W, SNES_H);
+    const r = rngFactory(99);
+    for (let i = 0; i < 900; i++) { g.fillStyle = r() < 0.5 ? '#3A8834' : '#5CB850'; g.fillRect((r() * SNES_W) | 0, (r() * SNES_H) | 0, 2, 1); }
+    g.fillStyle = '#C8A860'; g.fillRect(96, 0, 40, SNES_H); g.fillStyle = '#B49450';
+    for (let i = 0; i < 160; i++) g.fillRect(96 + ((r() * 40) | 0), (r() * SNES_H) | 0, 1, 1);
+    for (const [x, y] of [[24, 30], [190, 60], [40, 150], [200, 170], [160, 20]]) {
+      g.fillStyle = '#1E5A28'; g.fillRect(x, y, 32, 28); g.fillStyle = '#2E7A36'; g.fillRect(x + 3, y + 3, 26, 18); g.fillStyle = '#6A4A28'; g.fillRect(x + 12, y + 26, 8, 8); }
+  } else if (kind === 'dungeon') {
+    g.fillStyle = '#585868'; g.fillRect(0, 0, SNES_W, SNES_H);
+    for (let y = 0; y < SNES_H; y += 16) for (let x = 0; x < SNES_W; x += 16) { g.fillStyle = ((x + y) / 16) % 2 ? '#686878' : '#606070'; g.fillRect(x + 1, y + 1, 14, 14); }
+    g.fillStyle = '#303040'; g.fillRect(0, 0, SNES_W, 24); g.fillRect(0, 0, 24, SNES_H); g.fillRect(SNES_W - 24, 0, 24, SNES_H);
+  } else if (kind === 'night') {
+    const gr = g.createLinearGradient(0, 0, 0, SNES_H); gr.addColorStop(0, '#101838'); gr.addColorStop(1, '#283060'); g.fillStyle = gr; g.fillRect(0, 0, SNES_W, SNES_H);
+    g.fillStyle = '#182028'; g.fillRect(0, 170, SNES_W, 54);
+  } else { g.fillStyle = '#000'; g.fillRect(0, 0, SNES_W, SNES_H); }
+  view.width = SNES_W * scale; view.height = SNES_H * scale;
+  ctx.imageSmoothingEnabled = false; ctx.drawImage(c, 0, 0, view.width, view.height);
+  base = ctx.getImageData(0, 0, view.width, view.height);
+  frame = new ImageData(view.width, view.height);
+}
+$('bg').onchange = () => { if ($('bg').value === 'shot' && !shot) { $('shotFile').click(); return; } makeBackground(); };
+$('shotFile').onchange = () => { const f = $('shotFile').files[0]; if (!f) return; const url = URL.createObjectURL(f); const im = new Image();
+  im.onload = () => { shot = im; makeBackground(); }; im.src = url; };
+$('scale').onchange = () => { scale = +$('scale').value; makeBackground(); };
+
+// ---------- Rendu (portage de renderOverlayBand) ----------
+function render() {
+  const W = view.width, H = view.height, out = frame.data; out.set(base.data);
+  const fW = sim.fw, fH = sim.fh, sc = scale, tex = texImg;
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const c0 = parseInt(S.colorStart.slice(1), 16), c1 = parseInt(S.colorEnd.slice(1), 16);
+  for (const p of sim.parts) {
+    const t = p.age / p.life, sizeMul = p.size * lerp(S.sizeStart, S.sizeEnd, t);
+    if (sizeMul <= 0.001) continue;
+    let a = lerp(S.alphaStart, S.alphaEnd, t);
+    if (S.fadeIn > 0 && t < S.fadeIn) a *= t / S.fadeIn;
+    if (S.fadeOut > 0 && t > 1 - S.fadeOut) a *= (1 - t) / S.fadeOut;
+    a *= S.Alpha; if (a <= 0.002) continue;
+    const tr = lerp((c0 >> 16) & 255, (c1 >> 16) & 255, t) / 255, tg = lerp((c0 >> 8) & 255, (c1 >> 8) & 255, t) / 255, tb = lerp(c0 & 255, c1 & 255, t) / 255;
+    let halfW, halfH; if (tex) { halfW = tex.w * 0.5 * sizeMul; halfH = tex.h * 0.5 * sizeMul; } else { halfW = halfH = S.dotSize * sc * 0.5 * sizeMul; }
+    const rotated = p.rot !== 0 || p.spin !== 0, radius = rotated ? Math.hypot(halfW, halfH) : Math.max(halfW, halfH);
+    const cosR = Math.cos(p.rot), sinR = Math.sin(p.rot);
+    let sx = (p.x - sim.offX) % fW; if (sx < 0) sx += fW; let sy = (p.y - sim.offY) % fH; if (sy < 0) sy += fH;
+    for (let cy = -1; cy <= 1; cy++) for (let cx = -1; cx <= 1; cx++) {
+      const pcx = (sx + cx * fW) * sc, pcy = (sy + cy * fH) * sc;
+      const x0 = Math.max(0, Math.floor(pcx - radius)), x1 = Math.min(W - 1, Math.ceil(pcx + radius));
+      const y0 = Math.max(0, Math.floor(pcy - radius)), y1 = Math.min(H - 1, Math.ceil(pcy + radius));
+      if (x0 > x1 || y0 > y1) continue;
+      for (let yy = y0; yy <= y1; yy++) { const dy = yy + 0.5 - pcy;
+        for (let xx = x0; xx <= x1; xx++) { const dx = xx + 0.5 - pcx;
+          let lx = dx, ly = dy; if (rotated) { lx = dx * cosR + dy * sinR; ly = -dx * sinR + dy * cosR; }
+          let sa, sr, sg, sb;
+          if (tex) {
+            const u = lx / sizeMul + tex.w * 0.5 - 0.5, v = ly / sizeMul + tex.h * 0.5 - 0.5;
+            if (u < -0.5 || v < -0.5 || u > tex.w - 0.5 || v > tex.h - 0.5) continue;
+            const iu = Math.floor(u), iv = Math.floor(v), fu = u - iu, fv = v - iv;
+            let A = 0, R = 0, G = 0, B = 0;
+            const q = [[iu, iv, (1 - fu) * (1 - fv)], [iu + 1, iv, fu * (1 - fv)], [iu, iv + 1, (1 - fu) * fv], [iu + 1, iv + 1, fu * fv]];
+            for (const [qx, qy, w] of q) { const c = tex.px[Math.min(tex.h - 1, Math.max(0, qy)) * tex.w + Math.min(tex.w - 1, Math.max(0, qx))];
+              const ca = (c >>> 24) * w; A += ca; R += ((c >> 16) & 255) * ca; G += ((c >> 8) & 255) * ca; B += (c & 255) * ca; }
+            if (A <= 0.5) continue; sa = A / 255; sr = R / A; sg = G / A; sb = B / A;
+          } else {
+            const d = Math.hypot(lx, ly) / halfW; if (d >= 1) continue; const s = 1 - d * d; sa = s * s; sr = sg = sb = 255;
+          }
+          const aa = sa * a; if (aa < 0.004) continue;
+          const i = (yy * W + xx) * 4, cr = sr * tr, cg = sg * tg, cb = sb * tb;
+          if (S.blend === 'additive') { out[i] = Math.min(255, out[i] + cr * aa); out[i+1] = Math.min(255, out[i+1] + cg * aa); out[i+2] = Math.min(255, out[i+2] + cb * aa); }
+          else { out[i] += (cr - out[i]) * aa; out[i+1] += (cg - out[i+1]) * aa; out[i+2] += (cb - out[i+2]) * aa; }
+        } }
+    }
+  }
+  ctx.putImageData(frame, 0, 0);
+  $('stat').textContent = sim.parts.length + ' particules';
+}
+
+// ---------- Boucle (pas fixe 1/60 s comme dans Mesen) ----------
+let paused = false, last = 0, acc = 0, dirty = true;
+function changed(restart) { if (restart) resetSim(); refreshText(); dirty = true; }
+$('restart').onclick = () => changed(true);
+$('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? 'Lecture' : 'Pause'; };
+function loop(ts) {
+  if (!last) last = ts; acc += Math.min(0.1, (ts - last) / 1000); last = ts;
+  if (!paused) { let n = 0; while (acc >= DT && n < 4) { step(); acc -= DT; n++; } if (n >= 4) acc = 0; if (n) dirty = true; } else acc = 0;
+  if (dirty) { render(); dirty = false; }
+  requestAnimationFrame(loop);
+}
+
+S = { ...DEF, ...PRESETS['Neige'] };
+presetBox.children[0].setAttribute('aria-pressed', 'true'); $('fname').value = 'neige';
+syncInputs(); makeBackground(); resetSim(); refreshText(); requestAnimationFrame(loop);
+})();
+</script>

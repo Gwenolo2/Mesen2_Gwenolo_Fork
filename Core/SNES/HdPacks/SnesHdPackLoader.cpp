@@ -11,6 +11,8 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#include <sstream>
+#include <array>
 
 #include "SNES/SnesPpu.h"
 #include "SNES/SnesPpuTypes.h"
@@ -101,6 +103,204 @@ std::shared_ptr<SnesHdPackData> SnesHdPackLoader::ActivePack = nullptr; // C'est
 // ---------------------------------------------------------------------------
 // Static API
 // ---------------------------------------------------------------------------
+//---------------------------------------------------------------------------------------------------------------
+// Lecteur JSON minimal "a plat" pour les effets <2DOverlay> : { "cle": valeur, ... }
+// Valeurs : nombres, chaines, true/false. Cles insensibles a la casse. Commentaires // acceptes.
+// Dans une chaine, "\\" donne "\" et "\"" donne '"' ; un "\" isole est conserve (chemins Windows).
+//---------------------------------------------------------------------------------------------------------------
+static std::unordered_map<std::string, std::string> ParseFlatJson(const std::string& s)
+{
+	std::unordered_map<std::string, std::string> out;
+	size_t i = 0, n = s.size();
+	auto readString = [&]() -> std::string {
+		std::string r;
+		i++; // guillemet ouvrant
+		while(i < n && s[i] != '"') {
+			if(s[i] == '\\' && i + 1 < n && (s[i + 1] == '\\' || s[i + 1] == '"')) { i++; }
+			r += s[i++];
+		}
+		if(i < n) i++; // guillemet fermant
+		return r;
+	};
+	while(i < n) {
+		char c = s[i];
+		if(c == '/' && i + 1 < n && s[i + 1] == '/') { while(i < n && s[i] != '\n') i++; continue; }
+		if(c != '"') { i++; continue; }
+		std::string key = readString();
+		while(i < n && s[i] != ':' && s[i] != ',' && s[i] != '}') i++;
+		if(i >= n || s[i] != ':') continue;
+		i++;
+		while(i < n && std::isspace((unsigned char)s[i])) i++;
+		std::string val;
+		if(i < n && s[i] == '"') {
+			val = readString();
+		} else {
+			while(i < n && s[i] != ',' && s[i] != '}' && s[i] != '\n' && s[i] != '\r') val += s[i++];
+			val = StringUtilities::Trim(val);
+		}
+		out[StringUtilities::ToLower(StringUtilities::Trim(key))] = val;
+	}
+	return out;
+}
+
+//---------------------------------------------------------------------------------------------------------------
+// Lecteur OBJ / MTL minimal pour <m7model> : v, vt, vn, f (polygones -> eventails de triangles, indices
+// negatifs acceptes), mtllib, usemtl ; MTL : newmtl, Kd, d, Tr, map_Kd. Chemins relatifs au dossier de l'OBJ.
+//---------------------------------------------------------------------------------------------------------------
+static std::shared_ptr<SnesHdModelMesh> LoadObjModel(const std::string& rootFolder, const std::string& objFile,
+	std::shared_ptr<SnesHdPackData>& outData, std::unordered_map<std::string, SnesHdPackBitmapInfo*>& loadedBitmaps,
+	const std::string& lineLocation)
+{
+	VirtualFile vf(FolderUtilities::CombinePath(rootFolder, objFile));
+	std::vector<uint8_t> raw;
+	if(!vf.IsValid() || !vf.ReadFile(raw)) {
+		MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7model> : OBJ introuvable : " + objFile);
+		return nullptr;
+	}
+	std::string objDir;
+	{
+		size_t sl = objFile.find_last_of("/\\");
+		if(sl != std::string::npos) objDir = objFile.substr(0, sl + 1);
+	}
+	auto mesh = std::make_shared<SnesHdModelMesh>();
+	mesh->Mats.push_back(SnesHdModelMaterial()); // materiau 0 : blanc par defaut
+	std::unordered_map<std::string, int> matIndex;
+
+	auto loadTexture = [&](const std::string& name) -> SnesHdPackBitmapInfo* {
+		std::string filename = objDir + name;
+		for(char& ch : filename) if(ch == '\\') ch = '/';
+		auto itB = loadedBitmaps.find(filename);
+		if(itB != loadedBitmaps.end()) return itB->second;
+		auto bitmap = std::make_unique<SnesHdPackBitmapInfo>();
+		bitmap->PngName = filename;
+		VirtualFile pf(FolderUtilities::CombinePath(rootFolder, filename));
+		if(pf.IsValid()) pf.ReadFile(bitmap->FileData);
+		else MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7model> : texture introuvable : " + filename);
+		SnesHdPackBitmapInfo* p = bitmap.get();
+		loadedBitmaps[filename] = p;
+		outData->ImageFileData.push_back(std::move(bitmap));
+		return p;
+	};
+	auto restOf = [](const std::string& l, size_t from) { return StringUtilities::Trim(l.substr(std::min(from, l.size()))); };
+
+	auto loadMtl = [&](const std::string& mtlName) {
+		VirtualFile mf(FolderUtilities::CombinePath(rootFolder, objDir + mtlName));
+		std::vector<uint8_t> mraw;
+		if(!mf.IsValid() || !mf.ReadFile(mraw)) {
+			MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7model> : MTL introuvable : " + objDir + mtlName);
+			return;
+		}
+		std::stringstream ms(std::string(mraw.begin(), mraw.end()));
+		std::string l;
+		int cur = -1;
+		while(std::getline(ms, l)) {
+			l = StringUtilities::Trim(l);
+			if(l.empty() || l[0] == '#') continue;
+			std::stringstream ls(l);
+			std::string k; ls >> k;
+			if(k == "newmtl") {
+				SnesHdModelMaterial m; m.Name = restOf(l, 6);
+				mesh->Mats.push_back(m);
+				cur = (int)mesh->Mats.size() - 1;
+				matIndex[m.Name] = cur;
+			} else if(cur >= 0 && k == "Kd") {
+				float r = 1, g = 1, b = 1; ls >> r >> g >> b;
+				auto c8 = [](float f) { return (uint32_t)std::clamp((int)(f * 255.0f + 0.5f), 0, 255); };
+				mesh->Mats[cur].Kd = (c8(r) << 16) | (c8(g) << 8) | c8(b);
+			} else if(cur >= 0 && k == "d") {
+				float d = 1; ls >> d; mesh->Mats[cur].Alpha = std::clamp(d, 0.0f, 1.0f);
+			} else if(cur >= 0 && k == "Tr") {
+				float t = 0; ls >> t; mesh->Mats[cur].Alpha = std::clamp(1.0f - t, 0.0f, 1.0f);
+			} else if(cur >= 0 && k == "map_Kd") {
+				// le nom du fichier est le dernier element (des options -s, -o... peuvent preceder)
+				std::string rest = restOf(l, 6), last;
+				std::stringstream rs(rest); std::string tok;
+				while(rs >> tok) last = tok;
+				if(!last.empty()) mesh->Mats[cur].Texture = loadTexture(last);
+			}
+		}
+	};
+
+	std::vector<std::array<float, 3>> pos, nrm;
+	std::vector<std::array<float, 2>> uvs;
+	std::stringstream ss(std::string(raw.begin(), raw.end()));
+	std::string line;
+	int curMat = 0;
+	bool first = true;
+	while(std::getline(ss, line)) {
+		if(line.empty() || line[0] == '#') continue;
+		if(!line.empty() && line.back() == '\r') line.pop_back();
+		std::stringstream ls(line);
+		std::string k; ls >> k;
+		if(k == "v") {
+			std::array<float, 3> p = { 0, 0, 0 }; ls >> p[0] >> p[1] >> p[2]; pos.push_back(p);
+		} else if(k == "vt") {
+			std::array<float, 2> t = { 0, 0 }; ls >> t[0] >> t[1]; uvs.push_back(t);
+		} else if(k == "vn") {
+			std::array<float, 3> n = { 0, 1, 0 }; ls >> n[0] >> n[1] >> n[2]; nrm.push_back(n);
+		} else if(k == "mtllib") {
+			loadMtl(restOf(line, 6));
+		} else if(k == "usemtl") {
+			auto it = matIndex.find(restOf(line, 6));
+			curMat = it != matIndex.end() ? it->second : 0;
+		} else if(k == "f") {
+			struct Corner { int p = -1, t = -1, n = -1; };
+			std::vector<Corner> poly;
+			std::string tok;
+			while(ls >> tok) {
+				Corner c;
+				int idx[3] = { 0, 0, 0 }; int part = 0; std::string cur;
+				for(size_t i = 0; i <= tok.size(); i++) {
+					if(i == tok.size() || tok[i] == '/') {
+						if(!cur.empty() && part < 3) { try { idx[part] = std::stoi(cur); } catch(...) { idx[part] = 0; } }
+						cur.clear(); part++;
+					} else cur += tok[i];
+				}
+				auto res = [](int i, size_t n) -> int { if(i > 0) return i - 1; if(i < 0) return (int)n + i; return -1; };
+				c.p = res(idx[0], pos.size()); c.t = res(idx[1], uvs.size()); c.n = res(idx[2], nrm.size());
+				if(c.p < 0 || c.p >= (int)pos.size()) continue;
+				if(c.t >= (int)uvs.size()) c.t = -1;
+				if(c.n >= (int)nrm.size()) c.n = -1;
+				poly.push_back(c);
+			}
+			for(size_t i = 1; i + 1 < poly.size(); i++) {
+				const Corner cs[3] = { poly[0], poly[i], poly[i + 1] };
+				SnesHdModelTri t; t.Mat = curMat;
+				for(int j = 0; j < 3; j++) {
+					for(int a = 0; a < 3; a++) t.P[j][a] = pos[cs[j].p][a];
+					t.UV[j][0] = cs[j].t >= 0 ? uvs[cs[j].t][0] : 0.0f;
+					t.UV[j][1] = cs[j].t >= 0 ? uvs[cs[j].t][1] : 0.0f;
+				}
+				// normale de la face (si le fichier n'en donne pas)
+				float e1[3], e2[3], fn[3];
+				for(int a = 0; a < 3; a++) { e1[a] = t.P[1][a] - t.P[0][a]; e2[a] = t.P[2][a] - t.P[0][a]; }
+				fn[0] = e1[1] * e2[2] - e1[2] * e2[1]; fn[1] = e1[2] * e2[0] - e1[0] * e2[2]; fn[2] = e1[0] * e2[1] - e1[1] * e2[0];
+				float fl = std::sqrt(fn[0] * fn[0] + fn[1] * fn[1] + fn[2] * fn[2]);
+				if(fl < 1e-12f) continue; // triangle degenere
+				for(int a = 0; a < 3; a++) fn[a] /= fl;
+				for(int j = 0; j < 3; j++) {
+					if(cs[j].n >= 0) { for(int a = 0; a < 3; a++) t.N[j][a] = nrm[cs[j].n][a]; }
+					else { for(int a = 0; a < 3; a++) t.N[j][a] = fn[a]; }
+					for(int a = 0; a < 3; a++) {
+						float pv = t.P[j][a];
+						float& mn = (a == 0 ? mesh->MinX : (a == 1 ? mesh->MinY : mesh->MinZ));
+						float& mx = (a == 0 ? mesh->MaxX : (a == 1 ? mesh->MaxY : mesh->MaxZ));
+						if(first) { mn = mx = pv; } else { mn = std::min(mn, pv); mx = std::max(mx, pv); }
+					}
+					first = false;
+				}
+				mesh->Tris.push_back(t);
+				if(mesh->Tris.size() > 200000) break;
+			}
+		}
+	}
+	if(mesh->Tris.empty()) {
+		MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7model> : aucun triangle dans " + objFile);
+		return nullptr;
+	}
+	return mesh;
+}
+
 bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared_ptr<SnesHdPackData>& outData)
 {
 	std::ifstream fileTest(definitionFile);
@@ -121,6 +321,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 	// Dictionnaire pour ne créer qu'un seul objet BitmapInfo par PNG
 	std::unordered_map<std::string, SnesHdPackBitmapInfo*> loadedBitmaps;
+	std::unordered_map<std::string, std::shared_ptr<SnesHdModelMesh>> loadedModels; // <m7model> : un meme OBJ charge une fois
 
 	std::string lineContent;
 	std::vector<std::string> imageCatalog;
@@ -965,6 +1166,403 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 		// =============================================================
 		// PARSING BACKGROUND TAG ==============
+		/// PARSING <m7relief> : volume d'une tile Mode 7
+		// [conditions]<m7relief>relief.png|full,HASH,hauteur[,x,y][,size=32][,sides=0.7][,mode=extrude|height][,color=tile|png]
+		else if(lineContent.substr(0, 10) == "<m7relief>") {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(10), ',');
+			if(tokens.size() < 3) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7relief> : il faut au moins png|full,HASH,hauteur.");
+			} else {
+				auto rl = std::make_unique<SnesHdM7ReliefInfo>();
+				rl->Conditions = currentConditions;
+				rl->Size = 8 * std::max<uint32_t>(1, outData->Scale);
+				try { rl->TileHash = (uint32_t)HexUtilities::FromHex(StringUtilities::Trim(tokens[1])); } catch(...) {}
+				try { rl->Height = std::stof(StringUtilities::Trim(tokens[2])); } catch(...) {}
+				std::vector<std::string> positional;
+				for(size_t t = 3; t < tokens.size(); t++) {
+					std::string tok = StringUtilities::Trim(tokens[t]);
+					size_t eq = tok.find('=');
+					if(eq == std::string::npos) { positional.push_back(tok); continue; }
+					std::string k = StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)));
+					std::string v = StringUtilities::ToLower(StringUtilities::Trim(tok.substr(eq + 1)));
+					try {
+						if(k == "size") rl->Size = std::stoi(v);
+						else if(k == "sides") rl->Sides = std::clamp(std::stof(v), 0.0f, 2.0f);
+						else if(k == "mode") rl->HeightMap = (v == "height");
+						else if(k == "color") rl->ColorFromPng = (v == "png");
+						else if(k == "x") rl->X = std::stoi(v);
+						else if(k == "y") rl->Y = std::stoi(v);
+					} catch(...) {}
+				}
+				if(positional.size() >= 2) {
+					try { rl->X = std::stoi(positional[0]); rl->Y = std::stoi(positional[1]); } catch(...) {}
+				}
+				std::string png = StringUtilities::Trim(tokens[0]);
+				if(StringUtilities::ToLower(png) != "full") {
+					std::string filename = NormalizePath(png);
+					auto itBmp = loadedBitmaps.find(filename);
+					if(itBmp != loadedBitmaps.end()) {
+						rl->Bitmap = itBmp->second;
+					} else {
+						SnesHdPackBitmapInfo* found = nullptr;
+						for(auto& bmp : outData->ImageFileData) { if(bmp->PngName == filename) { found = bmp.get(); break; } }
+						if(!found) {
+							auto bitmap = std::make_unique<SnesHdPackBitmapInfo>();
+							bitmap->PngName = filename;
+							VirtualFile pngFile(FolderUtilities::CombinePath(rootFolder, filename));
+							if(pngFile.IsValid()) {
+								pngFile.ReadFile(bitmap->FileData);
+							} else {
+								MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7relief> : PNG introuvable : " + filename);
+							}
+							found = bitmap.get();
+							outData->ImageFileData.push_back(std::move(bitmap));
+						}
+						loadedBitmaps[filename] = found;
+						rl->Bitmap = found;
+					}
+				}
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7relief> tile " + HexUtilities::ToHex32(rl->TileHash) +
+					" hauteur " + std::to_string(rl->Height) + (rl->Bitmap ? std::string(" (") + png + ")" : std::string(" (tile entiere)")));
+				outData->M7Reliefs[rl->TileHash].push_back(std::move(rl));
+			}
+		}
+
+		/// PARSING <m7billboard> : panneau plante sur la carte Mode 7
+		// [conditions]<m7billboard>image.png,HASH_CARTE|*,x,y[,height=48][,elevation=0][,alpha=1]
+		// [conditions]<m7billboard>image.png,tile=HASH_TILE[,height=48][,elevation=0][,alpha=1]
+		else if(lineContent.substr(0, 13) == "<m7billboard>") {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(13), ',');
+			if(tokens.size() < 2) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7billboard> : il faut image.png,HASH_CARTE|*,x,y ou image.png,tile=HASH.");
+			} else {
+				auto bb = std::make_unique<SnesHdM7BillboardInfo>();
+				bb->Conditions = currentConditions;
+				std::vector<std::string> positional;
+				for(size_t t = 1; t < tokens.size(); t++) {
+					std::string tok = StringUtilities::Trim(tokens[t]);
+					size_t eq = tok.find('=');
+					if(eq == std::string::npos) { positional.push_back(tok); continue; }
+					std::string k = StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)));
+					std::string v = StringUtilities::Trim(tok.substr(eq + 1));
+					try {
+						if(k == "tile") { bb->OnTile = true; bb->TileHash = (uint32_t)HexUtilities::FromHex(v); }
+						else if(k == "map") { bb->AnyMap = (v == "*" || StringUtilities::ToLower(v) == "any"); if(!bb->AnyMap) bb->MapHash = (uint32_t)HexUtilities::FromHex(v); }
+						else if(k == "height" || k == "hauteur") bb->Height = std::stof(v);
+						else if(k == "elevation") bb->Elevation = std::stof(v);
+						else if(k == "alpha") bb->Alpha = std::clamp(std::stof(v), 0.0f, 1.0f);
+						else if(k == "x") bb->X = std::stof(v);
+						else if(k == "y") bb->Y = std::stof(v);
+					} catch(...) {}
+				}
+				size_t pi = 0;
+				if(!bb->OnTile && pi < positional.size()) {
+					std::string m = StringUtilities::ToLower(positional[pi++]);
+					bb->AnyMap = (m == "*" || m == "any");
+					if(!bb->AnyMap) { try { bb->MapHash = (uint32_t)HexUtilities::FromHex(m); } catch(...) {} }
+				}
+				if(pi + 1 < positional.size()) {
+					try { bb->X = std::stof(positional[pi]); bb->Y = std::stof(positional[pi + 1]); } catch(...) {}
+				}
+				std::string filename = NormalizePath(StringUtilities::Trim(tokens[0]));
+				auto itBmp = loadedBitmaps.find(filename);
+				if(itBmp != loadedBitmaps.end()) {
+					bb->Bitmap = itBmp->second;
+				} else {
+					SnesHdPackBitmapInfo* found = nullptr;
+					for(auto& bmp : outData->ImageFileData) { if(bmp->PngName == filename) { found = bmp.get(); break; } }
+					if(!found) {
+						auto bitmap = std::make_unique<SnesHdPackBitmapInfo>();
+						bitmap->PngName = filename;
+						VirtualFile pngFile(FolderUtilities::CombinePath(rootFolder, filename));
+						if(pngFile.IsValid()) {
+							pngFile.ReadFile(bitmap->FileData);
+						} else {
+							MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7billboard> : PNG introuvable : " + filename);
+						}
+						found = bitmap.get();
+						outData->ImageFileData.push_back(std::move(bitmap));
+					}
+					loadedBitmaps[filename] = found;
+					bb->Bitmap = found;
+				}
+				std::string where = bb->OnTile ? ("sur la tile " + HexUtilities::ToHex32(bb->TileHash)) :
+					("en (" + std::to_string((int)bb->X) + ", " + std::to_string((int)bb->Y) + ") carte " + (bb->AnyMap ? std::string("*") : HexUtilities::ToHex32(bb->MapHash)));
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7billboard> " + filename + " " + where);
+				outData->M7Billboards.push_back(std::move(bb));
+			}
+		}
+
+		/// PARSING <m7model> : modele 3D .obj pose sur la carte Mode 7
+		// [conditions]<m7model>modele.obj,HASH_CARTE|*,x,y[,scale=8|height=..][,rotation=0][,elevation=0][,ambient=0.45][,origin=base|obj]
+		// [conditions]<m7model>modele.obj,tile=HASH_TILE[,...]
+		else if(lineContent.substr(0, 9) == "<m7model>") {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(9), ',');
+			if(tokens.size() < 2) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7model> : il faut modele.obj,HASH_CARTE|*,x,y ou modele.obj,tile=HASH.");
+			} else {
+				auto md = std::make_unique<SnesHdM7ModelInfo>();
+				md->Conditions = currentConditions;
+				md->File = NormalizePath(StringUtilities::Trim(tokens[0]));
+				float wantHeight = 0;
+				std::vector<std::string> positional;
+				for(size_t t = 1; t < tokens.size(); t++) {
+					std::string tok = StringUtilities::Trim(tokens[t]);
+					size_t eq = tok.find('=');
+					if(eq == std::string::npos) { positional.push_back(tok); continue; }
+					std::string k = StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)));
+					std::string v = StringUtilities::Trim(tok.substr(eq + 1));
+					try {
+						if(k == "tile") { md->OnTile = true; md->TileHash = (uint32_t)HexUtilities::FromHex(v); }
+						else if(k == "map") { md->AnyMap = (v == "*" || StringUtilities::ToLower(v) == "any"); if(!md->AnyMap) md->MapHash = (uint32_t)HexUtilities::FromHex(v); }
+						else if(k == "scale" || k == "echelle") md->Scale = std::stof(v);
+						else if(k == "height" || k == "hauteur") wantHeight = std::stof(v);
+						else if(k == "rotation") md->Rotation = std::stof(v);
+						else if(k == "elevation") md->Elevation = std::stof(v);
+						else if(k == "ambient" || k == "light") md->Ambient = std::clamp(std::stof(v), 0.0f, 1.0f);
+						else if(k == "origin") md->KeepOrigin = (StringUtilities::ToLower(v) == "obj");
+						else if(k == "x") md->X = std::stof(v);
+						else if(k == "y") md->Y = std::stof(v);
+					} catch(...) {}
+				}
+				size_t pi = 0;
+				if(!md->OnTile && pi < positional.size()) {
+					std::string m = StringUtilities::ToLower(positional[pi++]);
+					md->AnyMap = (m == "*" || m == "any");
+					if(!md->AnyMap) { try { md->MapHash = (uint32_t)HexUtilities::FromHex(m); } catch(...) {} }
+				}
+				if(pi + 1 < positional.size()) {
+					try { md->X = std::stof(positional[pi]); md->Y = std::stof(positional[pi + 1]); } catch(...) {}
+				}
+				auto itMesh = loadedModels.find(md->File);
+				if(itMesh != loadedModels.end()) md->Mesh = itMesh->second;
+				else { md->Mesh = LoadObjModel(rootFolder, md->File, outData, loadedBitmaps, lineLocation); loadedModels[md->File] = md->Mesh; }
+				if(md->Mesh) {
+					float h = md->Mesh->MaxY - md->Mesh->MinY;
+					if(wantHeight > 0 && h > 1e-6f) md->Scale = wantHeight / h;
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7model> " + md->File + " : " + std::to_string(md->Mesh->Tris.size()) +
+						" triangles, " + std::to_string(md->Mesh->Mats.size() - 1) + " materiau(x), hauteur " + std::to_string((int)(h * md->Scale)) + " texels.");
+					outData->M7Models.push_back(std::move(md));
+				}
+			}
+		}
+
+		/// PARSING <m7CameraDebug> : reperes de controle de la camera Mode 7 reconstruite
+		else if(lineContent.substr(0, 15) == "<m7CameraDebug>") {
+			outData->M7CameraDebug = true;
+			outData->M7CameraDebugConditions = currentConditions;
+			MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7CameraDebug> actif : reperes de la camera Mode 7 affiches.");
+		}
+
+		/// PARSING <3DParticles> : particules dans le monde Mode 7
+		// [conditions]<3DParticles>fichier.json[,Zone=all|top|bottom][,Z=95][,Alpha=1][,cleJSON=valeur...]
+		else if(lineContent.substr(0, 13) == "<3DParticles>") {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(13), ',');
+			if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <3DParticles> : fichier JSON manquant.");
+			} else {
+				auto pi = std::make_unique<SnesHdParticles3DInfo>();
+				pi->JsonFile = NormalizePath(StringUtilities::Trim(tokens[0]));
+				pi->Conditions = currentConditions;
+
+				std::unordered_map<std::string, std::string> cfg;
+				VirtualFile jf(FolderUtilities::CombinePath(rootFolder, pi->JsonFile));
+				std::vector<uint8_t> raw;
+				if(jf.IsValid() && jf.ReadFile(raw)) {
+					cfg = ParseFlatJson(std::string(raw.begin(), raw.end()));
+				} else {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <3DParticles> : fichier introuvable : " + pi->JsonFile);
+				}
+				for(size_t t = 1; t < tokens.size(); t++) {
+					std::string tok = StringUtilities::Trim(tokens[t]);
+					size_t eq = tok.find('=');
+					if(eq == std::string::npos) continue;
+					cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+				}
+				auto str = [&](const char* k) -> std::string { auto it = cfg.find(k); return it == cfg.end() ? std::string() : it->second; };
+				auto num = [&](const char* k, float def) -> float {
+					std::string v = str(k);
+					if(v.empty()) return def;
+					try { return std::stof(v); } catch(...) { return def; }
+				};
+				auto boolean = [&](const char* k, bool def) -> bool {
+					std::string v = StringUtilities::ToLower(str(k));
+					if(v.empty()) return def;
+					return v == "true" || v == "1" || v == "yes";
+				};
+				auto color = [&](const char* k, uint32_t def) -> uint32_t {
+					std::string v = StringUtilities::Trim(str(k));
+					if(v.empty()) return def;
+					if(v[0] == '#') v = v.substr(1);
+					try { return (uint32_t)std::stoul(v, nullptr, 16) & 0xFFFFFF; } catch(...) { return def; }
+				};
+
+				std::string zone = StringUtilities::ToLower(str("zone"));
+				if(zone == "top" || zone == "haut" || zone == "0") pi->Zone = 0;
+				else if(zone == "bottom" || zone == "bas" || zone == "1") pi->Zone = 1;
+				else pi->Zone = -1;
+
+				pi->ZIndex = (int)num("z", num("zindex", 95.0f));
+				pi->Alpha = std::clamp(num("alpha", 1.0f), 0.0f, 1.0f);
+				pi->Additive = StringUtilities::ToLower(str("blend")) == "additive";
+				pi->MaxParticles = std::clamp((int)num("maxparticles", 400.0f), 1, 20000);
+				pi->Rate = std::max(0.0f, num("rate", 0.0f));
+				pi->LifeMin = std::max(0.0f, num("lifemin", 0.0f));
+				pi->LifeMax = std::max(pi->LifeMin, num("lifemax", pi->LifeMin));
+				pi->BoxSize = std::clamp(num("boxsize", 512.0f), 32.0f, 2048.0f);
+				pi->BoxHeight = std::clamp(num("boxheight", 128.0f), 4.0f, 2048.0f);
+				pi->BoxAhead = std::clamp(num("boxahead", 0.35f), 0.0f, 0.5f);
+				pi->FallMin = num("fallmin", 20.0f); pi->FallMax = num("fallmax", 40.0f);
+				pi->DriftMin = num("driftmin", 0.0f); pi->DriftMax = num("driftmax", 6.0f);
+				pi->Gravity = num("gravity", 0.0f);
+				pi->WindX = num("windx", 0.0f); pi->WindY = num("windy", 0.0f);
+				pi->Turbulence = num("turbulence", 0.0f); pi->TurbulenceFreq = num("turbulencefreq", 0.5f);
+				pi->SizeStart = num("sizestart", 2.0f); pi->SizeEnd = num("sizeend", pi->SizeStart);
+				pi->SizeRandom = std::clamp(num("sizerandom", 0.0f), 0.0f, 0.95f);
+				pi->MinPixelSize = std::max(0.5f, num("minpixelsize", 1.5f));
+				pi->AlphaStart = num("alphastart", 1.0f); pi->AlphaEnd = num("alphaend", pi->AlphaStart);
+				pi->FadeIn = std::clamp(num("fadein", 0.1f), 0.0f, 1.0f);
+				pi->FadeOut = std::clamp(num("fadeout", 0.2f), 0.0f, 1.0f);
+				pi->ColorStart = color("colorstart", 0xFFFFFF); pi->ColorEnd = color("colorend", pi->ColorStart);
+				pi->FarFade = std::clamp(num("farfade", 0.3f), 0.0f, 1.0f);
+				pi->NearFade = std::max(0.0f, num("nearfade", 24.0f));
+				pi->GroundRespawn = StringUtilities::ToLower(str("groundhit")) != "die";
+				(void)boolean;
+
+				std::string tex = StringUtilities::Trim(str("texture"));
+				if(!tex.empty()) {
+					std::string filename = NormalizePath(tex);
+					auto itBmp = loadedBitmaps.find(filename);
+					if(itBmp != loadedBitmaps.end()) {
+						pi->Texture = itBmp->second;
+					} else {
+						auto bitmap = std::make_unique<SnesHdPackBitmapInfo>();
+						bitmap->PngName = filename;
+						VirtualFile pngFile(FolderUtilities::CombinePath(rootFolder, filename));
+						if(pngFile.IsValid()) {
+							pngFile.ReadFile(bitmap->FileData);
+						} else {
+							MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <3DParticles> : texture introuvable : " + filename);
+						}
+						pi->Texture = bitmap.get();
+						loadedBitmaps[filename] = bitmap.get();
+						outData->ImageFileData.push_back(std::move(bitmap));
+					}
+				}
+
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <3DParticles> " + pi->JsonFile + " enregistre (Z=" +
+					std::to_string(pi->ZIndex) + ", vue " + (pi->Zone < 0 ? std::string("toutes") : std::to_string(pi->Zone)) + ").");
+				outData->Particles3D.push_back(std::move(pi));
+			}
+		}
+
+		/// PARSING <2DOverlay> TAG (etape 1 : particules 2D) --------------------------------
+		// [conditions]<2DOverlay>fichier.json[,Z=95][,Layer=2][,SpeedX=1][,SpeedY=1][,Alpha=0.5][,FieldW=1][,FieldH=1]
+		else if(lineContent.substr(0, 11) == "<2DOverlay>") {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(11), ',');
+			if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> : fichier JSON manquant.");
+			} else {
+				auto ov = std::make_unique<SnesHdOverlayInfo>();
+				ov->JsonFile = NormalizePath(StringUtilities::Trim(tokens[0]));
+				ov->Conditions = currentConditions;
+
+				std::unordered_map<std::string, std::string> cfg;
+				VirtualFile jf(FolderUtilities::CombinePath(rootFolder, ov->JsonFile));
+				std::vector<uint8_t> raw;
+				if(jf.IsValid() && jf.ReadFile(raw)) {
+					cfg = ParseFlatJson(std::string(raw.begin(), raw.end()));
+				} else {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> : fichier introuvable : " + ov->JsonFile);
+				}
+				// Les parametres de la balise remplacent ceux du JSON
+				for(size_t t = 1; t < tokens.size(); t++) {
+					std::string tok = StringUtilities::Trim(tokens[t]);
+					size_t eq = tok.find('=');
+					if(eq == std::string::npos) continue;
+					cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+				}
+				auto str = [&](const char* k) -> std::string { auto it = cfg.find(k); return it == cfg.end() ? std::string() : it->second; };
+				auto num = [&](const char* k, float def) -> float {
+					std::string v = str(k);
+					if(v.empty()) return def;
+					try { return std::stof(v); } catch(...) { return def; }
+				};
+				auto boolean = [&](const char* k, bool def) -> bool {
+					std::string v = StringUtilities::ToLower(str(k));
+					if(v.empty()) return def;
+					return v == "true" || v == "1" || v == "yes";
+				};
+				auto color = [&](const char* k, uint32_t def) -> uint32_t {
+					std::string v = StringUtilities::Trim(str(k));
+					if(v.empty()) return def;
+					if(v[0] == '#') v = v.substr(1);
+					try { return (uint32_t)std::stoul(v, nullptr, 16) & 0xFFFFFF; } catch(...) { return def; }
+				};
+
+				std::string type = StringUtilities::ToLower(str("type"));
+				if(!type.empty() && type != "particles") {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> : type '" + type + "' pas encore gere (seul 'particles' l'est).");
+				}
+
+				ov->ZIndex = (int)num("z", num("zindex", 95.0f));
+				ov->Layer = std::clamp((int)num("layer", 0.0f), 0, 4);
+				ov->SpeedX = num("speedx", 1.0f);
+				ov->SpeedY = num("speedy", 1.0f);
+				ov->Alpha = std::clamp(num("alpha", 1.0f), 0.0f, 1.0f);
+				ov->FieldW = std::max(0.25f, num("fieldw", 1.0f));
+				ov->FieldH = std::max(0.25f, num("fieldh", 1.0f));
+
+				ov->Additive = StringUtilities::ToLower(str("blend")) == "additive";
+				ov->MaxParticles = std::clamp((int)num("maxparticles", 300.0f), 1, 20000);
+				ov->Rate = std::max(0.0f, num("rate", 60.0f));
+				ov->LifeMin = std::max(0.05f, num("lifemin", 2.0f));
+				ov->LifeMax = std::max(ov->LifeMin, num("lifemax", 4.0f));
+				ov->SpawnX = num("spawnx", 0.0f); ov->SpawnY = num("spawny", 0.0f);
+				ov->SpawnW = num("spawnw", 1.0f); ov->SpawnH = num("spawnh", 1.0f);
+				ov->SpeedMin = num("speedmin", 20.0f); ov->SpeedMax = num("speedmax", 40.0f);
+				ov->AngleMin = num("anglemin", 80.0f); ov->AngleMax = num("anglemax", 100.0f);
+				ov->GravityX = num("gravityx", 0.0f); ov->GravityY = num("gravityy", 0.0f);
+				ov->WindX = num("windx", 0.0f); ov->WindY = num("windy", 0.0f);
+				ov->Turbulence = num("turbulence", 0.0f); ov->TurbulenceFreq = num("turbulencefreq", 0.5f);
+				ov->RotationMin = num("rotationmin", 0.0f); ov->RotationMax = num("rotationmax", 0.0f);
+				ov->SpinMin = num("spinmin", 0.0f); ov->SpinMax = num("spinmax", 0.0f);
+				ov->SizeStart = num("sizestart", 1.0f); ov->SizeEnd = num("sizeend", ov->SizeStart);
+				ov->SizeRandom = std::clamp(num("sizerandom", 0.0f), 0.0f, 0.95f);
+				ov->AlphaStart = num("alphastart", 1.0f); ov->AlphaEnd = num("alphaend", ov->AlphaStart);
+				ov->FadeIn = std::clamp(num("fadein", 0.1f), 0.0f, 1.0f);
+				ov->FadeOut = std::clamp(num("fadeout", 0.2f), 0.0f, 1.0f);
+				ov->ColorStart = color("colorstart", 0xFFFFFF); ov->ColorEnd = color("colorend", ov->ColorStart);
+				ov->DotSize = std::max(0.25f, num("dotsize", 2.0f));
+				ov->Prewarm = boolean("prewarm", true);
+
+				std::string tex = StringUtilities::Trim(str("texture"));
+				if(!tex.empty()) {
+					std::string filename = NormalizePath(tex);
+					auto itBmp = loadedBitmaps.find(filename);
+					if(itBmp != loadedBitmaps.end()) {
+						ov->Texture = itBmp->second;
+					} else {
+						auto bitmap = std::make_unique<SnesHdPackBitmapInfo>();
+						bitmap->PngName = filename;
+						VirtualFile pngFile(FolderUtilities::CombinePath(rootFolder, filename));
+						if(pngFile.IsValid()) {
+							pngFile.ReadFile(bitmap->FileData);
+						} else {
+							MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> : texture introuvable : " + filename);
+						}
+						ov->Texture = bitmap.get();
+						loadedBitmaps[filename] = bitmap.get();
+						outData->ImageFileData.push_back(std::move(bitmap));
+					}
+				}
+
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> " + ov->JsonFile + " enregistre (Z=" +
+					std::to_string(ov->ZIndex) + ", couche " + std::to_string(ov->Layer) + ").");
+				outData->Overlays.push_back(std::move(ov));
+			}
+		}
+
 		else if(lineContent.substr(0, 12) == "<background>") {
 			bool tileX = false;
 			bool tileY = false;

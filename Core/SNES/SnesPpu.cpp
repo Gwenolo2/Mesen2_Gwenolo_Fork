@@ -664,6 +664,8 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t &hClock) {
 			  hdPack->ActiveSpritesQueues[hdPack->ActiveSpriteQueueWriteIndex].clear();
 			  hdPack->ActiveAdditionsQueues[hdPack->ActiveSpriteQueueWriteIndex].clear();
 			  memset(_colorWindowMask, 0, sizeof(_colorWindowMask));
+			  _m7CapCur = _m7CapReady ^ 1;
+			  memset(_m7Capture[_m7CapCur], 0, sizeof(_m7Capture[0]));
 		  }
 
         // Update overclock timings once per frame
@@ -2348,6 +2350,18 @@ void SnesPpu::RenderTilemapMode7()
 		_debugMode7StartY = yValue;
 		_debugMode7EndX = xValue + xStep * 256;
 		_debugMode7EndY = yValue + yStep * 256;
+
+		// HD PACK : capture de la ligne pour la camera Mode 7 reconstruite (<3DParticles>)
+		if constexpr(layerIndex == 0) if(activePack) {
+			int capRow = _overscanFrame ? ((int)_scanline - 1) : ((int)_scanline + 6);
+			if(capRow >= 0 && capRow < 240) {
+				SnesHdM7LineCapture& cap = _m7Capture[_m7CapCur][capRow];
+				cap.StartX = xValue; cap.StartY = yValue;
+				cap.A = xStep; cap.C = yStep;
+				cap.Valid = 1;
+				cap.LargeMap = _state.Mode7.LargeMap ? 1 : 0;
+			}
+		}
 	}
 
 	xValue += xStep * _drawStartX;
@@ -2428,6 +2442,7 @@ void SnesPpu::RenderTilemapMode7()
 
 				// ON EMBARQUE LES MATHS POUR LE FILTRE ! ---
 				hdData.IsMode7Tile = true;
+				hdData.M7LargeMap = _state.Mode7.LargeMap;
 				hdData.M7TileHash = tileHash;
 				hdData.M7XValue = currentM7X;
 				hdData.M7YValue = currentM7Y;
@@ -2957,6 +2972,7 @@ void SnesPpu::SendFrame() {
     _readyHdBehindBuffer = _currentHdBehindBuffer;
     memcpy(_readySpritePriorities, _currentSpritePriorities, sizeof(_readySpritePriorities));
     _readyCwPreMath = _currentCwPreMath;
+    _m7CapReady = _m7CapCur;
     if (SnesHdPackLoader::ActivePack) {
       SnesHdPackLoader::ActivePack->ActiveSpriteQueueReadIndex =
           SnesHdPackLoader::ActivePack->ActiveSpriteQueueWriteIndex;

@@ -635,6 +635,299 @@ struct SnesHdMsuTrack
 
 
 // ---------------------------------------------------------
+// <2DOverlay> : effets 2D calcules (etape 1 : particules). Voir docs/claude/09_2DOverlay.md
+// Unites : positions en pixels SNES dans un champ torique (taille ecran x FieldW/FieldH),
+// vitesses en pixels SNES / seconde, angles en degres (0 = droite, 90 = bas).
+// ---------------------------------------------------------
+struct SnesHdParticle
+{
+	float X = 0, Y = 0;       // position dans le champ
+	float VX = 0, VY = 0;     // vitesse propre
+	float Age = 0, Life = 1;  // secondes
+	float Size = 1;           // multiplicateur de taille propre (aleatoire)
+	float Rot = 0, Spin = 0;  // radians, radians / s
+	float Seed1 = 0, Seed2 = 0;
+};
+
+struct SnesHdOverlayInfo
+{
+	std::string JsonFile;
+	std::vector<SnesHdPackCondition*> Conditions;
+
+	// Parametres de la balise (valeurs par defaut, puis JSON, puis balise)
+	int ZIndex = 95;
+	int Layer = 0;                      // 0 = fixe a l'ecran, 1-4 = couche BG d'ancrage
+	float SpeedX = 1.0f, SpeedY = 1.0f; // ratio de defilement relatif a la couche (s'ajoute au mouvement propre)
+	float Alpha = 1.0f;
+	float FieldW = 1.0f, FieldH = 1.0f;
+
+	// Particules (JSON)
+	SnesHdPackBitmapInfo* Texture = nullptr; // PNG de la particule (dessine en pixels HD) ; nullptr = point doux
+	bool Additive = false;
+	int MaxParticles = 300;
+	float Rate = 60.0f;                      // particules creees par seconde
+	float LifeMin = 2.0f, LifeMax = 4.0f;
+	float SpawnX = 0, SpawnY = 0, SpawnW = 1, SpawnH = 1; // zone d'apparition (fractions du champ)
+	float SpeedMin = 20, SpeedMax = 40;
+	float AngleMin = 80, AngleMax = 100;
+	float GravityX = 0, GravityY = 0;        // pixels SNES / s^2
+	float WindX = 0, WindY = 0;              // pixels SNES / s
+	float Turbulence = 0, TurbulenceFreq = 0.5f;
+	float RotationMin = 0, RotationMax = 0;  // degres
+	float SpinMin = 0, SpinMax = 0;          // degres / s
+	float SizeStart = 1, SizeEnd = 1, SizeRandom = 0;
+	float AlphaStart = 1, AlphaEnd = 1, FadeIn = 0.1f, FadeOut = 0.2f;
+	uint32_t ColorStart = 0xFFFFFF, ColorEnd = 0xFFFFFF; // teinte RGB (multiplie la texture)
+	float DotSize = 2.0f;                    // diametre du point doux (pixels SNES) si pas de texture
+	bool Prewarm = true;                     // remplit l'ecran des la 1re apparition
+
+	// Etat d'execution (filtre HD)
+	std::vector<SnesHdParticle> Particles;
+	bool Initialized = false;
+	bool Active = false;
+	float SpawnAcc = 0, Time = 0;
+	float OffsetX = 0, OffsetY = 0;          // decalage d'ancrage accumule (pixels SNES)
+	int LastScrollX = 0, LastScrollY = 0;
+	bool HaveScroll = false;
+	uint32_t Rng = 0x12345678;
+	float FieldWidthPx = 256, FieldHeightPx = 224;
+
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+	float Rand() { Rng ^= Rng << 13; Rng ^= Rng >> 17; Rng ^= Rng << 5; return (float)(Rng & 0xFFFFFF) / 16777216.0f; }
+	float RandRange(float a, float b) { return a + (b - a) * Rand(); }
+};
+
+// ---------------------------------------------------------
+// Capture Mode 7 par ligne (PPU -> filtre) : origine (x = 0) et pas horizontal, en 8.8
+// Base de la camera Mode 7 reconstruite (SnesHdMode7Camera.h)
+// ---------------------------------------------------------
+struct SnesHdM7LineCapture
+{
+	int32_t StartX = 0, StartY = 0;
+	int16_t A = 0, C = 0;
+	uint8_t Valid = 0;
+	uint8_t LargeMap = 0; // carte non repetee (hors carte = tile 0 / transparent)
+};
+
+// ---------------------------------------------------------
+// <3DParticles> : particules dans le monde Mode 7 (carte en texels + hauteur), projetees
+// avec la camera reconstruite de chaque vue. Voir docs/claude/10_Mode7_Camera_3D.md
+// ---------------------------------------------------------
+struct SnesHdParticle3D
+{
+	float X = 0, Y = 0, Z = 0;     // monde (texels), Z = hauteur au-dessus du sol
+	float VX = 0, VY = 0, VZ = 0;  // texels / s
+	float Age = 0, Life = 0;       // Life = 0 : immortelle
+	float Size = 1;
+	float Seed1 = 0, Seed2 = 0;
+};
+
+struct SnesHdParticles3DInfo
+{
+	std::string JsonFile;
+	std::vector<SnesHdPackCondition*> Conditions;
+
+	int ZIndex = 95;
+	int Zone = -1;          // -1 = toutes les vues, 0 = vue du haut, 1 = vue du bas
+	float Alpha = 1.0f;
+
+	SnesHdPackBitmapInfo* Texture = nullptr;
+	bool Additive = false;
+	int MaxParticles = 400;
+	float Rate = 0;          // 0 = boite toujours pleine
+	float LifeMin = 0, LifeMax = 0; // 0 = immortelles
+	float BoxSize = 512, BoxHeight = 128, BoxAhead = 0.35f; // boite autour de la camera (texels)
+	float FallMin = 20, FallMax = 40;    // vitesse de chute (texels / s, positive = vers le bas)
+	float DriftMin = 0, DriftMax = 6;    // derive horizontale aleatoire
+	float Gravity = 0;                   // texels / s^2 vers le bas
+	float WindX = 0, WindY = 0;          // vent dans les axes de la carte
+	float Turbulence = 0, TurbulenceFreq = 0.5f;
+	float SizeStart = 2, SizeEnd = 2, SizeRandom = 0; // taille dans le monde (texels)
+	float MinPixelSize = 1.5f;           // taille mini a l'ecran (pixels HD) : au-dela, l'alpha baisse
+	float AlphaStart = 1, AlphaEnd = 1, FadeIn = 0.1f, FadeOut = 0.2f;
+	uint32_t ColorStart = 0xFFFFFF, ColorEnd = 0xFFFFFF;
+	float FarFade = 0.3f;                // part du bord de la boite ou l'alpha s'estompe
+	float NearFade = 24.0f;              // en dessous de cette distance (texels), l'alpha s'estompe
+	bool GroundRespawn = true;           // au sol : reapparait en haut (sinon meurt)
+
+	struct ViewState
+	{
+		std::vector<SnesHdParticle3D> Parts;
+		bool Initialized = false;
+		bool HaveCam = false;
+		double CamWX = 0, CamWY = 0;     // camera dans le monde "deplie"
+		double LastCx = 0, LastCy = 0;   // camera dans les coordonnees de la carte VRAM
+		double CenterX = 0, CenterY = 0; // centre de la boite (monde)
+		float SpawnAcc = 0, Time = 0;
+		bool Active = false;
+	};
+	ViewState Views[2];
+
+	uint32_t Rng = 0x9E3779B9;
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+	float Rand() { Rng ^= Rng << 13; Rng ^= Rng >> 17; Rng ^= Rng << 5; return (float)(Rng & 0xFFFFFF) / 16777216.0f; }
+	float RandRange(float a, float b) { return a + (b - a) * Rand(); }
+};
+
+// ---------------------------------------------------------
+// <m7relief> : volume d'une tile Mode 7 (rendu "Voxel Space" sur la camera reconstruite)
+// PNG de relief : pixel transparent = sol plat ; opaque = en volume.
+//  mode extrude (defaut) : tout pixel d'alpha >= 128 monte a Height ; mode height : alpha = hauteur.
+// ---------------------------------------------------------
+struct SnesHdM7ReliefInfo
+{
+	uint32_t TileHash = 0;
+	SnesHdPackBitmapInfo* Bitmap = nullptr; // nullptr = "full" : toute la tile en volume
+	int X = 0, Y = 0, Size = 32;            // zone de la PNG (atlas possible)
+	float Height = 6.0f;                    // hauteur maxi (texels de carte)
+	float Sides = 0.7f;                     // luminosite des flancs
+	bool HeightMap = false;                 // alpha = hauteur (sinon extrusion)
+	bool ColorFromPng = false;              // couleur : PNG de relief (sinon tile HD affichee)
+	std::vector<SnesHdPackCondition*> Conditions;
+
+	std::vector<uint8_t> H;                 // hauteur 0-255 par pixel (Size x Size)
+	std::vector<uint32_t> C;                // couleur de la PNG
+	bool Built = false;
+
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+	void Build()
+	{
+		if(Built) return;
+		Built = true;
+		if(!Bitmap) { Size = 1; H.assign(1, 255); C.assign(1, 0xFFFFFFFF); return; }
+		if(Bitmap->PixelData.empty()) Bitmap->Init();
+		Size = std::max(1, Size);
+		H.assign((size_t)Size * Size, 0);
+		C.assign((size_t)Size * Size, 0);
+		for(int y = 0; y < Size; y++) {
+			for(int x = 0; x < Size; x++) {
+				int sx = X + x, sy = Y + y;
+				if(sx < 0 || sy < 0 || sx >= (int)Bitmap->Width || sy >= (int)Bitmap->Height) continue;
+				uint32_t c = Bitmap->PixelData[(size_t)sy * Bitmap->Width + sx];
+				uint8_t a = (uint8_t)(c >> 24);
+				H[(size_t)y * Size + x] = HeightMap ? a : (a >= 128 ? 255 : 0);
+				C[(size_t)y * Size + x] = c;
+			}
+		}
+	}
+};
+
+// ---------------------------------------------------------
+// <m7billboard> : panneau (PNG debout, toujours face a la camera) plante sur la carte Mode 7
+// ---------------------------------------------------------
+struct SnesHdM7BillboardInfo
+{
+	SnesHdPackBitmapInfo* Bitmap = nullptr;
+	bool AnyMap = true;      // sinon : seulement sur la carte <m7img> de hash MapHash
+	uint32_t MapHash = 0;
+	bool OnTile = false;     // plante au centre de chaque case contenant la tile TileHash
+	uint32_t TileHash = 0;
+	float X = 0, Y = 0;      // position sur la carte (texels, 0-1023)
+	float Height = 48.0f;    // hauteur dans le monde (texels de carte)
+	float Elevation = 0.0f;  // hauteur du pied au-dessus du sol
+	float Alpha = 1.0f;
+	std::vector<SnesHdPackCondition*> Conditions;
+
+	std::vector<std::vector<uint32_t>> Mips; // niveau 0 = PNG, puis moities
+	std::vector<uint32_t> MipW, MipH;
+	bool Built = false;
+
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+	void Build()
+	{
+		if(Built) return;
+		Built = true;
+		if(!Bitmap) return;
+		if(Bitmap->PixelData.empty()) Bitmap->Init();
+		if(Bitmap->PixelData.empty() || Bitmap->Width == 0 || Bitmap->Height == 0) return;
+		Mips.push_back(Bitmap->PixelData); MipW.push_back(Bitmap->Width); MipH.push_back(Bitmap->Height);
+		while(MipW.back() > 1 || MipH.back() > 1) {
+			uint32_t pw = MipW.back(), ph = MipH.back();
+			uint32_t nw = std::max<uint32_t>(1, pw / 2), nh = std::max<uint32_t>(1, ph / 2);
+			const std::vector<uint32_t>& prev = Mips.back();
+			std::vector<uint32_t> m((size_t)nw * nh, 0);
+			for(uint32_t y = 0; y < nh; y++) {
+				for(uint32_t x = 0; x < nw; x++) {
+					uint32_t sumA = 0, r = 0, g = 0, b = 0, n = 0;
+					for(uint32_t dy = 0; dy < 2; dy++) for(uint32_t dx = 0; dx < 2; dx++) {
+						uint32_t sx = std::min(pw - 1, x * 2 + dx), sy = std::min(ph - 1, y * 2 + dy);
+						uint32_t q = prev[(size_t)sy * pw + sx], a = q >> 24;
+						sumA += a; r += ((q >> 16) & 0xFF) * a; g += ((q >> 8) & 0xFF) * a; b += (q & 0xFF) * a; n++;
+					}
+					if(sumA > 0) m[(size_t)y * nw + x] = ((sumA / n) << 24) | ((r / sumA) << 16) | ((g / sumA) << 8) | (b / sumA);
+				}
+			}
+			Mips.push_back(std::move(m)); MipW.push_back(nw); MipH.push_back(nh);
+		}
+	}
+};
+
+// ---------------------------------------------------------
+// <m7model> : modele 3D (.obj + .mtl) pose sur la carte Mode 7, rendu par un petit moteur logiciel
+// ---------------------------------------------------------
+struct SnesHdModelMaterial
+{
+	std::string Name;
+	uint32_t Kd = 0xFFFFFF;                 // couleur diffuse (multiplie la texture)
+	float Alpha = 1.0f;                     // d
+	SnesHdPackBitmapInfo* Texture = nullptr; // map_Kd
+};
+
+struct SnesHdModelTri
+{
+	float P[3][3];   // positions (unites OBJ, Y vers le haut)
+	float UV[3][2];  // coordonnees de texture (v vers le haut, convention OBJ)
+	float N[3][3];   // normales (normale de la face si le fichier n'en a pas)
+	int Mat = 0;
+};
+
+struct SnesHdModelMesh
+{
+	std::vector<SnesHdModelTri> Tris;
+	std::vector<SnesHdModelMaterial> Mats;
+	float MinX = 0, MinY = 0, MinZ = 0, MaxX = 0, MaxY = 0, MaxZ = 0;
+};
+
+struct SnesHdM7ModelInfo
+{
+	std::shared_ptr<SnesHdModelMesh> Mesh;
+	std::string File;
+	bool AnyMap = true;
+	uint32_t MapHash = 0;
+	bool OnTile = false;
+	uint32_t TileHash = 0;
+	float X = 0, Y = 0;          // position sur la carte (texels)
+	float Scale = 8.0f;          // texels de carte par unite OBJ (8 = 1 unite fait une tile)
+	float Rotation = 0.0f;       // degres, autour de la verticale
+	float Elevation = 0.0f;      // texels au-dessus du sol
+	float Ambient = 0.45f;       // eclairage : part ambiante (0 = tres contraste, 1 = plat)
+	bool KeepOrigin = false;     // false : la base du modele (centre, Y mini) est posee au sol en (x, y)
+	std::vector<SnesHdPackCondition*> Conditions;
+
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+};
+
+// ---------------------------------------------------------
 // Zone de color window (fenetre PPU appliquee au color math) visible sur la frame :
 // transparences/masques dessines par fenetres, ex. numero de position de Mario Kart.
 struct SnesHdColorWindowRegion
@@ -777,6 +1070,25 @@ public:
 
 	// Nos backgrounds triés et prêts à l'emploi
 	std::vector<std::unique_ptr<SnesHdBackgroundInfo>> Backgrounds;
+
+	// Effets <2DOverlay> (particules 2D...)
+	std::vector<std::unique_ptr<SnesHdOverlayInfo>> Overlays;
+
+	// Effets <3DParticles> (particules dans le monde Mode 7)
+	std::vector<std::unique_ptr<SnesHdParticles3DInfo>> Particles3D;
+
+	// <m7relief> : volume des tiles Mode 7, par hash de tile
+	std::unordered_map<uint32_t, std::vector<std::unique_ptr<SnesHdM7ReliefInfo>>> M7Reliefs;
+
+	// <m7billboard> : panneaux plantes sur la carte Mode 7
+	std::vector<std::unique_ptr<SnesHdM7BillboardInfo>> M7Billboards;
+
+	// <m7model> : modeles 3D .obj poses sur la carte Mode 7
+	std::vector<std::unique_ptr<SnesHdM7ModelInfo>> M7Models;
+
+	// <m7CameraDebug> : reperes de controle de la camera Mode 7 reconstruite
+	bool M7CameraDebug = false;
+	std::vector<SnesHdPackCondition*> M7CameraDebugConditions;
 
 	// MPEG1 videos
 	std::vector<std::unique_ptr<SnesHdVideoInfo>> Videos;

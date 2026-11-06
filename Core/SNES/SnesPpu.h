@@ -114,6 +114,10 @@ private:
 	uint8_t _colorWindowMask[256 * 240] = {};
 	uint16_t _cwRowFixedColor[240] = {};
 	uint8_t _cwRowOp[240] = {};
+	// Capture Mode 7 par ligne (origine + pas), double-bufferisee comme les buffers HD
+	SnesHdM7LineCapture _m7Capture[2][240] = {};
+	uint8_t _m7CapCur = 0;
+	uint8_t _m7CapReady = 1;
 	// Couleur de l'ecran principal AVANT color math, pour les pixels de la fenetre (double-bufferise :
 	// le filtre HD lit la frame figee pendant que le PPU remplit la suivante)
 	uint16_t _cwPreMathBuffers[2][256 * 240] = {};
@@ -334,6 +338,7 @@ public:
 	SnesHdPixelData* GetHdBehindScreenBuffer() { return _readyHdBehindBuffer; }
 	const uint8_t* GetCurrentSpritePriorities() const { return _readySpritePriorities; }
 	const uint16_t* GetColorWindowPreMathBuffer() const { return _readyCwPreMath; }
+	const SnesHdM7LineCapture* GetMode7LineCapture() const { return _m7Capture[_m7CapReady]; }
 
 
 	void ScanSpritesForHdAdditions(SnesHdPackData* pack);

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include "SNES/HdPacks/SnesHdVideoFilter.h"
 #include "SNES/HdPacks/SnesHdPackLoader.h"
+#include "SNES/HdPacks/SnesHdMode7Camera.h"
 #include "SNES/SnesConsole.h"
 #include "SNES/SnesPpu.h"
 #include "Shared/Emulator.h"
@@ -269,6 +270,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// (contours nets, perspective lissee, mipmaps) au lieu de les dessiner bloc par bloc.
 	// ====================================================================
 	std::vector<SnesHdMode7Image*> m7CellTile;
+	std::vector<uint32_t> m7CellHash; // hash de la tile de chaque case (pour <m7relief>)
 	SnesHdMode7Image* m7OutsideTile = nullptr; // tile affichee hors de la carte (Mode 7 "fill with tile 0")
 	bool anyM7Cell = false;
 	{
@@ -291,11 +293,13 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					}
 					if(!img || img->TileMips.empty()) continue;
 					int32_t mx = p.M7XValue >> 8, my = p.M7YValue >> 8;
-					if(m7CellTile.empty()) m7CellTile.assign(128 * 128, nullptr);
+					if(!p.M7LargeMap) { mx &= 1023; my &= 1023; } // carte repetee : la case est repliee
+					if(m7CellTile.empty()) { m7CellTile.assign(128 * 128, nullptr); m7CellHash.assign(128 * 128, 0); }
 					if(mx < 0 || my < 0 || mx > 1023 || my > 1023) {
 						m7OutsideTile = img;
 					} else {
 						m7CellTile[(size_t)(my >> 3) * 128 + (mx >> 3)] = img;
+						m7CellHash[(size_t)(my >> 3) * 128 + (mx >> 3)] = p.M7TileHash;
 					}
 					anyM7Cell = true;
 				}
@@ -1237,12 +1241,903 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	struct RenderTask
 	{
 		int zIndex;
-		int type;     // 0 = Background, 1 = Tile/Sprite
+		int type;     // 0 = Background, 1 = Tile/Sprite, 2 = <2DOverlay>, 3 = <3DParticles>, 4 = <m7relief>, 5 = <m7billboard>, 6 = <m7model>
 		int oamIndex; // Utilisé pour ordonner les sprites de même ZIndex
 		size_t index; // Index dans le vecteur source
 	};
 
+	// ====================================================================
+	// <2DOverlay> : SIMULATION DES PARTICULES (sequentielle, une fois par frame, avant la composition)
+	// ====================================================================
+	auto& hdOverlays = SnesHdPackLoader::ActivePack->Overlays;
+	std::vector<char> ovActive(hdOverlays.size(), 0);
+	{
+		const float ovDt = 1.0f / 60.0f;
+		const float kPi = 3.14159265f;
+		auto ovSpawn = [&](SnesHdOverlayInfo& ov) {
+			SnesHdParticle p;
+			p.X = (ov.SpawnX + ov.Rand() * ov.SpawnW) * ov.FieldWidthPx;
+			p.Y = (ov.SpawnY + ov.Rand() * ov.SpawnH) * ov.FieldHeightPx;
+			float sp = ov.RandRange(ov.SpeedMin, ov.SpeedMax);
+			float ang = ov.RandRange(ov.AngleMin, ov.AngleMax) * kPi / 180.0f;
+			p.VX = std::cos(ang) * sp;
+			p.VY = std::sin(ang) * sp;
+			p.Life = std::max(0.05f, ov.RandRange(ov.LifeMin, ov.LifeMax));
+			p.Size = 1.0f + ov.SizeRandom * (ov.Rand() * 2.0f - 1.0f);
+			p.Rot = ov.RandRange(ov.RotationMin, ov.RotationMax) * kPi / 180.0f;
+			p.Spin = ov.RandRange(ov.SpinMin, ov.SpinMax) * kPi / 180.0f;
+			p.Seed1 = ov.Rand() * 2.0f * kPi;
+			p.Seed2 = ov.Rand() * 2.0f * kPi;
+			ov.Particles.push_back(p);
+		};
+		auto ovStep = [&](SnesHdOverlayInfo& ov) {
+			ov.Time += ovDt;
+			ov.SpawnAcc += ov.Rate * ovDt;
+			while(ov.SpawnAcc >= 1.0f) {
+				ov.SpawnAcc -= 1.0f;
+				if((int)ov.Particles.size() < ov.MaxParticles) ovSpawn(ov);
+			}
+			const float tw = 2.0f * kPi * ov.TurbulenceFreq;
+			for(size_t k = 0; k < ov.Particles.size();) {
+				SnesHdParticle& p = ov.Particles[k];
+				p.Age += ovDt;
+				if(p.Age >= p.Life) { p = ov.Particles.back(); ov.Particles.pop_back(); continue; }
+				p.VX += ov.GravityX * ovDt;
+				p.VY += ov.GravityY * ovDt;
+				float tx = 0, ty = 0;
+				if(ov.Turbulence != 0.0f) {
+					tx = ov.Turbulence * std::sin(tw * ov.Time + p.Seed1);
+					ty = ov.Turbulence * std::cos(tw * 0.73f * ov.Time + p.Seed2);
+				}
+				p.X += (p.VX + ov.WindX + tx) * ovDt;
+				p.Y += (p.VY + ov.WindY + ty) * ovDt;
+				p.Rot += p.Spin * ovDt;
+				p.X = std::fmod(p.X, ov.FieldWidthPx); if(p.X < 0) p.X += ov.FieldWidthPx;
+				p.Y = std::fmod(p.Y, ov.FieldHeightPx); if(p.Y < 0) p.Y += ov.FieldHeightPx;
+				k++;
+			}
+		};
+
+		for(size_t i = 0; i < hdOverlays.size(); i++) {
+			SnesHdOverlayInfo& ov = *hdOverlays[i];
+			ov.Active = ov.MatchesCondition();
+			if(!ov.Active) continue; // effet fige tant que sa condition est fausse
+			ovActive[i] = 1;
+			ov.FieldWidthPx = (float)cropWidth * ov.FieldW;
+			ov.FieldHeightPx = (float)cropHeight * ov.FieldH;
+
+			if(!ov.Initialized) {
+				ov.Initialized = true;
+				ov.Rng ^= (uint32_t)(i + 1) * 2654435761u;
+				if(ov.Prewarm) {
+					int steps = (int)std::min(ov.LifeMax * 60.0f, 900.0f);
+					for(int s = 0; s < steps; s++) ovStep(ov);
+				}
+			}
+
+			// Ancrage : le defilement de la couche (x SpeedX/SpeedY) S'AJOUTE au mouvement propre
+			if(ov.Layer >= 1 && ov.Layer <= 4) {
+				int li = ov.Layer - 1;
+				uint32_t line = std::min<uint32_t>(srcY + cropHeight / 2, 239);
+				int scx = SnesHdPackLoader::ActivePack->ScreenInfo.ScanlineHScroll[line][li];
+				int scy = SnesHdPackLoader::ActivePack->ScreenInfo.ScanlineVScroll[line][li];
+				if(ov.HaveScroll) {
+					int dx = (((scx - ov.LastScrollX) % 1024) + 1536) % 1024 - 512; // registres de scroll sur 10 bits
+					int dy = (((scy - ov.LastScrollY) % 1024) + 1536) % 1024 - 512;
+					// Saut brutal (changement de salle/zone) : non repercute
+					if(std::abs(dx) <= 64) ov.OffsetX += (float)dx * ov.SpeedX;
+					if(std::abs(dy) <= 64) ov.OffsetY += (float)dy * ov.SpeedY;
+					ov.OffsetX = std::fmod(ov.OffsetX, ov.FieldWidthPx);
+					ov.OffsetY = std::fmod(ov.OffsetY, ov.FieldHeightPx);
+				}
+				ov.LastScrollX = scx;
+				ov.LastScrollY = scy;
+				ov.HaveScroll = true;
+			}
+
+			ovStep(ov);
+		}
+	}
+
+	// Rendu d'un overlay sur une bande de lignes HD (appele par composeBand, en parallele)
+	auto renderOverlayBand = [&](size_t ovIndex, uint32_t bandY0, uint32_t bandY1) {
+		const SnesHdOverlayInfo& ov = *hdOverlays[ovIndex];
+		const SnesHdPackBitmapInfo* tex = (ov.Texture && !ov.Texture->PixelData.empty() && ov.Texture->Width > 0) ? ov.Texture : nullptr;
+		const float fW = ov.FieldWidthPx, fH = ov.FieldHeightPx;
+		const float sc = (float)scale;
+		const uint8_t z = (uint8_t)std::clamp(ov.ZIndex, 0, 255);
+		const int texW = tex ? (int)tex->Width : 0, texH = tex ? (int)tex->Height : 0;
+
+		for(const SnesHdParticle& p : ov.Particles) {
+			const float t = p.Age / p.Life;
+			const float sizeMul = p.Size * (ov.SizeStart + (ov.SizeEnd - ov.SizeStart) * t);
+			if(sizeMul <= 0.001f) continue;
+			float a = ov.AlphaStart + (ov.AlphaEnd - ov.AlphaStart) * t;
+			if(ov.FadeIn > 0.0f && t < ov.FadeIn) a *= t / ov.FadeIn;
+			if(ov.FadeOut > 0.0f && t > 1.0f - ov.FadeOut) a *= (1.0f - t) / ov.FadeOut;
+			a *= ov.Alpha;
+			if(a <= 0.002f) continue;
+
+			auto lerpC = [&](int sh) {
+				float c0 = (float)((ov.ColorStart >> sh) & 0xFF), c1 = (float)((ov.ColorEnd >> sh) & 0xFF);
+				return (c0 + (c1 - c0) * t) / 255.0f;
+			};
+			const float tr = lerpC(16), tg = lerpC(8), tb = lerpC(0);
+
+			float halfW, halfH;
+			if(tex) { halfW = texW * 0.5f * sizeMul; halfH = texH * 0.5f * sizeMul; }
+			else { halfW = halfH = ov.DotSize * sc * 0.5f * sizeMul; }
+			const bool rotated = (p.Rot != 0.0f || p.Spin != 0.0f);
+			const float radius = rotated ? std::sqrt(halfW * halfW + halfH * halfH) : std::max(halfW, halfH);
+			const float cosR = std::cos(p.Rot), sinR = std::sin(p.Rot);
+
+			// Position affichee (pixels SNES) : position propre - decalage d'ancrage, dans le champ torique
+			float sx = std::fmod(p.X - ov.OffsetX, fW); if(sx < 0) sx += fW;
+			float sy = std::fmod(p.Y - ov.OffsetY, fH); if(sy < 0) sy += fH;
+
+			// Dessin dans le champ et ses voisins immediats -> aucune couture aux bords
+			for(int cyc = -1; cyc <= 1; cyc++) {
+				for(int cxc = -1; cxc <= 1; cxc++) {
+					const float pcx = (sx + cxc * fW + (float)dstX) * sc;
+					const float pcy = (sy + cyc * fH + (float)dstY) * sc;
+					int x0 = std::max(0, (int)std::floor(pcx - radius));
+					int x1 = std::min((int)outWidth - 1, (int)std::ceil(pcx + radius));
+					int y0 = std::max((int)bandY0, (int)std::floor(pcy - radius));
+					int y1 = std::min((int)bandY1 - 1, (int)std::ceil(pcy + radius));
+					if(x0 > x1 || y0 > y1) continue;
+
+					for(int yy = y0; yy <= y1; yy++) {
+						const float dy = (float)yy + 0.5f - pcy;
+						for(int xx = x0; xx <= x1; xx++) {
+							const float dx = (float)xx + 0.5f - pcx;
+							float lx = dx, ly = dy;
+							if(rotated) { lx = dx * cosR + dy * sinR; ly = -dx * sinR + dy * cosR; }
+
+							float sa, sr, sg, sb;
+							if(tex) {
+								float u = lx / sizeMul + texW * 0.5f - 0.5f;
+								float v = ly / sizeMul + texH * 0.5f - 0.5f;
+								if(u < -0.5f || v < -0.5f || u > texW - 0.5f || v > texH - 0.5f) continue;
+								int iu = (int)std::floor(u), iv = (int)std::floor(v);
+								float fu = u - iu, fv = v - iv;
+								float acc[4] = { 0, 0, 0, 0 };
+								const int qx[4] = { iu, iu + 1, iu, iu + 1 }, qy[4] = { iv, iv, iv + 1, iv + 1 };
+								const float wq[4] = { (1 - fu) * (1 - fv), fu * (1 - fv), (1 - fu) * fv, fu * fv };
+								for(int q = 0; q < 4; q++) {
+									int cxq = std::clamp(qx[q], 0, texW - 1), cyq = std::clamp(qy[q], 0, texH - 1);
+									uint32_t c = tex->PixelData[(size_t)cyq * texW + cxq];
+									float ca = (float)(c >> 24) * wq[q];
+									acc[0] += ca; acc[1] += ((c >> 16) & 0xFF) * ca; acc[2] += ((c >> 8) & 0xFF) * ca; acc[3] += (c & 0xFF) * ca;
+								}
+								if(acc[0] <= 0.5f) continue;
+								sa = acc[0] / 255.0f; sr = acc[1] / acc[0]; sg = acc[2] / acc[0]; sb = acc[3] / acc[0];
+							} else {
+								float d = std::sqrt(lx * lx + ly * ly) / halfW;
+								if(d >= 1.0f) continue;
+								float s = 1.0f - d * d;
+								sa = s * s; sr = sg = sb = 255.0f;
+							}
+
+							const float aa = sa * a;
+							if(aa < 0.004f) continue;
+							const uint32_t idx = (uint32_t)yy * outWidth + (uint32_t)xx;
+							if(z < _zBuffer[idx]) continue;
+
+							const uint32_t dstC = out[idx];
+							const float dr = (float)((dstC >> 16) & 0xFF), dg = (float)((dstC >> 8) & 0xFF), db = (float)(dstC & 0xFF);
+							const float cr = sr * tr, cg = sg * tg, cb = sb * tb;
+							float nr, ng, nb;
+							if(ov.Additive) {
+								nr = std::min(255.0f, dr + cr * aa); ng = std::min(255.0f, dg + cg * aa); nb = std::min(255.0f, db + cb * aa);
+							} else {
+								nr = dr + (cr - dr) * aa; ng = dg + (cg - dg) * aa; nb = db + (cb - db) * aa;
+							}
+							out[idx] = 0xFF000000 | ((uint32_t)(nr + 0.5f) << 16) | ((uint32_t)(ng + 0.5f) << 8) | (uint32_t)(nb + 0.5f);
+						}
+					}
+				}
+			}
+		}
+	};
+
+	// ====================================================================
+	// CAMERA MODE 7 RECONSTRUITE (socle 3D) + <3DParticles>
+	// Voir SnesHdMode7Camera.h et docs/claude/10_Mode7_Camera_3D.md
+	// ====================================================================
+	auto& hdParts3D = SnesHdPackLoader::ActivePack->Particles3D;
+	bool m7DebugOn = SnesHdPackLoader::ActivePack->M7CameraDebug;
+	for(auto* c : SnesHdPackLoader::ActivePack->M7CameraDebugConditions) {
+		if(!c->CheckCondition(0, 0, nullptr)) { m7DebugOn = false; break; }
+	}
+	std::vector<SnesHdM7Zone> m7Zones; // toutes les zones Mode 7 de l'ecran
+	std::vector<int> m7Views;          // zones en perspective avec camera valide (vue 0 = haut, 1 = bas)
+	if(!hdParts3D.empty() || m7DebugOn) {
+		const SnesHdM7LineCapture* cap = console->GetPpu()->GetMode7LineCapture();
+		std::vector<SnesHdM7CamLine> camLines(cropHeight);
+		for(uint32_t y = 0; y < cropHeight && cap; y++) {
+			uint32_t row = y + srcY;
+			if(row >= 240 || !cap[row].Valid) continue;
+			SnesHdM7CamLine& cl = camLines[y];
+			cl.Valid = true;
+			cl.LargeMap = cap[row].LargeMap != 0;
+			const M7Line& L = m7Lines[y];
+			if(L.UseFit && L.Inv > 1e-12) {
+				// memes parametres lisses que le rendu Mode 7 HD (origine a x = 0 de l'image recadree)
+				double scl = 1.0 / L.Inv;
+				cl.Sx = L.DirX * scl / 256.0; cl.Sy = L.DirY * scl / 256.0;
+				cl.Px = (L.U[0] + L.V[0] * scl) / 256.0; cl.Py = (L.U[1] + L.V[1] * scl) / 256.0;
+				cl.Smoothed = true;
+			} else {
+				cl.Sx = cap[row].A / 256.0; cl.Sy = cap[row].C / 256.0;
+				cl.Px = cap[row].StartX / 256.0 + cl.Sx * (double)srcX;
+				cl.Py = cap[row].StartY / 256.0 + cl.Sy * (double)srcX;
+			}
+		}
+		SnesHdBuildMode7Zones(camLines, (double)cropWidth * 0.5, m7Zones);
+		for(size_t z = 0; z < m7Zones.size() && m7Views.size() < 2; z++) {
+			if(m7Zones[z].Perspective && m7Zones[z].HasPinhole) m7Views.push_back((int)z);
+		}
+	}
+
+	// Particule prete a dessiner (pixels HD), triee du plus loin au plus proche
+	struct P3Draw { float Cx, Cy, HalfW, HalfH, A, R, G, B, Depth, GroundRow; };
+	std::vector<std::vector<P3Draw>> p3Draws(hdParts3D.size() * 2);
+	{
+		const float dt = 1.0f / 60.0f;
+		const float kPi = 3.14159265f;
+		for(size_t pIdx = 0; pIdx < hdParts3D.size(); pIdx++) {
+			SnesHdParticles3DInfo& pi = *hdParts3D[pIdx];
+			const bool on = pi.MatchesCondition();
+			for(int v = 0; v < 2; v++) {
+				auto& st = pi.Views[v];
+				st.Active = false;
+				if(!on || v >= (int)m7Views.size()) continue; // effet fige
+				if(pi.Zone >= 0 && pi.Zone != v) continue;
+				const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+
+				// Camera "depliee" : on cumule ses deplacements (carte VRAM repliee sur 1024)
+				if(!st.HaveCam) {
+					st.HaveCam = true; st.CamWX = 0; st.CamWY = 0;
+				} else {
+					double dx = std::remainder(zn.Cx - st.LastCx, 1024.0), dy = std::remainder(zn.Cy - st.LastCy, 1024.0);
+					if(std::abs(dx) < 128.0 && std::abs(dy) < 128.0) { st.CamWX += dx; st.CamWY += dy; } // sinon : teleportation
+				}
+				st.LastCx = zn.Cx; st.LastCy = zn.Cy;
+				const float B = pi.BoxSize;
+				st.CenterX = st.CamWX + zn.Fx * B * pi.BoxAhead;
+				st.CenterY = st.CamWY + zn.Fy * B * pi.BoxAhead;
+				st.Active = true;
+
+				auto spawn = [&](bool anyHeight) {
+					SnesHdParticle3D p;
+					p.X = (float)(st.CenterX + (pi.Rand() - 0.5f) * B);
+					p.Y = (float)(st.CenterY + (pi.Rand() - 0.5f) * B);
+					float fall = pi.RandRange(pi.FallMin, pi.FallMax);
+					p.Z = anyHeight ? pi.Rand() * pi.BoxHeight : (fall >= 0 ? pi.BoxHeight : 0.0f);
+					float ang = pi.Rand() * 2.0f * kPi, dr = pi.RandRange(pi.DriftMin, pi.DriftMax);
+					p.VX = std::cos(ang) * dr; p.VY = std::sin(ang) * dr; p.VZ = -fall;
+					p.Life = pi.LifeMax > 0 ? std::max(0.05f, pi.RandRange(pi.LifeMin, pi.LifeMax)) : 0.0f;
+					p.Age = (anyHeight && p.Life > 0) ? pi.Rand() * p.Life : 0.0f;
+					p.Size = 1.0f + pi.SizeRandom * (pi.Rand() * 2.0f - 1.0f);
+					p.Seed1 = pi.Rand() * 2.0f * kPi; p.Seed2 = pi.Rand() * 2.0f * kPi;
+					st.Parts.push_back(p);
+				};
+				auto step = [&]() {
+					st.Time += dt;
+					if(pi.Rate > 0) {
+						st.SpawnAcc += pi.Rate * dt;
+						while(st.SpawnAcc >= 1.0f) { st.SpawnAcc -= 1.0f; if((int)st.Parts.size() < pi.MaxParticles) spawn(false); }
+					} else {
+						while((int)st.Parts.size() < pi.MaxParticles) spawn(false);
+					}
+					const float tw = 2.0f * kPi * pi.TurbulenceFreq;
+					for(size_t k = 0; k < st.Parts.size();) {
+						SnesHdParticle3D& p = st.Parts[k];
+						bool dead = false;
+						if(p.Life > 0) { p.Age += dt; dead = p.Age >= p.Life; }
+						if(!dead) {
+							p.VZ -= pi.Gravity * dt;
+							float tx = 0, ty = 0;
+							if(pi.Turbulence != 0.0f) {
+								tx = pi.Turbulence * std::sin(tw * st.Time + p.Seed1);
+								ty = pi.Turbulence * std::cos(tw * 0.73f * st.Time + p.Seed2);
+							}
+							p.X += (p.VX + pi.WindX + tx) * dt;
+							p.Y += (p.VY + pi.WindY + ty) * dt;
+							p.Z += p.VZ * dt;
+							if(p.Z <= 0.0f) {
+								if(pi.GroundRespawn) p.Z += pi.BoxHeight; else dead = true;
+							} else if(p.Z > pi.BoxHeight) {
+								p.Z -= pi.BoxHeight;
+							}
+							// boite torique qui suit la camera
+							double rx = p.X - st.CenterX; rx -= B * std::floor(rx / B + 0.5); p.X = (float)(st.CenterX + rx);
+							double ry = p.Y - st.CenterY; ry -= B * std::floor(ry / B + 0.5); p.Y = (float)(st.CenterY + ry);
+						}
+						if(dead) { p = st.Parts.back(); st.Parts.pop_back(); continue; }
+						k++;
+					}
+				};
+
+				if(!st.Initialized) {
+					st.Initialized = true;
+					st.Parts.clear();
+					pi.Rng ^= (uint32_t)(pIdx * 2 + v + 1) * 2654435761u;
+					if(pi.Rate <= 0) {
+						while((int)st.Parts.size() < pi.MaxParticles) spawn(true);
+					} else {
+						int steps = (int)std::min(pi.LifeMax > 0 ? pi.LifeMax * 60.0f : 300.0f, 600.0f);
+						for(int s = 0; s < steps; s++) step();
+					}
+				}
+				step();
+
+				// Projection (sequentielle) -> liste de dessin triee par profondeur
+				std::vector<P3Draw>& dl = p3Draws[pIdx * 2 + v];
+				const float sc = (float)scale;
+				const float texAspect = (pi.Texture && pi.Texture->Width > 0) ? (float)pi.Texture->Height / (float)pi.Texture->Width : 1.0f;
+				for(const SnesHdParticle3D& p : st.Parts) {
+					double u = p.X - st.CamWX + zn.Cx, w = p.Y - st.CamWY + zn.Cy;
+					double sx, sy, ppt;
+					if(!zn.Project(u, w, p.Z, sx, sy, ppt)) continue;
+					double D = zn.DepthOf(u, w);
+					if(D < 2.0) continue;
+					float t = p.Life > 0 ? p.Age / p.Life : 0.0f;
+					float a = pi.AlphaStart + (pi.AlphaEnd - pi.AlphaStart) * t;
+					if(p.Life > 0) {
+						if(pi.FadeIn > 0 && t < pi.FadeIn) a *= t / pi.FadeIn;
+						if(pi.FadeOut > 0 && t > 1.0f - pi.FadeOut) a *= (1.0f - t) / pi.FadeOut;
+					}
+					if(pi.NearFade > 0 && D < pi.NearFade) a *= (float)(D / pi.NearFade);
+					float r = (float)std::max(std::abs(p.X - st.CenterX), std::abs(p.Y - st.CenterY)) / (B * 0.5f);
+					if(pi.FarFade > 0 && r > 1.0f - pi.FarFade) a *= std::max(0.0f, (1.0f - r) / pi.FarFade);
+					float sizePx = p.Size * (pi.SizeStart + (pi.SizeEnd - pi.SizeStart) * t) * (float)ppt * sc;
+					if(sizePx <= 0.0f) continue;
+					if(sizePx < pi.MinPixelSize) { a *= sizePx / pi.MinPixelSize; sizePx = pi.MinPixelSize; }
+					a *= pi.Alpha;
+					if(a <= 0.003f) continue;
+					auto lerpC = [&](int sh) {
+						float c0 = (float)((pi.ColorStart >> sh) & 0xFF), c1 = (float)((pi.ColorEnd >> sh) & 0xFF);
+						return (c0 + (c1 - c0) * t) / 255.0f;
+					};
+					P3Draw d;
+					d.Cx = (float)((sx + dstX) * sc); d.Cy = (float)((sy + dstY) * sc);
+					d.HalfW = sizePx * 0.5f; d.HalfH = d.HalfW * texAspect;
+					d.A = std::min(a, 1.0f); d.R = lerpC(16); d.G = lerpC(8); d.B = lerpC(0); d.Depth = (float)D;
+					d.GroundRow = (float)(sy + p.Z * ppt); // ligne d'ecran du point de sol sous la particule
+					dl.push_back(d);
+				}
+				std::sort(dl.begin(), dl.end(), [](const P3Draw& a, const P3Draw& b) { return a.Depth > b.Depth; });
+			}
+		}
+	}
+
+	// ====================================================================
+	// <3DParticles> : OCCLUSION PAR LES SPRITES
+	// Un sprite pose sur le sol Mode 7 : la ligne de ses pieds (bas des pixels opaques de son
+	// groupe d'objets OAM qui se touchent) donne sa profondeur. Carte "ligne des pieds" par pixel HD :
+	//  - sprites SD (sans tile HD) : remplie ici depuis le releve des pixels ;
+	//  - sprites HD : ecrite par composeBand en dessinant leurs tiles (pixels alpha >= 128).
+	// Au dessin, une particule dont le point de sol est plus haut a l'ecran (= plus loin) que les
+	// pieds du sprite qui couvre ce pixel est cachee.
+	// ====================================================================
+	// ====================================================================
+	// <m7relief> : PREPARATION (sequentielle) - relief de chaque case visible de la carte Mode 7
+	// ====================================================================
+	auto& hdReliefs = SnesHdPackLoader::ActivePack->M7Reliefs;
+	std::vector<SnesHdM7ReliefInfo*> cellRelief;
+	float reliefMaxH = 0.0f;
+	if(!hdReliefs.empty() && !m7CellHash.empty() && !m7Views.empty()) {
+		std::unordered_map<uint32_t, SnesHdM7ReliefInfo*> byHash;
+		for(size_t c = 0; c < m7CellHash.size(); c++) {
+			uint32_t h = m7CellHash[c];
+			if(!h) continue;
+			SnesHdM7ReliefInfo* rl = nullptr;
+			auto itc = byHash.find(h);
+			if(itc != byHash.end()) {
+				rl = itc->second;
+			} else {
+				auto it = hdReliefs.find(h);
+				if(it != hdReliefs.end()) {
+					for(auto& cand : it->second) { if(cand->MatchesCondition()) { rl = cand.get(); break; } }
+				}
+				if(rl) { rl->Build(); reliefMaxH = std::max(reliefMaxH, rl->Height); }
+				byHash[h] = rl;
+			}
+			if(!rl) continue;
+			if(cellRelief.empty()) cellRelief.assign(128 * 128, nullptr);
+			cellRelief[c] = rl;
+		}
+	}
+	const bool reliefOn = !cellRelief.empty() && reliefMaxH > 0.0f;
+
+	// ====================================================================
+	// <m7billboard> : PREPARATION (sequentielle) - projection des panneaux de chaque vue
+	// ====================================================================
+	struct BBDraw { const SnesHdM7BillboardInfo* B; float Cx, Bottom, W, H, A, GroundRow, Depth; int Level; };
+	auto& hdBillboards = SnesHdPackLoader::ActivePack->M7Billboards;
+	std::vector<std::vector<BBDraw>> bbDraws(m7Views.size());
+	bool bbOn = false;
+	if(!hdBillboards.empty()) {
+		for(size_t v = 0; v < m7Views.size(); v++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+			const uint32_t viewMap = m7Lines[zn.Y1].Img ? m7Lines[zn.Y1].Ref.M7MapHash : 0;
+			std::vector<BBDraw>& dl = bbDraws[v];
+			for(auto& ub : hdBillboards) {
+				SnesHdM7BillboardInfo& bb = *ub;
+				if(!bb.AnyMap && bb.MapHash != viewMap) continue;
+				if(!bb.MatchesCondition()) continue;
+				bb.Build();
+				if(bb.Mips.empty()) continue;
+				auto place = [&](double u0, double v0) {
+					// instance de la carte (repliee sur 1024) la plus proche de la camera
+					double u = zn.LargeMap ? u0 : u0 + 1024.0 * std::round((zn.Cx - u0) / 1024.0);
+					double w = zn.LargeMap ? v0 : v0 + 1024.0 * std::round((zn.Cy - v0) / 1024.0);
+					double sx, sy, ppt;
+					if(!zn.Project(u, w, bb.Elevation, sx, sy, ppt)) return;
+					double D = zn.DepthOf(u, w);
+					if(D < 4.0) return;
+					float hPx = (float)(bb.Height * ppt * scale);
+					if(hPx < 1.0f) return;
+					float wPx = hPx * (float)bb.MipW[0] / (float)bb.MipH[0];
+					float cx = (float)((sx + dstX) * scale);
+					if(cx + wPx * 0.5f < 0 || cx - wPx * 0.5f > (float)outWidth) return;
+					BBDraw d;
+					d.B = &bb; d.Cx = cx; d.Bottom = (float)((sy + dstY) * scale); d.W = wPx; d.H = hPx;
+					d.GroundRow = (float)(sy + bb.Elevation * ppt);
+					// fondu pres de la ligne la plus lointaine (sinon le panneau "pop" a l'horizon)
+					float fr = std::clamp((d.GroundRow - (float)zn.Y0) / 6.0f, 0.0f, 1.0f);
+					d.A = bb.Alpha * fr;
+					if(d.A <= 0.003f) return;
+					d.Depth = (float)D;
+					float ratio = (float)bb.MipH[0] / hPx;
+					int lvl = ratio > 1.0f ? (int)std::floor(std::log2(ratio)) : 0;
+					d.Level = std::clamp(lvl, 0, (int)bb.Mips.size() - 1);
+					dl.push_back(d);
+				};
+				if(bb.OnTile) {
+					if(m7CellHash.empty()) continue;
+					for(size_t c = 0; c < m7CellHash.size(); c++) {
+						if(m7CellHash[c] == bb.TileHash) place((double)((c % 128) * 8 + 4), (double)((c / 128) * 8 + 4));
+					}
+				} else {
+					place(bb.X, bb.Y);
+				}
+			}
+			std::sort(dl.begin(), dl.end(), [](const BBDraw& a, const BBDraw& b) { return a.Depth > b.Depth; });
+			if(!dl.empty()) bbOn = true;
+		}
+	}
+
+	// ====================================================================
+	// <m7model> : PREPARATION (sequentielle) - sommets des modeles 3D projetes par vue
+	// Repere : OBJ (x, y vers le haut, z) -> carte (u = x, hauteur = y, v = z), meme orientation.
+	// ====================================================================
+	struct MVert { float X, Y, W, GR, U, V, L; }; // ecran HD, 1/profondeur, ligne du sol, texture, lumiere
+	struct MTriDraw { MVert P[3]; const SnesHdModelMaterial* M; float A; };
+	auto& hdModels = SnesHdPackLoader::ActivePack->M7Models;
+	std::vector<std::vector<MTriDraw>> mdDraws(m7Views.size());
+	bool mdOn = false;
+	if(!hdModels.empty()) {
+		// lumiere fixe dans le monde : du nord-ouest, en hauteur (u, v, h)
+		const float lx = -0.45f, lv = -0.35f, lh = 0.82f;
+		const float ln = std::sqrt(lx * lx + lv * lv + lh * lh);
+		for(size_t vw = 0; vw < m7Views.size(); vw++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[vw]];
+			const uint32_t viewMap = m7Lines[zn.Y1].Img ? m7Lines[zn.Y1].Ref.M7MapHash : 0;
+			std::vector<MTriDraw>& dl = mdDraws[vw];
+			for(auto& um : hdModels) {
+				SnesHdM7ModelInfo& md = *um;
+				if(!md.Mesh || (!md.AnyMap && md.MapHash != viewMap)) continue;
+				if(!md.MatchesCondition()) continue;
+				const SnesHdModelMesh& mesh = *md.Mesh;
+				const float ox = md.KeepOrigin ? 0.0f : (mesh.MinX + mesh.MaxX) * 0.5f;
+				const float oy = md.KeepOrigin ? 0.0f : mesh.MinY;
+				const float oz = md.KeepOrigin ? 0.0f : (mesh.MinZ + mesh.MaxZ) * 0.5f;
+				const float cr = std::cos(md.Rotation * 0.01745329f), sr = std::sin(md.Rotation * 0.01745329f);
+				auto place = [&](double u0, double v0) {
+					double U0 = zn.LargeMap ? u0 : u0 + 1024.0 * std::round((zn.Cx - u0) / 1024.0);
+					double V0 = zn.LargeMap ? v0 : v0 + 1024.0 * std::round((zn.Cy - v0) / 1024.0);
+					// fondu pres de la ligne la plus lointaine (comme les panneaux)
+					double asx, asy, appt;
+					float fade = 1.0f;
+					if(zn.Project(U0, V0, 0.0, asx, asy, appt)) fade = std::clamp((float)(asy - zn.Y0) / 6.0f, 0.0f, 1.0f);
+					for(const SnesHdModelTri& t : mesh.Tris) {
+						const SnesHdModelMaterial& mat = mesh.Mats[std::clamp(t.Mat, 0, (int)mesh.Mats.size() - 1)];
+						const float a = mat.Alpha * fade;
+						if(a <= 0.003f) continue;
+						MTriDraw d; d.M = &mat; d.A = a;
+						bool ok = true;
+						for(int k = 0; k < 3 && ok; k++) {
+							float x = (t.P[k][0] - ox) * md.Scale, y = (t.P[k][1] - oy) * md.Scale, z = (t.P[k][2] - oz) * md.Scale;
+							double u = U0 + x * cr - z * sr, w = V0 + x * sr + z * cr, h = md.Elevation + y;
+							double sx, sy, ppt;
+							if(!zn.Project(u, w, h, sx, sy, ppt)) { ok = false; break; }
+							double D = zn.DepthOf(u, w);
+							if(D < 2.0) { ok = false; break; }
+							float nu = t.N[k][0] * cr - t.N[k][2] * sr, nv = t.N[k][0] * sr + t.N[k][2] * cr, nh = t.N[k][1];
+							float nl = std::sqrt(nu * nu + nv * nv + nh * nh);
+							float dotL = nl > 1e-6f ? std::abs(nu * lx + nv * lv + nh * lh) / (nl * ln) : 1.0f; // deux faces
+							MVert& mv = d.P[k];
+							mv.X = (float)((sx + dstX) * scale); mv.Y = (float)((sy + dstY) * scale);
+							mv.W = (float)(1.0 / D);
+							mv.GR = (float)(sy + h * ppt);
+							mv.U = t.UV[k][0]; mv.V = t.UV[k][1];
+							mv.L = md.Ambient + (1.0f - md.Ambient) * dotL;
+						}
+						if(!ok) continue;
+						float minX = std::min({ d.P[0].X, d.P[1].X, d.P[2].X }), maxX = std::max({ d.P[0].X, d.P[1].X, d.P[2].X });
+						if(maxX < 0 || minX > (float)outWidth) continue;
+						dl.push_back(d);
+					}
+				};
+				if(md.OnTile) {
+					if(m7CellHash.empty()) continue;
+					for(size_t c = 0; c < m7CellHash.size(); c++) {
+						if(m7CellHash[c] == md.TileHash) place((double)((c % 128) * 8 + 4), (double)((c / 128) * 8 + 4));
+					}
+				} else {
+					place(md.X, md.Y);
+				}
+			}
+			if(!dl.empty()) mdOn = true;
+		}
+	}
+	static std::vector<float> s_modelW; // 1/profondeur des pixels de modele (plus grand = plus proche)
+	if(mdOn) s_modelW.assign((size_t)outWidth * hdHeight, 0.0f);
+
+	static std::vector<float> s_sprRow;
+	bool p3Occlusion = reliefOn || bbOn || mdOn; // carte des sprites utile aussi au relief, aux panneaux et aux modeles
+	for(auto& dl : p3Draws) { if(!dl.empty()) { p3Occlusion = true; break; } }
+	float sprGroupRow[128];
+	for(float& r : sprGroupRow) r = -1.0f;
+	if(p3Occlusion) {
+		int parent[128];
+		for(int i = 0; i < 128; i++) parent[i] = i;
+		auto findRoot = [&](int a) { while(parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+		int bottom[128];
+		for(int& b : bottom) b = -1;
+		const uint32_t fw = _baseFrameInfo.Width;
+		auto opaqueOam = [&](uint32_t x, uint32_t y) -> int {
+			const SnesHdPixelData& px = hdBuffer[(y + srcY) * fw + x + srcX];
+			return (px.IsSprite && px.OamIndex < 128 && px.BaseColor != 0) ? (int)px.OamIndex : -1;
+		};
+		for(uint32_t y = 0; y < cropHeight; y++) {
+			for(uint32_t x = 0; x < cropWidth; x++) {
+				int o = opaqueOam(x, y);
+				if(o < 0) continue;
+				bottom[o] = std::max(bottom[o], (int)y + 1);
+				if(x + 1 < cropWidth) { int o2 = opaqueOam(x + 1, y); if(o2 >= 0 && o2 != o) parent[findRoot(o2)] = findRoot(o); }
+				if(y + 1 < cropHeight) { int o2 = opaqueOam(x, y + 1); if(o2 >= 0 && o2 != o) parent[findRoot(o2)] = findRoot(o); }
+			}
+		}
+		int groupBottom[128];
+		for(int& b : groupBottom) b = -1;
+		for(int i = 0; i < 128; i++) {
+			if(bottom[i] >= 0) { int r = findRoot(i); groupBottom[r] = std::max(groupBottom[r], bottom[i]); }
+		}
+		for(int i = 0; i < 128; i++) {
+			if(bottom[i] < 0) continue;
+			int feet = groupBottom[findRoot(i)];
+			// seuls les sprites dont les pieds sont sur le sol d'une vue cachent quelque chose
+			for(int v : m7Views) {
+				const SnesHdM7Zone& zn = m7Zones[v];
+				if(feet > zn.Y0 + 1 && feet <= zn.Y1 + 1) { sprGroupRow[i] = (float)feet; break; }
+			}
+		}
+		s_sprRow.assign((size_t)outWidth * hdHeight, -1.0f);
+		for(uint32_t y = 0; y < cropHeight; y++) {
+			for(uint32_t x = 0; x < cropWidth; x++) {
+				const SnesHdPixelData& px = hdBuffer[(y + srcY) * fw + x + srcX];
+				if(!px.IsSprite || px.OamIndex >= 128 || px.Tile != nullptr || px.BaseColor == 0) continue;
+				float r = sprGroupRow[px.OamIndex];
+				if(r < 0) continue;
+				for(uint32_t sy2 = 0; sy2 < scale; sy2++) {
+					uint32_t hy = (y + dstY) * scale + sy2;
+					if(hy >= hdHeight) break;
+					for(uint32_t sx2 = 0; sx2 < scale; sx2++) {
+						uint32_t hx = (x + dstX) * scale + sx2;
+						if(hx < outWidth) s_sprRow[(size_t)hy * outWidth + hx] = r;
+					}
+				}
+			}
+		}
+	}
+
+	// ====================================================================
+	// <m7relief> : RENDU "VOXEL SPACE" d'une vue sur une bande de lignes HD (appele par composeBand)
+	// Par colonne HD : on remonte le sol du bas de la vue vers l'horizon ; chaque point en relief
+	// est projete (hauteur x pixels-par-texel) et remplit la colonne jusqu'au "plafond" deja dessine.
+	// Ligne du dessus = couleur du dessus, en dessous = flanc (assombri). Les sprites plus proches
+	// (ligne des pieds) restent devant ; le relief dessine devient a son tour un occulteur.
+	// ====================================================================
+	const uint8_t kReliefZ = 90;
+	auto renderReliefBand = [&](size_t viewIndex, uint32_t bandY0, uint32_t bandY1) {
+		const SnesHdM7Zone& zn = m7Zones[m7Views[viewIndex]];
+		const int sc = (int)scale;
+		const int zoneTopHD = (zn.Y0 + (int)dstY) * sc;
+		const int zoneBotHD = (zn.Y1 + 1 + (int)dstY) * sc; // exclu
+		const int areaTopHD = (zn.AreaY0 + (int)dstY) * sc;
+		const int reach = (int)std::ceil(reliefMaxH * zn.Inv[zn.Count() - 1] * sc) + 2;
+		const int rStart = std::min(zoneBotHD - 1, (int)bandY1 - 1 + reach);
+		const int rEnd = std::max(zoneTopHD, (int)bandY0);
+		if(rStart < rEnd) return;
+		const int bandLo = std::max((int)bandY0, areaTopHD), bandHi = std::min((int)bandY1, zoneBotHD) - 1;
+		if(bandLo > bandHi) return;
+
+		for(int hx = 0; hx < (int)outWidth; hx++) {
+			const double sx = ((double)hx + 0.5) / sc - (double)dstX;
+			int ceiling = rStart + 1;
+			for(int r = rStart; r >= rEnd; r--) {
+				const double sy = ((double)r + 0.5) / sc - (double)dstY;
+				double u, v;
+				if(!zn.Unproject(sx, sy, u, v)) { ceiling = std::min(ceiling, r); continue; }
+				const double fu = std::floor(u), fv = std::floor(v);
+				if(zn.LargeMap && (fu < 0 || fv < 0 || fu > 1023 || fv > 1023)) { ceiling = std::min(ceiling, r); continue; } // hors carte (tile 0)
+				const int mu = ((int)fu) & 1023, mv = ((int)fv) & 1023;
+				const size_t cell = (size_t)(mv >> 3) * 128 + (size_t)(mu >> 3);
+				SnesHdM7ReliefInfo* rl = cellRelief[cell];
+				if(!rl) { ceiling = std::min(ceiling, r); continue; }
+				// position dans la tile (0..1)
+				const double tu = ((double)(mu & 7) + (u - fu)) / 8.0, tv = ((double)(mv & 7) + (v - fv)) / 8.0;
+				const int rs = rl->Size;
+				const int rx = std::clamp((int)(tu * rs), 0, rs - 1), ry = std::clamp((int)(tv * rs), 0, rs - 1);
+				const uint8_t hv = rl->H[(size_t)ry * rs + rx];
+				if(hv == 0) { ceiling = std::min(ceiling, r); continue; }
+				const double hgt = rl->Height * (hv / 255.0);
+				const int yt = std::max(areaTopHD, (int)std::floor((double)r + 0.5 - hgt * zn.InvAt(sy) * sc));
+				if(yt >= ceiling) continue;
+
+				// couleur du dessus : tile HD affichee dans cette case (animations comprises) ou PNG de relief
+				uint32_t topC;
+				SnesHdMode7Image* timg = m7CellTile.empty() ? nullptr : m7CellTile[cell];
+				if(!rl->ColorFromPng && timg && !timg->TileMips.empty()) {
+					const int dim = 8 * (int)timg->Scale;
+					const int tx = std::clamp((int)(tu * dim), 0, dim - 1), ty = std::clamp((int)(tv * dim), 0, dim - 1);
+					topC = timg->TileMips[0][(size_t)ty * dim + tx];
+				} else {
+					topC = rl->C[(size_t)ry * rs + rx];
+				}
+				const float side = rl->Sides;
+				const uint32_t sideC = 0xFF000000 |
+					((uint32_t)std::min(255.0f, ((topC >> 16) & 0xFF) * side) << 16) |
+					((uint32_t)std::min(255.0f, ((topC >> 8) & 0xFF) * side) << 8) |
+					(uint32_t)std::min(255.0f, (topC & 0xFF) * side);
+				const float groundRow = (float)sy;
+				const int y0 = std::max(yt, bandLo), y1 = std::min(ceiling - 1, bandHi);
+				for(int yy = y0; yy <= y1; yy++) {
+					const uint32_t idx = (uint32_t)yy * outWidth + (uint32_t)hx;
+					if(kReliefZ < _zBuffer[idx]) continue;
+					if(p3Occlusion) {
+						const float sr2 = s_sprRow[idx];
+						if(sr2 >= 0.0f && groundRow < sr2) continue; // sprite plus proche
+						s_sprRow[idx] = groundRow;                    // le relief cache ce qui est plus loin
+					}
+					out[idx] = (yy == yt) ? (topC | 0xFF000000) : sideC;
+					_zBuffer[idx] = kReliefZ;
+				}
+				ceiling = yt;
+			}
+		}
+	};
+
+	// ====================================================================
+	// <m7billboard> : rendu des panneaux d'une vue sur une bande de lignes HD (appele par composeBand)
+	// Du plus loin au plus proche ; un sprite ou un relief plus proche (ligne des pieds) reste devant ;
+	// les pixels opaques du panneau deviennent a leur tour des occulteurs (particules, panneaux lointains).
+	// ====================================================================
+	auto renderBillboardBand = [&](size_t viewIndex, uint32_t bandY0, uint32_t bandY1) {
+		const SnesHdM7Zone& zn = m7Zones[m7Views[viewIndex]];
+		const int sc = (int)scale;
+		const int clipY0 = std::max((int)bandY0, (zn.AreaY0 + (int)dstY) * sc);
+		const int clipY1 = std::min((int)bandY1, (zn.AreaY1 + 1 + (int)dstY) * sc) - 1;
+		if(clipY0 > clipY1) return;
+		for(const BBDraw& d : bbDraws[viewIndex]) {
+			const SnesHdM7BillboardInfo& bb = *d.B;
+			const std::vector<uint32_t>& img = bb.Mips[d.Level];
+			const int mw = (int)bb.MipW[d.Level], mh = (int)bb.MipH[d.Level];
+			const float left = d.Cx - d.W * 0.5f, top = d.Bottom - d.H;
+			const int x0 = std::max(0, (int)std::floor(left)), x1 = std::min((int)outWidth - 1, (int)std::ceil(left + d.W));
+			const int y0 = std::max(clipY0, (int)std::floor(top)), y1 = std::min(clipY1, (int)std::ceil(d.Bottom) - 1);
+			if(x0 > x1 || y0 > y1) continue;
+			for(int yy = y0; yy <= y1; yy++) {
+				const float tv = ((float)yy + 0.5f - top) / d.H * mh - 0.5f;
+				if(tv < -0.5f || tv > mh - 0.5f) continue;
+				const int iv = (int)std::floor(tv);
+				const float fv = tv - iv;
+				for(int xx = x0; xx <= x1; xx++) {
+					const float tu = ((float)xx + 0.5f - left) / d.W * mw - 0.5f;
+					if(tu < -0.5f || tu > mw - 0.5f) continue;
+					const int iu = (int)std::floor(tu);
+					const float fu = tu - iu;
+					float acc[4] = { 0, 0, 0, 0 };
+					const int qx[4] = { iu, iu + 1, iu, iu + 1 }, qy[4] = { iv, iv, iv + 1, iv + 1 };
+					const float wq[4] = { (1 - fu) * (1 - fv), fu * (1 - fv), (1 - fu) * fv, fu * fv };
+					for(int q = 0; q < 4; q++) {
+						int cxq = std::clamp(qx[q], 0, mw - 1), cyq = std::clamp(qy[q], 0, mh - 1);
+						uint32_t c = img[(size_t)cyq * mw + cxq];
+						float ca = (float)(c >> 24) * wq[q];
+						acc[0] += ca; acc[1] += ((c >> 16) & 0xFF) * ca; acc[2] += ((c >> 8) & 0xFF) * ca; acc[3] += (c & 0xFF) * ca;
+					}
+					if(acc[0] <= 0.5f) continue;
+					const float aa = (acc[0] / 255.0f) * d.A;
+					if(aa < 0.004f) continue;
+					const uint32_t idx = (uint32_t)yy * outWidth + (uint32_t)xx;
+					if(kReliefZ < _zBuffer[idx]) continue;
+					if(p3Occlusion) {
+						const float sr2 = s_sprRow[idx];
+						if(sr2 >= 0.0f && d.GroundRow < sr2) continue; // sprite / relief plus proche
+						if(aa >= 0.5f) s_sprRow[idx] = d.GroundRow;
+					}
+					const float sr = acc[1] / acc[0], sg = acc[2] / acc[0], sb = acc[3] / acc[0];
+					const uint32_t dstC = out[idx];
+					const float dr = (float)((dstC >> 16) & 0xFF), dg = (float)((dstC >> 8) & 0xFF), db = (float)(dstC & 0xFF);
+					const float nr = dr + (sr - dr) * aa, ng = dg + (sg - dg) * aa, nb = db + (sb - db) * aa;
+					out[idx] = 0xFF000000 | ((uint32_t)(nr + 0.5f) << 16) | ((uint32_t)(ng + 0.5f) << 8) | (uint32_t)(nb + 0.5f);
+					if(aa >= 0.5f) _zBuffer[idx] = kReliefZ;
+				}
+			}
+		}
+	};
+
+	// ====================================================================
+	// <m7model> : rasterisation des triangles d'une vue sur une bande de lignes HD (appele par composeBand)
+	// Tampon de profondeur entre modeles (1/profondeur), texture corrigee en perspective, eclairage par
+	// sommet, test alpha ; ordre avec sprites / relief / panneaux par la "ligne du sol" (s_sprRow).
+	// ====================================================================
+	auto renderModelBand = [&](size_t viewIndex, uint32_t bandY0, uint32_t bandY1) {
+		const SnesHdM7Zone& zn = m7Zones[m7Views[viewIndex]];
+		const int sc = (int)scale;
+		const int clipY0 = std::max((int)bandY0, (zn.AreaY0 + (int)dstY) * sc);
+		const int clipY1 = std::min((int)bandY1, (zn.AreaY1 + 1 + (int)dstY) * sc) - 1;
+		if(clipY0 > clipY1) return;
+		for(const MTriDraw& d : mdDraws[viewIndex]) {
+			const MVert& a = d.P[0]; const MVert& b = d.P[1]; const MVert& c = d.P[2];
+			const float area = (b.X - a.X) * (c.Y - a.Y) - (c.X - a.X) * (b.Y - a.Y);
+			if(std::abs(area) < 1e-4f) continue;
+			const float invArea = 1.0f / area;
+			const int x0 = std::max(0, (int)std::floor(std::min({ a.X, b.X, c.X })));
+			const int x1 = std::min((int)outWidth - 1, (int)std::ceil(std::max({ a.X, b.X, c.X })));
+			const int y0 = std::max(clipY0, (int)std::floor(std::min({ a.Y, b.Y, c.Y })));
+			const int y1 = std::min(clipY1, (int)std::ceil(std::max({ a.Y, b.Y, c.Y })));
+			if(x0 > x1 || y0 > y1) continue;
+			const SnesHdPackBitmapInfo* tex = (d.M->Texture && !d.M->Texture->PixelData.empty() && d.M->Texture->Width > 0) ? d.M->Texture : nullptr;
+			const int tw = tex ? (int)tex->Width : 0, th = tex ? (int)tex->Height : 0;
+			const float kr = (float)((d.M->Kd >> 16) & 0xFF) / 255.0f, kg = (float)((d.M->Kd >> 8) & 0xFF) / 255.0f, kb = (float)(d.M->Kd & 0xFF) / 255.0f;
+			for(int yy = y0; yy <= y1; yy++) {
+				const float py = (float)yy + 0.5f;
+				for(int xx = x0; xx <= x1; xx++) {
+					const float px = (float)xx + 0.5f;
+					float w0 = ((b.X - px) * (c.Y - py) - (c.X - px) * (b.Y - py)) * invArea;
+					float w1 = ((c.X - px) * (a.Y - py) - (a.X - px) * (c.Y - py)) * invArea;
+					float w2 = 1.0f - w0 - w1;
+					if(w0 < 0 || w1 < 0 || w2 < 0) continue;
+					const float W = w0 * a.W + w1 * b.W + w2 * c.W;
+					if(W <= 0) continue;
+					const uint32_t idx = (uint32_t)yy * outWidth + (uint32_t)xx;
+					if(W <= s_modelW[idx]) continue;              // un autre modele est plus proche
+					if(kReliefZ < _zBuffer[idx]) continue;
+					const float iW = 1.0f / W;
+					const float gr = (w0 * a.GR * a.W + w1 * b.GR * b.W + w2 * c.GR * c.W) * iW;
+					if(p3Occlusion) { const float sr2 = s_sprRow[idx]; if(sr2 >= 0.0f && gr < sr2) continue; }
+					float r = kr * 255.0f, g = kg * 255.0f, bl = kb * 255.0f, al = 1.0f;
+					if(tex) {
+						float tu = (w0 * a.U * a.W + w1 * b.U * b.W + w2 * c.U * c.W) * iW;
+						float tv = (w0 * a.V * a.W + w1 * b.V * b.W + w2 * c.V * c.W) * iW;
+						tu = tu - std::floor(tu); tv = tv - std::floor(tv);
+						float fx = tu * tw - 0.5f, fy = (1.0f - tv) * th - 0.5f; // OBJ : v vers le haut
+						int ix = (int)std::floor(fx), iy = (int)std::floor(fy);
+						float ax = fx - ix, ay = fy - iy;
+						float acc[4] = { 0, 0, 0, 0 };
+						const int qx[4] = { ix, ix + 1, ix, ix + 1 }, qy[4] = { iy, iy, iy + 1, iy + 1 };
+						const float wq[4] = { (1 - ax) * (1 - ay), ax * (1 - ay), (1 - ax) * ay, ax * ay };
+						for(int q = 0; q < 4; q++) {
+							int cx = ((qx[q] % tw) + tw) % tw, cy = ((qy[q] % th) + th) % th;
+							uint32_t col = tex->PixelData[(size_t)cy * tw + cx];
+							float ca = (float)(col >> 24) * wq[q];
+							acc[0] += ca; acc[1] += ((col >> 16) & 0xFF) * ca; acc[2] += ((col >> 8) & 0xFF) * ca; acc[3] += (col & 0xFF) * ca;
+						}
+						if(acc[0] < 127.5f) continue; // decoupe (feuillages, grillages)
+						al = 1.0f;
+						r *= acc[1] / acc[0] / 255.0f; g *= acc[2] / acc[0] / 255.0f; bl *= acc[3] / acc[0] / 255.0f;
+					}
+					const float lit = w0 * a.L + w1 * b.L + w2 * c.L;
+					r = std::min(255.0f, r * lit); g = std::min(255.0f, g * lit); bl = std::min(255.0f, bl * lit);
+					const float aa = al * d.A;
+					const uint32_t dstC = out[idx];
+					const float dr = (float)((dstC >> 16) & 0xFF), dg = (float)((dstC >> 8) & 0xFF), db = (float)(dstC & 0xFF);
+					const float nr = dr + (r - dr) * aa, ng = dg + (g - dg) * aa, nb = db + (bl - db) * aa;
+					out[idx] = 0xFF000000 | ((uint32_t)(nr + 0.5f) << 16) | ((uint32_t)(ng + 0.5f) << 8) | (uint32_t)(nb + 0.5f);
+					if(aa >= 0.5f) {
+						s_modelW[idx] = W;
+						_zBuffer[idx] = kReliefZ;
+						if(p3Occlusion) s_sprRow[idx] = gr;
+					}
+				}
+			}
+		}
+	};
+
+	auto render3DBand = [&](size_t drawIndex, uint32_t bandY0, uint32_t bandY1) {
+		const SnesHdParticles3DInfo& pi = *hdParts3D[drawIndex / 2];
+		const int v = (int)(drawIndex % 2);
+		const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+		const std::vector<P3Draw>& dl = p3Draws[drawIndex];
+		const int clipY0 = std::max((int)bandY0, (zn.AreaY0 + (int)dstY) * (int)scale);
+		const int clipY1 = std::min((int)bandY1, (zn.AreaY1 + 1 + (int)dstY) * (int)scale) - 1;
+		if(clipY0 > clipY1) return;
+		const SnesHdPackBitmapInfo* tex = (pi.Texture && !pi.Texture->PixelData.empty() && pi.Texture->Width > 0) ? pi.Texture : nullptr;
+		const int texW = tex ? (int)tex->Width : 0, texH = tex ? (int)tex->Height : 0;
+		const uint8_t z = (uint8_t)std::clamp(pi.ZIndex, 0, 255);
+		for(const P3Draw& d : dl) {
+			int x0 = std::max(0, (int)std::floor(d.Cx - d.HalfW)), x1 = std::min((int)outWidth - 1, (int)std::ceil(d.Cx + d.HalfW));
+			int y0 = std::max(clipY0, (int)std::floor(d.Cy - d.HalfH)), y1 = std::min(clipY1, (int)std::ceil(d.Cy + d.HalfH));
+			if(x0 > x1 || y0 > y1) continue;
+			for(int yy = y0; yy <= y1; yy++) {
+				const float dy = (float)yy + 0.5f - d.Cy;
+				for(int xx = x0; xx <= x1; xx++) {
+					const float dx = (float)xx + 0.5f - d.Cx;
+					float sa, sr, sg, sb;
+					if(tex) {
+						float u = (dx / d.HalfW * 0.5f + 0.5f) * texW - 0.5f;
+						float vv = (dy / d.HalfH * 0.5f + 0.5f) * texH - 0.5f;
+						if(u < -0.5f || vv < -0.5f || u > texW - 0.5f || vv > texH - 0.5f) continue;
+						int iu = (int)std::floor(u), iv = (int)std::floor(vv);
+						float fu = u - iu, fv = vv - iv;
+						float acc[4] = { 0, 0, 0, 0 };
+						const int qx[4] = { iu, iu + 1, iu, iu + 1 }, qy[4] = { iv, iv, iv + 1, iv + 1 };
+						const float wq[4] = { (1 - fu) * (1 - fv), fu * (1 - fv), (1 - fu) * fv, fu * fv };
+						for(int q = 0; q < 4; q++) {
+							int cxq = std::clamp(qx[q], 0, texW - 1), cyq = std::clamp(qy[q], 0, texH - 1);
+							uint32_t c = tex->PixelData[(size_t)cyq * texW + cxq];
+							float ca = (float)(c >> 24) * wq[q];
+							acc[0] += ca; acc[1] += ((c >> 16) & 0xFF) * ca; acc[2] += ((c >> 8) & 0xFF) * ca; acc[3] += (c & 0xFF) * ca;
+						}
+						if(acc[0] <= 0.5f) continue;
+						sa = acc[0] / 255.0f; sr = acc[1] / acc[0]; sg = acc[2] / acc[0]; sb = acc[3] / acc[0];
+					} else {
+						float dd = std::sqrt(dx * dx + dy * dy) / d.HalfW;
+						if(dd >= 1.0f) continue;
+						float s = 1.0f - dd * dd;
+						sa = s * s; sr = sg = sb = 255.0f;
+					}
+					const float aa = sa * d.A;
+					if(aa < 0.004f) continue;
+					const uint32_t idx = (uint32_t)yy * outWidth + (uint32_t)xx;
+					if(z < _zBuffer[idx]) continue;
+					if(p3Occlusion) { const float sr2 = s_sprRow[idx]; if(sr2 >= 0.0f && d.GroundRow < sr2) continue; } // derriere un sprite
+					const uint32_t dstC = out[idx];
+					const float dr = (float)((dstC >> 16) & 0xFF), dg = (float)((dstC >> 8) & 0xFF), db = (float)(dstC & 0xFF);
+					const float cr = sr * d.R, cg = sg * d.G, cb = sb * d.B;
+					float nr, ng, nb;
+					if(pi.Additive) {
+						nr = std::min(255.0f, dr + cr * aa); ng = std::min(255.0f, dg + cg * aa); nb = std::min(255.0f, db + cb * aa);
+					} else {
+						nr = dr + (cr - dr) * aa; ng = dg + (cg - dg) * aa; nb = db + (cb - db) * aa;
+					}
+					out[idx] = 0xFF000000 | ((uint32_t)(nr + 0.5f) << 16) | ((uint32_t)(ng + 0.5f) << 8) | (uint32_t)(nb + 0.5f);
+				}
+			}
+		}
+	};
+
 	std::vector<RenderTask> tasks;
+
+	for(size_t i = 0; i < hdOverlays.size(); i++) {
+		if(ovActive[i]) tasks.push_back({ hdOverlays[i]->ZIndex, 2, 0, i });
+	}
+	for(size_t i = 0; i < p3Draws.size(); i++) {
+		if(!p3Draws[i].empty()) tasks.push_back({ hdParts3D[i / 2]->ZIndex, 3, 0, i });
+	}
+	if(reliefOn) {
+		for(size_t v = 0; v < m7Views.size(); v++) tasks.push_back({ (int)kReliefZ, 4, 0, v });
+	}
+	for(size_t v = 0; v < bbDraws.size(); v++) {
+		if(!bbDraws[v].empty()) tasks.push_back({ (int)kReliefZ, 5, 0, v }); // apres le relief (meme Z, type 5)
+	}
+	for(size_t v = 0; v < mdDraws.size(); v++) {
+		if(!mdDraws[v].empty()) tasks.push_back({ (int)kReliefZ, 6, 0, v }); // modeles 3D (meme Z, type 6)
+	}
 
 	for(size_t i = 0; i < SnesHdPackLoader::ActivePack->Backgrounds.size(); i++) {
 		auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[i];
@@ -1290,6 +2185,26 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// a un rendu sequentiel, mais reparti sur plusieurs coeurs.
 	auto composeBand = [&](uint32_t bandY0, uint32_t bandY1) {
 	for(const auto& task : tasks) {
+		if(task.type == 2) {
+			renderOverlayBand(task.index, bandY0, bandY1);
+			continue;
+		}
+		if(task.type == 3) {
+			render3DBand(task.index, bandY0, bandY1);
+			continue;
+		}
+		if(task.type == 4) {
+			renderReliefBand(task.index, bandY0, bandY1);
+			continue;
+		}
+		if(task.type == 5) {
+			renderBillboardBand(task.index, bandY0, bandY1);
+			continue;
+		}
+		if(task.type == 6) {
+			renderModelBand(task.index, bandY0, bandY1);
+			continue;
+		}
 		if(task.type == 0) {
 			auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[task.index];
 			if(!bgReady[task.index]) continue;
@@ -1420,6 +2335,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						uint32_t pixelIndex = screenY * outWidth + screenX;
 
 						if(item.zIndex >= _zBuffer[pixelIndex]) {
+							// <3DParticles> : ligne des pieds du sprite (ou rien si une tile de decor le recouvre)
+							if(p3Occlusion && alpha >= 128) s_sprRow[pixelIndex] = (item.oamIndex < 128) ? sprGroupRow[item.oamIndex] : -1.0f;
 							uint32_t finalColor = hdColorFromPng;
 
 							if(alpha == 255) {
@@ -1467,6 +2384,64 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				workers.emplace_back([&composeBand, b0, b1]() { composeBand(b0, b1); });
 			}
 			for(auto& w : workers) w.join();
+		}
+	}
+
+	// ====================================================================
+	// <m7CameraDebug> : reperes de controle de la camera Mode 7 reconstruite
+	//  - poteaux plantes tous les 64 texels de la carte (pied rouge, sommet cyan, 24 texels de haut) :
+	//    ils doivent rester colles au decor et verticaux, meme en virage ;
+	//  - ligne magenta : horizon calcule ; croix blanche : axe de la camera.
+	// ====================================================================
+	if(m7DebugOn) {
+		const int thick = std::max(1, (int)scale / 2);
+		auto fillRect = [&](int x0, int y0, int x1, int y1, uint32_t c, int cy0, int cy1) {
+			x0 = std::max(x0, 0); x1 = std::min(x1, (int)outWidth - 1);
+			y0 = std::max(y0, cy0); y1 = std::min(y1, cy1);
+			for(int yy = y0; yy <= y1; yy++) for(int xx = x0; xx <= x1; xx++) out[(uint32_t)yy * outWidth + (uint32_t)xx] = c;
+		};
+		for(const SnesHdM7Zone& zn : m7Zones) {
+			const int cy0 = (zn.AreaY0 + (int)dstY) * (int)scale;
+			const int cy1 = std::min((int)hdHeight - 1, (zn.AreaY1 + 1 + (int)dstY) * (int)scale - 1);
+			// limites de la zone (vert)
+			fillRect(0, (zn.Y0 + (int)dstY) * (int)scale, (int)outWidth - 1, (zn.Y0 + (int)dstY) * (int)scale + thick - 1, 0xFF00C000, cy0, cy1);
+			if(!zn.Perspective || !zn.HasPinhole) continue;
+			int hy = (int)std::lround((zn.Horizon + dstY) * scale);
+			for(int xx = 0; xx < (int)outWidth; xx += 8 * thick) fillRect(xx, hy, xx + 4 * thick - 1, hy + thick - 1, 0xFFFF00FF, cy0, cy1);
+			int ax = (int)std::lround((zn.AxisX + dstX) * scale), ay = (zn.Y1 + (int)dstY) * (int)scale;
+			fillRect(ax - 6 * thick, ay - thick, ax + 6 * thick, ay, 0xFFFFFFFF, cy0, cy1);
+			fillRect(ax - thick / 2, ay - 12 * thick, ax + thick / 2, ay, 0xFFFFFFFF, cy0, cy1);
+
+			const int step = 64;
+			int gx0 = (int)std::floor((zn.Cx - 640.0) / step), gx1 = (int)std::ceil((zn.Cx + 640.0) / step);
+			int gy0 = (int)std::floor((zn.Cy - 640.0) / step), gy1 = (int)std::ceil((zn.Cy + 640.0) / step);
+			for(int gy = gy0; gy <= gy1; gy++) {
+				for(int gx = gx0; gx <= gx1; gx++) {
+					double u = gx * step, w = gy * step, sx, syG, syT, ppt, ppt2;
+					if(!zn.Project(u, w, 0.0, sx, syG, ppt)) continue;
+					if(!zn.Project(u, w, 24.0, sx, syT, ppt2)) continue;
+					int px = (int)std::lround((sx + dstX) * scale);
+					if(px < -16 || px > (int)outWidth + 16) continue;
+					int pyG = (int)std::lround((syG + dstY) * scale), pyT = (int)std::lround((syT + dstY) * scale);
+					int r = std::max(thick, (int)std::lround(ppt * scale * 1.5));
+					r = std::min(r, 6 * thick);
+					fillRect(px - thick / 2, pyT, px + thick / 2, pyG, 0xFFFFE000, cy0, cy1);
+					fillRect(px - r, pyG - r, px + r, pyG + r, 0xFFFF2020, cy0, cy1);
+					fillRect(px - r / 2 - 1, pyT - r / 2 - 1, px + r / 2 + 1, pyT + r / 2 + 1, 0xFF20E0FF, cy0, cy1);
+				}
+			}
+		}
+		uint32_t fn = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
+		if(fn % 120 == 0) {
+			std::string msg = "[HD-M7CAM] " + std::to_string(m7Zones.size()) + " zone(s) :";
+			for(const SnesHdM7Zone& zn : m7Zones) {
+				char buf[256];
+				snprintf(buf, sizeof(buf), " [lignes %d-%d %s horizon %.1f focale %.1f hauteur %.1f camera (%.1f, %.1f) cap %.0f deg]",
+					zn.Y0, zn.Y1, zn.Perspective ? (zn.HasPinhole ? "perspective" : "perspective SANS camera") : "plane",
+					zn.Horizon, zn.Focal, zn.Height, zn.Cx, zn.Cy, std::atan2(zn.Fx, -zn.Fy) * 57.29578);
+				msg += buf;
+			}
+			MessageManager::Log(msg);
 		}
 	}
 

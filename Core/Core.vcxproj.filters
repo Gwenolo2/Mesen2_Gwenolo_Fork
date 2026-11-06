@@ -2979,6 +2979,9 @@
     <ClInclude Include="SNES\HdPacks\SnesHdData.h">
       <Filter>SNES\HdPacks</Filter>
     </ClInclude>
+    <ClInclude Include="SNES\HdPacks\SnesHdMode7Camera.h">
+      <Filter>SNES\HdPacks</Filter>
+    </ClInclude>
     <ClInclude Include="SNES\HdPacks\SnesHdPackBuilder.h">
       <Filter>SNES\HdPacks</Filter>
     </ClInclude>

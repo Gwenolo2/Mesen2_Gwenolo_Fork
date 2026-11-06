@@ -586,6 +586,7 @@
     <ClInclude Include="SNES\DSP\DspTypes.h" />
     <ClInclude Include="SNES\DSP\DspVoice.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdData.h" />
+    <ClInclude Include="SNES\HdPacks\SnesHdMode7Camera.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdPackBuilder.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdPackConditions.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdPackLoader.h" />

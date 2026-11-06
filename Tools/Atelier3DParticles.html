@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atelier 3DParticles</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Silkscreen&display=swap">
+<style>
+/* Layout : vue Mode 7 collante à gauche (écran + JSON), réglages groupés à droite ; une colonne sur téléphone */
+:root {
+  --bg: #F1F2F6; --panel: #FFFFFF; --line: #DADCE5; --fg: #1B1E2B; --muted: #5C6273;
+  --accent: #4F43AE; --accent-soft: #E7E5F7; --field: #F7F8FB;
+  --f-display: "Silkscreen", "Courier New", monospace;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #14151C; --panel: #1D1F29; --line: #2E3140; --fg: #E6E7EE; --muted: #9A9FB2;
+  --accent: #A59CFF; --accent-soft: #2A2750; --field: #171922; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #14151C; --panel: #1D1F29; --line: #2E3140; --fg: #E6E7EE; --muted: #9A9FB2;
+  --accent: #A59CFF; --accent-soft: #2A2750; --field: #171922; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 14px; line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 40px }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; max-width: 1280px; margin: 0 auto 18px }
+h1 { font-family: var(--f-display); font-weight: 400; font-size: 26px; margin: 0; letter-spacing: .02em; text-wrap: balance }
+h1 span { color: var(--accent) }
+header p { margin: 0; color: var(--muted); max-width: 66ch }
+.app { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 20px; max-width: 1280px; margin: 0 auto; align-items: start }
+@media (max-width: 920px) { .app { grid-template-columns: minmax(0, 1fr) } .left { position: static !important } }
+.left { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); display: flex; flex-direction: column; gap: 14px; min-width: 0 }
+.screen { background: #000; border-radius: 6px; overflow: hidden; border: 1px solid var(--line) }
+canvas#view { display: block; width: 100%; height: auto; image-rendering: pixelated; aspect-ratio: 256 / 224 }
+.bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center }
+.bar .stat { margin-left: auto; color: var(--muted); font-family: var(--f-mono); font-size: 12px; font-variant-numeric: tabular-nums }
+label.inline { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px }
+select, input[type=number], input[type=text], textarea {
+  font: inherit; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px }
+textarea { font-family: var(--f-mono); font-size: 12px; width: 100%; resize: vertical }
+button { font: inherit; font-weight: 500; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 11px; cursor: pointer }
+button:hover { border-color: var(--accent) }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--panel) }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; min-width: 0 }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; font-weight: 600 }
+.out { display: flex; flex-direction: column; gap: 8px }
+pre.code { margin: 0; font-family: var(--f-mono); font-size: 12px; background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 10px; overflow: auto; max-height: 340px; white-space: pre }
+.tagline { font-family: var(--f-mono); font-size: 12px; background: var(--accent-soft); border-radius: 4px; padding: 8px 10px; overflow-x: auto; white-space: nowrap }
+.presets { display: flex; flex-wrap: wrap; gap: 6px }
+.presets button { padding: 4px 10px; font-size: 13px }
+.presets button[aria-pressed=true] { background: var(--accent-soft); border-color: var(--accent) }
+.right { display: flex; flex-direction: column; gap: 14px; min-width: 0 }
+fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 7px }
+.row { display: grid; grid-template-columns: 140px minmax(0, 1fr) 72px; gap: 10px; align-items: center }
+.row > span { font-size: 13px }
+.row > span small { display: block; color: var(--muted); font-family: var(--f-mono); font-size: 11px }
+.row input[type=range] { width: 100%; accent-color: var(--accent) }
+.row input[type=number] { width: 72px; font-variant-numeric: tabular-nums; font-size: 13px }
+.row input[type=color] { width: 72px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--field) }
+.row .wide { grid-column: 2 / 4 }
+.hint { color: var(--muted); font-size: 12.5px; margin: 2px 0 0 }
+.toast { color: var(--accent); font-size: 12.5px; min-height: 1em }
+@media (max-width: 440px) { .row { grid-template-columns: 108px minmax(0, 1fr) 62px; gap: 8px } .row input[type=number], .row input[type=color] { width: 62px } }
+</style>
+
+</head>
+<body>
+<header>
+  <h1>Atelier <span>3DParticles</span></h1>
+  <p>Réglez des particules dans le monde Mode 7 (unités : texels de carte), regardez-les depuis un kart qui roule, puis copiez le JSON dans le dossier <code>effets\</code> du pack. Même simulation, même projection et même gestion des sprites que le filtre HD de Mesen.</p>
+</header>
+
+<div class="app">
+  <section class="left">
+    <div class="screen"><canvas id="view" width="768" height="672"></canvas></div>
+    <div class="bar">
+      <label class="inline" for="game">Décor
+        <select id="game"><option value="kart">Circuit (Mario Kart)</option><option value="fzero">Piste futuriste (F-Zero)</option><option value="snow">Lac gelé</option><option value="lava">Château de lave</option></select></label>
+      <label class="inline" for="scale">Échelle HD
+        <select id="scale"><option value="2">×2</option><option value="3" selected>×3</option><option value="4">×4</option></select></label>
+      <label class="inline" for="kart"><input type="checkbox" id="kart" checked> Kart</label>
+      <button id="restart" type="button">Relancer</button>
+      <button id="pause" type="button">Pause</button>
+      <span class="stat" id="stat">0 particules</span>
+    </div>
+    <div class="card">
+      <h2>Conduite</h2>
+      <fieldset id="g-drive"></fieldset>
+      <p class="hint">La caméra roule et tourne comme dans le jeu : les particules restent posées dans le monde, la vitesse et les virages se sentent d'eux-mêmes. Le kart sert à vérifier que les particules lointaines passent derrière lui.</p>
+    </div>
+    <div class="card out">
+      <h2>Ligne pour snes_hires.txt</h2>
+      <label class="inline" for="fname">Nom du fichier <input id="fname" type="text" value="neige_3d" size="16"> .json</label>
+      <div class="tagline" id="tag"></div>
+      <h2 style="margin-top:6px">JSON</h2>
+      <pre class="code" id="json"></pre>
+      <div class="bar">
+        <button class="primary" id="copy" type="button">Copier le JSON</button>
+        <button id="copyTag" type="button">Copier la ligne</button>
+        <span class="toast" id="toast" role="status"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="right">
+    <div class="card"><h2>Préréglages</h2><div class="presets" id="presets"></div></div>
+    <div class="card"><h2>Population</h2><fieldset id="g-pop"></fieldset>
+      <p class="hint">Avec « Naissances / s » à 0, la boîte reste toujours pleine et les particules sont immortelles (neige, pluie). Avec une vie et un débit, elles naissent et meurent (cendres, étincelles).</p></div>
+    <div class="card"><h2>Boîte autour de la caméra</h2><fieldset id="g-box"></fieldset>
+      <p class="hint">La boîte suit la caméra et se replie sur elle-même : on n'en voit jamais le bout. « Avance » la décale vers l'avant (part de sa taille).</p></div>
+    <div class="card"><h2>Mouvement</h2><fieldset id="g-move"></fieldset>
+      <p class="hint">Chute positive = vers le bas, négative = vers le haut (cendres, bulles). Vent dans les axes de la carte.</p></div>
+    <div class="card"><h2>Apparence</h2><fieldset id="g-look"></fieldset></div>
+    <div class="card"><h2>Balise</h2><fieldset id="g-tag"></fieldset></div>
+    <div class="card out">
+      <h2>Importer un JSON</h2>
+      <textarea id="imp" rows="5" placeholder='Collez ici un JSON existant (ex. neige_3d.json)'></textarea>
+      <div class="bar"><button id="doImp" type="button">Charger dans l'atelier</button><span class="toast" id="impMsg" role="status"></span></div>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+'use strict';
+// ---------- Paramètres (mêmes clés et défauts que <3DParticles> dans SnesHdPackLoader.cpp) ----------
+const P = [
+  ['pop','maxParticles','Nombre maxi',1,5000,1,400],
+  ['pop','rate','Naissances / s',0,600,1,0],
+  ['pop','lifeMin','Vie min (s)',0,20,0.05,0],
+  ['pop','lifeMax','Vie max (s)',0,20,0.05,0],
+  ['pop','groundHit','Au sol','ground','respawn'],
+  ['box','boxSize','Taille (texels)',32,2048,8,512],
+  ['box','boxHeight','Hauteur (texels)',4,512,1,128],
+  ['box','boxAhead','Avance',0,0.5,0.01,0.35],
+  ['move','fallMin','Chute min',-200,300,1,20],
+  ['move','fallMax','Chute max',-200,300,1,40],
+  ['move','driftMin','Dérive min',0,100,0.5,0],
+  ['move','driftMax','Dérive max',0,100,0.5,6],
+  ['move','gravity','Gravité',-300,300,1,0],
+  ['move','windX','Vent X',-200,200,1,0],
+  ['move','windY','Vent Y',-200,200,1,0],
+  ['move','turbulence','Turbulence',0,100,0.5,0],
+  ['move','turbulenceFreq','Fréquence turb. (Hz)',0,5,0.05,0.5],
+  ['look','texture','Texture PNG','tex',''],
+  ['look','sizeStart','Taille début (texels)',0,16,0.05,2],
+  ['look','sizeEnd','Taille fin (texels)',0,16,0.05,2],
+  ['look','sizeRandom','Taille aléatoire',0,0.95,0.01,0],
+  ['look','minPixelSize','Taille mini écran (px HD)',0.5,6,0.1,1.5],
+  ['look','alphaStart','Opacité début',0,1,0.01,1],
+  ['look','alphaEnd','Opacité fin',0,1,0.01,1],
+  ['look','fadeIn','Fondu entrée',0,1,0.01,0.1],
+  ['look','fadeOut','Fondu sortie',0,1,0.01,0.2],
+  ['look','colorStart','Couleur début','color','#FFFFFF'],
+  ['look','colorEnd','Couleur fin','color','#FFFFFF'],
+  ['look','blend','Mélange','blend','normal'],
+  ['look','farFade','Fondu bord de boîte',0,1,0.01,0.3],
+  ['look','nearFade','Fondu proche (texels)',0,200,1,24],
+  ['tag','Zone','Vue','zone','all'],
+  ['tag','Z','Z-index',0,255,1,95],
+  ['tag','Alpha','Alpha global',0,1,0.01,1],
+  ['drive','speed','Vitesse (texels/s)',0,800,5,140],
+  ['drive','turn','Virage (°/s)',-120,120,1,0],
+];
+const DEF = {}, META = {};
+const SPECIAL = new Set(['tex','color','blend','ground','zone']);
+for (const d of P) { META[d[1]] = d; DEF[d[1]] = SPECIAL.has(d[3]) ? d[4] : d[6]; }
+const LOWER = {}; for (const k in DEF) LOWER[k.toLowerCase()] = k; LOWER['zindex'] = 'Z';
+const TAGKEYS = ['Zone','Z','Alpha','speed','turn'];
+let S = { ...DEF };
+let texImg = null;
+
+const PRESETS = {
+  'Neige': { maxParticles:900, boxSize:512, boxHeight:96, fallMin:14, fallMax:26, driftMin:0, driftMax:6, turbulence:6, turbulenceFreq:0.4,
+    sizeStart:1.6, sizeEnd:1.6, sizeRandom:0.4, alphaStart:0.9, alphaEnd:0.9, nearFade:20, _game:'snow' },
+  'Blizzard': { maxParticles:1600, boxSize:448, boxHeight:96, fallMin:30, fallMax:55, driftMin:0, driftMax:10, windX:45, turbulence:12, turbulenceFreq:0.8,
+    sizeStart:1.3, sizeEnd:1.3, sizeRandom:0.5, alphaStart:0.85, alphaEnd:0.85, nearFade:16, _game:'snow' },
+  'Pluie': { maxParticles:1300, boxSize:384, boxHeight:64, fallMin:180, fallMax:240, driftMax:2, sizeStart:0.8, sizeEnd:0.8, sizeRandom:0.3,
+    alphaStart:0.5, alphaEnd:0.5, colorStart:'#B8C8FF', colorEnd:'#B8C8FF', nearFade:12, _game:'kart' },
+  'Cendres': { maxParticles:500, rate:120, lifeMin:2, lifeMax:5, groundHit:'die', boxSize:448, boxHeight:80, fallMin:-25, fallMax:-10, driftMin:4, driftMax:10,
+    turbulence:8, turbulenceFreq:0.6, sizeStart:1.2, sizeEnd:0.6, sizeRandom:0.4, alphaStart:1, alphaEnd:0, colorStart:'#FFB040', colorEnd:'#FF3000', blend:'additive', _game:'lava' },
+  'Feuilles': { maxParticles:140, boxSize:512, boxHeight:72, fallMin:6, fallMax:12, driftMin:10, driftMax:20, turbulence:15, turbulenceFreq:0.35,
+    sizeStart:2.5, sizeEnd:2.5, sizeRandom:0.4, colorStart:'#D08A30', colorEnd:'#D08A30', alphaStart:1, alphaEnd:1, _game:'kart' },
+  'Poussière': { maxParticles:320, boxSize:384, boxHeight:24, fallMin:-3, fallMax:3, driftMin:2, driftMax:6, turbulence:4, turbulenceFreq:0.25,
+    sizeStart:1.5, sizeEnd:1.5, sizeRandom:0.4, alphaStart:0.5, alphaEnd:0.5, colorStart:'#E8D0A0', colorEnd:'#E8D0A0', _game:'kart' },
+  'Étincelles': { maxParticles:600, rate:220, lifeMin:0.4, lifeMax:0.9, groundHit:'die', boxSize:256, boxHeight:32, boxAhead:0.25, fallMin:-40, fallMax:-10,
+    driftMin:20, driftMax:60, gravity:120, sizeStart:0.7, sizeEnd:0.4, alphaStart:1, alphaEnd:0.2, colorStart:'#FFF0A0', colorEnd:'#FF6020', blend:'additive',
+    fadeIn:0.05, fadeOut:0.3, _game:'fzero', speed:420 },
+};
+
+// ---------- Interface ----------
+const $ = id => document.getElementById(id);
+const inputs = {};
+function fmt(v, step) { const dec = step >= 1 ? 0 : (String(step).split('.')[1] || '').length; return Number(v).toFixed(dec); }
+function selectRow(row, k, opts) {
+  const s = document.createElement('select'); s.id = 'p-' + k; s.className = 'wide'; s.style.justifySelf = 'start';
+  s.innerHTML = opts.map(([v, t]) => '<option value="' + v + '">' + t + '</option>').join('');
+  s.addEventListener('change', () => { S[k] = s.value; changed(k === 'groundHit'); });
+  row.appendChild(s); inputs[k] = { set: v => s.value = v };
+}
+for (const d of P) {
+  const [g, k, label, a] = d;
+  const row = document.createElement('div'); row.className = 'row';
+  const lab = document.createElement('span'); lab.innerHTML = label + (g === 'drive' ? '' : '<small>' + k + '</small>'); row.appendChild(lab);
+  if (a === 'color') {
+    const c = document.createElement('input'); c.type = 'color'; c.id = 'p-' + k; c.className = 'wide'; c.style.justifySelf = 'start';
+    c.addEventListener('input', () => { S[k] = c.value.toUpperCase(); changed(); });
+    row.appendChild(c); inputs[k] = { set: v => c.value = v.toLowerCase() };
+  } else if (a === 'blend') selectRow(row, k, [['normal','normal'],['additive','additive (lumineux)']]);
+  else if (a === 'ground') selectRow(row, k, [['respawn','réapparaît en haut'],['die','meurt']]);
+  else if (a === 'zone') selectRow(row, k, [['all','toutes (all)'],['top','haut (top)'],['bottom','bas (bottom)']]);
+  else if (a === 'tex') {
+    const wrap = document.createElement('div'); wrap.className = 'wide'; wrap.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
+    const f = document.createElement('input'); f.type = 'file'; f.accept = 'image/png'; f.id = 'p-tex'; f.hidden = true;
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Choisir un PNG';
+    const n = document.createElement('span'); n.style.cssText = 'color:var(--muted);font-size:12px'; n.textContent = 'aucune (point doux)';
+    const x = document.createElement('button'); x.type = 'button'; x.textContent = 'Retirer'; x.hidden = true;
+    b.onclick = () => f.click();
+    x.onclick = () => { texImg = null; S.texture = ''; n.textContent = 'aucune (point doux)'; x.hidden = true; changed(); };
+    f.onchange = () => { const file = f.files[0]; if (!file) return; const url = URL.createObjectURL(file); const im = new Image();
+      im.onload = () => { const c = document.createElement('canvas'); c.width = im.width; c.height = im.height; const cx = c.getContext('2d');
+        cx.drawImage(im, 0, 0); const dd = cx.getImageData(0, 0, im.width, im.height).data; const px = new Uint32Array(im.width * im.height);
+        for (let i = 0; i < px.length; i++) px[i] = ((dd[i*4+3] << 24) | (dd[i*4] << 16) | (dd[i*4+1] << 8) | dd[i*4+2]) >>> 0;
+        texImg = { w: im.width, h: im.height, px }; S.texture = 'effets/' + file.name;
+        n.textContent = file.name; x.hidden = false; URL.revokeObjectURL(url); changed(); };
+      im.src = url; f.value = ''; };
+    wrap.append(b, n, x, f); row.appendChild(wrap);
+    inputs[k] = { set: v => { if (!v) { texImg = null; n.textContent = 'aucune (point doux)'; x.hidden = true; } else if (!texImg) { n.textContent = v + ' (rechargez le PNG pour l\'aperçu)'; x.hidden = false; } } };
+  } else {
+    const [, , , min, max, step] = d;
+    const r = document.createElement('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.id = 'r-' + k; r.setAttribute('aria-label', label);
+    const nb = document.createElement('input'); nb.type = 'number'; nb.min = min; nb.max = max; nb.step = step; nb.id = 'p-' + k; nb.setAttribute('aria-label', label);
+    const restart = ['maxParticles','boxSize','boxHeight','lifeMin','lifeMax','rate'].includes(k);
+    r.addEventListener('input', () => { S[k] = +r.value; nb.value = fmt(r.value, step); changed(restart); });
+    nb.addEventListener('change', () => { let v = +nb.value; if (isNaN(v)) v = DEF[k]; S[k] = v; r.value = v; changed(restart); });
+    row.append(r, nb); inputs[k] = { set: v => { r.value = v; nb.value = fmt(v, step); } };
+  }
+  $('g-' + g).appendChild(row);
+}
+function syncInputs() { for (const k in inputs) inputs[k].set(S[k]); }
+
+const presetBox = $('presets');
+for (const name in PRESETS) {
+  const b = document.createElement('button'); b.type = 'button'; b.textContent = name; b.setAttribute('aria-pressed', 'false');
+  b.onclick = () => applyPreset(name, b);
+  presetBox.appendChild(b);
+}
+function applyPreset(name, btn) {
+  const pr = PRESETS[name]; const keep = {}; for (const t of TAGKEYS) keep[t] = S[t];
+  S = { ...DEF, ...keep };
+  for (const k in pr) if (k[0] !== '_') S[k] = pr[k];
+  if (pr._game) { $('game').value = pr._game; buildGround(); }
+  texImg = null;
+  for (const o of presetBox.children) o.setAttribute('aria-pressed', o === btn ? 'true' : 'false');
+  $('fname').value = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '') + '_3d';
+  syncInputs(); changed(true);
+}
+
+// ---------- Export ----------
+const num = v => +(+v).toFixed(3);
+function buildJson() {
+  const o = { type: 'particles3d' };
+  for (const d of P) { const [g, k] = d; if (g === 'tag' || g === 'drive') continue;
+    if (k === 'texture') { if (S.texture) o.texture = S.texture; continue; }
+    const v = S[k]; o[k] = typeof v === 'number' ? num(v) : v; }
+  return '{\n' + Object.entries(o).map(([k, v]) => '  "' + k + '": ' + JSON.stringify(v)).join(',\n') + '\n}\n';
+}
+function buildTag() {
+  const name = ($('fname').value.trim() || 'mon_effet_3d').replace(/\.json$/i, '');
+  return '<3DParticles>effets\\' + name + '.json,Zone=' + S.Zone + ',Z=' + num(S.Z) + ',Alpha=' + num(S.Alpha);
+}
+function refreshText() { $('json').textContent = buildJson(); $('tag').textContent = buildTag(); }
+$('fname').addEventListener('input', refreshText);
+function copyText(text, el) {
+  const done = () => { $('toast').textContent = 'Copié.'; setTimeout(() => $('toast').textContent = '', 1800); };
+  const fallback = () => { const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+    $('toast').textContent = 'Texte sélectionné : Ctrl+C pour copier.'; };
+  try { navigator.clipboard.writeText(text).then(done, fallback); } catch (e) { fallback(); }
+}
+$('copy').onclick = () => copyText($('json').textContent, $('json'));
+$('copyTag').onclick = () => copyText($('tag').textContent, $('tag'));
+
+$('doImp').onclick = () => {
+  const txt = $('imp').value.replace(/\/\/[^\n]*/g, '');
+  const re = /"([^"]+)"\s*:\s*("(?:[^"\\]|\\.)*"|[^,}\n\r]+)/g; let m, n = 0; const next = { ...DEF };
+  for (const t of TAGKEYS) next[t] = S[t];
+  while ((m = re.exec(txt))) {
+    const key = LOWER[m[1].trim().toLowerCase()]; if (!key) continue;
+    let v = m[2].trim(); if (v[0] === '"') v = v.slice(1, -1).replace(/\\(["\\])/g, '$1');
+    const a = META[key][3];
+    if (a === 'color') { v = v.replace('#', ''); if (/^[0-9a-f]{6}$/i.test(v)) next[key] = '#' + v.toUpperCase(); }
+    else if (a === 'blend') next[key] = v.toLowerCase() === 'additive' ? 'additive' : 'normal';
+    else if (a === 'ground') next[key] = v.toLowerCase() === 'die' ? 'die' : 'respawn';
+    else if (a === 'zone') next[key] = ['top','bottom'].includes(v.toLowerCase()) ? v.toLowerCase() : 'all';
+    else if (a === 'tex') next[key] = v;
+    else { const f = parseFloat(v); if (!isNaN(f)) next[key] = f; }
+    n++;
+  }
+  if (!n) { $('impMsg').textContent = 'Aucune clé reconnue. Vérifiez le format "clé": valeur.'; return; }
+  if (!txt.match(/"sizeend"/i)) next.sizeEnd = next.sizeStart;
+  if (!txt.match(/"alphaend"/i)) next.alphaEnd = next.alphaStart;
+  if (!txt.match(/"colorend"/i)) next.colorEnd = next.colorStart;
+  if (!txt.match(/"lifemax"/i)) next.lifeMax = next.lifeMin;
+  S = next; texImg = null; syncInputs(); changed(true);
+  for (const o of presetBox.children) o.setAttribute('aria-pressed', 'false');
+  $('impMsg').textContent = n + ' réglages chargés.';
+};
+
+// ---------- Caméra Mode 7 (sténopé, comme la caméra reconstruite) ----------
+const SW = 256, SH = 224, DT = 1 / 60, PI = Math.PI;
+const CAM = { yh: 44, H: 36, F: 150, x: 512, y: 900, ang: -PI / 2 }; // ang : direction du regard dans la carte (−π/2 = nord)
+let cam = { ...CAM };
+const fwd = () => [Math.cos(cam.ang), Math.sin(cam.ang)];
+const rgt = () => [-Math.sin(cam.ang), Math.cos(cam.ang)];
+function project(u, v, h) {
+  const [fx, fy] = fwd(), [rx, ry] = rgt();
+  const D = (u - cam.x) * fx + (v - cam.y) * fy;
+  if (D < 1) return null;
+  const L = (u - cam.x) * rx + (v - cam.y) * ry;
+  const ppt = cam.F / D;
+  return { sx: SW / 2 + L * ppt, sy: cam.yh + (cam.H - h) * ppt, ppt, D };
+}
+
+// ---------- Décor procédural (carte 1024 × 1024 repliée) ----------
+let groundFn, skyTop, skyBot;
+const rgb = (r, g, b) => (r << 16) | (g << 8) | b;
+function buildGround() {
+  const g = $('game').value;
+  if (g === 'fzero') {
+    skyTop = [10, 12, 40]; skyBot = [70, 40, 110];
+    groundFn = (u, v) => {
+      u = ((u % 1024) + 1024) % 1024; v = ((v % 1024) + 1024) % 1024;
+      const du = Math.abs(u - 512);
+      if (du < 72) { const lane = ((Math.floor(v / 32)) & 1) ? rgb(96, 92, 112) : rgb(104, 100, 120); return (du < 2 && (Math.floor(v / 24) & 1)) ? rgb(230, 230, 240) : lane; }
+      if (du < 84) return (Math.floor(v / 12) & 1) ? rgb(250, 210, 40) : rgb(60, 50, 20);
+      return ((Math.floor(u / 16) + Math.floor(v / 16)) & 1) ? rgb(20, 40, 90) : rgb(14, 26, 64);
+    };
+  } else if (g === 'snow') {
+    skyTop = [150, 190, 235]; skyBot = [225, 238, 250];
+    groundFn = (u, v) => {
+      u = ((u % 1024) + 1024) % 1024; v = ((v % 1024) + 1024) % 1024;
+      const du = Math.abs(u - 512);
+      if (du < 64) return ((Math.floor(u / 8) + Math.floor(v / 8)) & 1) ? rgb(150, 200, 230) : rgb(140, 190, 225);
+      if (du < 72) return (Math.floor(v / 16) & 1) ? rgb(240, 80, 80) : rgb(250, 250, 250);
+      return ((Math.floor(u / 32) + Math.floor(v / 32)) & 1) ? rgb(235, 242, 250) : rgb(220, 232, 245);
+    };
+  } else if (g === 'lava') {
+    skyTop = [30, 8, 8]; skyBot = [90, 30, 20];
+    groundFn = (u, v) => {
+      u = ((u % 1024) + 1024) % 1024; v = ((v % 1024) + 1024) % 1024;
+      const du = Math.abs(u - 512);
+      if (du < 64) return ((Math.floor(u / 16) + Math.floor(v / 16)) & 1) ? rgb(120, 110, 110) : rgb(100, 92, 92);
+      if (du < 72) return rgb(60, 50, 50);
+      const w = Math.sin(u * 0.05) + Math.sin(v * 0.043 + u * 0.01);
+      return w > 0.6 ? rgb(255, 170, 40) : rgb(220, 60, 20);
+    };
+  } else {
+    skyTop = [110, 170, 240]; skyBot = [200, 230, 255];
+    groundFn = (u, v) => {
+      u = ((u % 1024) + 1024) % 1024; v = ((v % 1024) + 1024) % 1024;
+      const du = Math.abs(u - 512);
+      if (du < 60) { if (du < 1.5 && (Math.floor(v / 32) & 1)) return rgb(245, 245, 245); return ((Math.floor(u / 8) + Math.floor(v / 8)) & 1) ? rgb(128, 120, 116) : rgb(118, 110, 108); }
+      if (du < 68) return (Math.floor(v / 8) & 1) ? rgb(220, 40, 40) : rgb(245, 245, 245);
+      if (du < 110) return ((Math.floor(u / 4) * 7 + Math.floor(v / 4) * 13) % 5 < 2) ? rgb(200, 150, 80) : rgb(186, 136, 70);
+      return ((Math.floor(u / 32) + Math.floor(v / 32)) & 1) ? rgb(70, 150, 60) : rgb(60, 136, 52);
+    };
+  }
+}
+$('game').onchange = () => { buildGround(); changed(true); };
+
+// ---------- Simulation (portage de <3DParticles> dans SnesHdVideoFilter.cpp) ----------
+let sim;
+function rngFactory(seed) { let r = seed >>> 0; return () => { r ^= r << 13; r >>>= 0; r ^= r >>> 17; r ^= r << 5; r >>>= 0; return (r & 0xFFFFFF) / 16777216; }; }
+function boxCenter() { const [fx, fy] = fwd(); return [cam.x + fx * S.boxSize * S.boxAhead, cam.y + fy * S.boxSize * S.boxAhead]; }
+function resetSim() {
+  sim = { parts: [], acc: 0, time: 0, rand: rngFactory(0x9E3779B9 ^ 2654435761) };
+  sim.center = boxCenter();
+  if (S.rate <= 0) { while (sim.parts.length < S.maxParticles) spawn(true); }
+  else { const steps = Math.min(S.lifeMax > 0 ? S.lifeMax * 60 : 300, 600); for (let i = 0; i < steps; i++) step(false); }
+}
+const rr = (a, b) => a + (b - a) * sim.rand();
+function spawn(anyHeight) {
+  const B = S.boxSize, fall = rr(S.fallMin, S.fallMax), ang = sim.rand() * 2 * PI, dr = rr(S.driftMin, S.driftMax);
+  const life = S.lifeMax > 0 ? Math.max(0.05, rr(S.lifeMin, Math.max(S.lifeMin, S.lifeMax))) : 0;
+  sim.parts.push({ x: sim.center[0] + (sim.rand() - 0.5) * B, y: sim.center[1] + (sim.rand() - 0.5) * B,
+    z: anyHeight ? sim.rand() * S.boxHeight : (fall >= 0 ? S.boxHeight : 0),
+    vx: Math.cos(ang) * dr, vy: Math.sin(ang) * dr, vz: -fall, life, age: (anyHeight && life > 0) ? sim.rand() * life : 0,
+    size: 1 + Math.min(0.95, S.sizeRandom) * (sim.rand() * 2 - 1), s1: sim.rand() * 2 * PI, s2: sim.rand() * 2 * PI });
+}
+function step(moveCam) {
+  if (moveCam) {
+    cam.ang += S.turn * PI / 180 * DT;
+    const [fx, fy] = fwd(); cam.x += fx * S.speed * DT; cam.y += fy * S.speed * DT;
+  }
+  sim.center = boxCenter();
+  const B = S.boxSize;
+  sim.time += DT;
+  if (S.rate > 0) { sim.acc += S.rate * DT; while (sim.acc >= 1) { sim.acc -= 1; if (sim.parts.length < S.maxParticles) spawn(false); } }
+  else while (sim.parts.length < S.maxParticles) spawn(false);
+  const tw = 2 * PI * S.turbulenceFreq, A = sim.parts;
+  for (let k = 0; k < A.length;) {
+    const p = A[k]; let dead = false;
+    if (p.life > 0) { p.age += DT; dead = p.age >= p.life; }
+    if (!dead) {
+      p.vz -= S.gravity * DT;
+      let tx = 0, ty = 0;
+      if (S.turbulence) { tx = S.turbulence * Math.sin(tw * sim.time + p.s1); ty = S.turbulence * Math.cos(tw * 0.73 * sim.time + p.s2); }
+      p.x += (p.vx + S.windX + tx) * DT; p.y += (p.vy + S.windY + ty) * DT; p.z += p.vz * DT;
+      if (p.z <= 0) { if (S.groundHit === 'die') dead = true; else p.z += S.boxHeight; }
+      else if (p.z > S.boxHeight) p.z -= S.boxHeight;
+      let rx = p.x - sim.center[0]; rx -= B * Math.floor(rx / B + 0.5); p.x = sim.center[0] + rx;
+      let ry = p.y - sim.center[1]; ry -= B * Math.floor(ry / B + 0.5); p.y = sim.center[1] + ry;
+    }
+    if (dead) { A[k] = A[A.length - 1]; A.pop(); continue; }
+    k++;
+  }
+}
+
+// ---------- Rendu ----------
+const view = $('view'), ctx = view.getContext('2d');
+let scale = 3, frame = null, sprRow = null;
+function resize() { view.width = SW * scale; view.height = SH * scale; frame = new ImageData(view.width, view.height); sprRow = new Float32Array(view.width * view.height); }
+$('scale').onchange = () => { scale = +$('scale').value; resize(); };
+
+// kart générique (pieds à la ligne 206) dessiné en pixels SNES
+const KART = (() => {
+  const rows = [
+    '......xxxxxxxx......', '....xxyyyyyyyyxx....', '...xyyyyyyyyyyyyx...', '...xyywwyyyywwyyx...', '..xxyyyyyyyyyyyyxx..',
+    '..xbbxyyyyyyyyxbbx..', '.xbbbbxxxxxxxxbbbbx.', '.xbbbbrrrrrrrrbbbbx.', 'xkkkbbrrrrrrrrbbkkkx', 'xkkkkbbbbbbbbbbkkkkx',
+    'xkkkkxggggggggxkkkkx', 'xkkkkx........xkkkkx', '.xkkx..........xkkx.' ];
+  const pal = { x: [20, 20, 30], y: [230, 200, 40], w: [255, 255, 255], b: [40, 90, 200], r: [200, 40, 40], k: [30, 30, 36], g: [120, 120, 130] };
+  return { rows, pal, w: rows[0].length, h: rows.length, x0: 128 - 10, y0: 206 - 13 };
+})();
+
+function render() {
+  const W = view.width, H = view.height, out = frame.data, sc = scale;
+  const [fx, fy] = fwd(), [rx, ry] = rgt();
+  // ciel + sol, ligne par ligne (comme le Mode 7 : une ligne = une distance)
+  for (let y = 0; y < SH; y++) {
+    let rowCol = null;
+    if (y <= cam.yh) { const t = y / Math.max(1, cam.yh); rowCol = [0, 1, 2].map(i => Math.round(skyTop[i] + (skyBot[i] - skyTop[i]) * t)); }
+    const D = y > cam.yh ? cam.F * cam.H / (y + 0.5 - cam.yh) : 0;
+    for (let x = 0; x < SW; x++) {
+      let r, g, b;
+      if (rowCol) { [r, g, b] = rowCol; }
+      else {
+        const L = (x + 0.5 - SW / 2) * D / cam.F;
+        const c = groundFn(cam.x + fx * D + rx * L, cam.y + fy * D + ry * L);
+        r = c >> 16; g = (c >> 8) & 255; b = c & 255;
+        const fog = Math.min(1, Math.max(0, (D - 300) / 700)) * 0.5;
+        r += (skyBot[0] - r) * fog; g += (skyBot[1] - g) * fog; b += (skyBot[2] - b) * fog;
+      }
+      for (let sy = 0; sy < sc; sy++) { let i = ((y * sc + sy) * W + x * sc) * 4; for (let sx = 0; sx < sc; sx++, i += 4) { out[i] = r; out[i+1] = g; out[i+2] = b; out[i+3] = 255; } }
+    }
+  }
+  sprRow.fill(-1);
+  if ($('kart').checked) {
+    for (let j = 0; j < KART.h; j++) for (let i = 0; i < KART.w; i++) {
+      const ch = KART.rows[j][i]; if (ch === '.') continue; const [r, g, b] = KART.pal[ch];
+      const X = KART.x0 + i, Y = KART.y0 + j;
+      for (let sy = 0; sy < sc; sy++) for (let sx = 0; sx < sc; sx++) { const id = (Y * sc + sy) * W + X * sc + sx, i4 = id * 4; out[i4] = r; out[i4+1] = g; out[i4+2] = b; sprRow[id] = 206; }
+    }
+  }
+  // particules : projection, tri du plus loin au plus proche, puis dessin avec test "ligne des pieds"
+  const draws = [], B = S.boxSize;
+  const c0 = parseInt(S.colorStart.slice(1), 16), c1 = parseInt(S.colorEnd.slice(1), 16);
+  const texAspect = texImg ? texImg.h / texImg.w : 1;
+  for (const p of sim.parts) {
+    const pr = project(p.x, p.y, p.z); if (!pr || pr.D < 2) continue;
+    if (cam.yh + cam.H * pr.ppt < cam.yh + 1) continue; // au-delà de l'horizon
+    const t = p.life > 0 ? p.age / p.life : 0;
+    let a = S.alphaStart + (S.alphaEnd - S.alphaStart) * t;
+    if (p.life > 0) { if (S.fadeIn > 0 && t < S.fadeIn) a *= t / S.fadeIn; if (S.fadeOut > 0 && t > 1 - S.fadeOut) a *= (1 - t) / S.fadeOut; }
+    if (S.nearFade > 0 && pr.D < S.nearFade) a *= pr.D / S.nearFade;
+    const rr2 = Math.max(Math.abs(p.x - sim.center[0]), Math.abs(p.y - sim.center[1])) / (B * 0.5);
+    if (S.farFade > 0 && rr2 > 1 - S.farFade) a *= Math.max(0, (1 - rr2) / S.farFade);
+    let sizePx = p.size * (S.sizeStart + (S.sizeEnd - S.sizeStart) * t) * pr.ppt * sc;
+    if (sizePx <= 0) continue;
+    if (sizePx < S.minPixelSize) { a *= sizePx / S.minPixelSize; sizePx = S.minPixelSize; }
+    a *= S.Alpha; if (a <= 0.003) continue;
+    const lc = sh => (((c0 >> sh) & 255) + ((((c1 >> sh) & 255) - ((c0 >> sh) & 255)) * t)) / 255;
+    draws.push({ cx: pr.sx * sc, cy: pr.sy * sc, hw: sizePx / 2, hh: sizePx / 2 * texAspect, a: Math.min(1, a), r: lc(16), g: lc(8), b: lc(0),
+      depth: pr.D, gr: pr.sy + p.z * pr.ppt });
+  }
+  draws.sort((a, b) => b.depth - a.depth);
+  const add = S.blend === 'additive', tex = texImg;
+  for (const d of draws) {
+    const x0 = Math.max(0, Math.floor(d.cx - d.hw)), x1 = Math.min(W - 1, Math.ceil(d.cx + d.hw));
+    const y0 = Math.max(0, Math.floor(d.cy - d.hh)), y1 = Math.min(H - 1, Math.ceil(d.cy + d.hh));
+    for (let yy = y0; yy <= y1; yy++) { const dy = yy + 0.5 - d.cy;
+      for (let xx = x0; xx <= x1; xx++) { const dx = xx + 0.5 - d.cx;
+        let sa, sr, sg, sb;
+        if (tex) {
+          const u = (dx / d.hw * 0.5 + 0.5) * tex.w - 0.5, v = (dy / d.hh * 0.5 + 0.5) * tex.h - 0.5;
+          if (u < -0.5 || v < -0.5 || u > tex.w - 0.5 || v > tex.h - 0.5) continue;
+          const iu = Math.floor(u), iv = Math.floor(v), fu = u - iu, fv = v - iv;
+          let A = 0, R = 0, G = 0, Bc = 0;
+          for (const [qx, qy, w] of [[iu, iv, (1 - fu) * (1 - fv)], [iu + 1, iv, fu * (1 - fv)], [iu, iv + 1, (1 - fu) * fv], [iu + 1, iv + 1, fu * fv]]) {
+            const c = tex.px[Math.min(tex.h - 1, Math.max(0, qy)) * tex.w + Math.min(tex.w - 1, Math.max(0, qx))];
+            const ca = (c >>> 24) * w; A += ca; R += ((c >> 16) & 255) * ca; G += ((c >> 8) & 255) * ca; Bc += (c & 255) * ca; }
+          if (A <= 0.5) continue; sa = A / 255; sr = R / A; sg = G / A; sb = Bc / A;
+        } else {
+          const dd = Math.hypot(dx, dy) / d.hw; if (dd >= 1) continue; const s = 1 - dd * dd; sa = s * s; sr = sg = sb = 255;
+        }
+        const aa = sa * d.a; if (aa < 0.004) continue;
+        const id = yy * W + xx; const spr = sprRow[id]; if (spr >= 0 && d.gr < spr) continue; // derrière le kart
+        const i = id * 4, cr = sr * d.r, cg = sg * d.g, cb = sb * d.b;
+        if (add) { out[i] = Math.min(255, out[i] + cr * aa); out[i+1] = Math.min(255, out[i+1] + cg * aa); out[i+2] = Math.min(255, out[i+2] + cb * aa); }
+        else { out[i] += (cr - out[i]) * aa; out[i+1] += (cg - out[i+1]) * aa; out[i+2] += (cb - out[i+2]) * aa; }
+      } }
+  }
+  ctx.putImageData(frame, 0, 0);
+  $('stat').textContent = sim.parts.length + ' particules · ' + draws.length + ' visibles';
+}
+
+// ---------- Boucle (pas fixe 1/60 s) ----------
+let paused = false, last = 0, acc = 0, dirty = true;
+function changed(restart) { if (restart) resetSim(); refreshText(); dirty = true; }
+$('restart').onclick = () => { cam = { ...CAM }; changed(true); };
+$('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? 'Lecture' : 'Pause'; };
+$('kart').onchange = () => { dirty = true; };
+function loop(ts) {
+  if (!last) last = ts; acc += Math.min(0.1, (ts - last) / 1000); last = ts;
+  if (!paused) { let n = 0; while (acc >= DT && n < 4) { step(true); acc -= DT; n++; } if (n >= 4) acc = 0; if (n) dirty = true; } else acc = 0;
+  if (dirty) { render(); dirty = false; }
+  requestAnimationFrame(loop);
+}
+
+buildGround(); resize();
+applyPreset('Neige', presetBox.children[0]);
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
