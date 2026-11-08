@@ -66,7 +66,12 @@ input[type=color] { width: 44px; height: 30px; border: 1px solid var(--line); bo
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden }
 .seg button { border: 0; border-radius: 0; padding: 5px 10px; background: var(--field) }
 .seg button[aria-pressed=true] { background: var(--accent); color: var(--panel) }
-.out { min-height: 92px }
+.out { min-height: 110px; white-space: pre; overflow-x: auto }
+.fxlist { display: flex; flex-direction: column; gap: 4px; max-height: 190px; overflow: auto }
+.fxlist button { display: flex; gap: 8px; align-items: baseline; text-align: left; font-family: var(--f-mono); font-size: 12.5px; font-weight: 400 }
+.fxlist button b { min-width: 1.6em; color: var(--accent) }
+.fxlist button span { color: var(--muted) }
+.fxlist button[aria-pressed=true] { background: var(--accent-soft); border-color: var(--accent) }
 details.card summary { cursor: pointer; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted) }
 details.card[open] summary { margin-bottom: 4px }
 </style>
@@ -83,14 +88,15 @@ details.card[open] summary { margin-bottom: 4px }
       <div class="ctl">
         <canvas id="map" width="200" height="200" aria-label="Carte vue de dessus"></canvas>
         <div class="seg" role="group" aria-label="Clic sur la carte">
-          <button id="clickPos" aria-pressed="true">placer</button><button id="clickPath" aria-pressed="false">trajet</button>
+          <button id="clickPos" aria-pressed="true">placer</button><button id="clickAdd" aria-pressed="false">ajouter</button><button id="clickPath" aria-pressed="false">trajet</button>
         </div>
       </div>
       <div class="ctl" style="gap:8px">
-        <p class="hint">Carte 1024 × 1024 texels. <b>Placer</b> : un clic pose l'effet. <b>Trajet</b> : chaque clic ajoute un point. Le triangle montre la caméra.</p>
+        <p class="hint">Carte 1024 × 1024 texels. <b>Placer</b> : déplace l'effet choisi. <b>Ajouter</b> : chaque clic ajoute un effet (copie de l'effet choisi). <b>Trajet</b> : chaque clic ajoute un point. Le triangle montre la caméra.</p>
         <div class="row">
           <label class="row" style="gap:6px"><input type="checkbox" id="orbit" checked> Caméra qui tourne</label>
           <label class="row" style="gap:6px"><input type="checkbox" id="follow" checked> Suivre l'effet</label>
+          <label class="row" style="gap:6px"><input type="checkbox" id="repeatMap"> Répéter la carte</label>
         </div>
         <label class="ctl"><span>Distance caméra <output id="camDistOut"></output></span><input type="range" id="camDist" min="20" max="600" value="90"></label>
         <label class="ctl"><span>Cap caméra <output id="camHeadOut"></output></span><input type="range" id="camHead" min="0" max="359" value="30"></label>
@@ -99,15 +105,30 @@ details.card[open] summary { margin-bottom: 4px }
     </div>
     <div class="card">
       <div class="row" style="justify-content:space-between">
-        <h2>Ligne à copier</h2>
+        <h2>Lignes à copier (une par effet)</h2>
         <div class="row"><span class="status" id="copyMsg"></span><button class="primary" id="copyBtn">Copier</button></div>
       </div>
-      <textarea id="out" class="out" readonly spellcheck="false"></textarea>
-      <p class="hint">Seules les valeurs modifiées (en orange) sont écrites : les autres gardent le défaut du type.</p>
+      <textarea id="out" class="out" spellcheck="false"></textarea>
+      <p class="hint">Seules les valeurs modifiées (en orange) sont écrites. <b>Effacer une ligne supprime son effet</b> ; pour changer un réglage, utilise les curseurs.</p>
     </div>
   </section>
 
   <section class="right" aria-label="Réglages">
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><h2>Effets de la scène</h2><span class="status" id="fxCount"></span></div>
+      <div class="fxlist" id="fxList"></div>
+      <div class="row"><button id="fxAdd">Ajouter (copie)</button><button id="fxDel">Supprimer l'effet choisi</button></div>
+      <p class="hint">Les réglages ci-dessous s'appliquent à l'effet choisi. Tous les effets sont dessinés dans l'aperçu.</p>
+    </div>
+    <div class="card">
+      <h2>Préréglages</h2>
+      <div class="row"><input type="text" class="grow" id="presetName" placeholder="nom du préréglage (ex. torche bleue)" spellcheck="false"><button class="primary" id="presetSave">Enregistrer</button></div>
+      <div class="row"><select id="presetList" style="flex:1 1 200px"></select><button id="presetLoad">Charger</button><button id="presetDel">Supprimer</button></div>
+      <div class="row"><label class="filebtn">Ouvrir un fichier<input type="file" id="presetFile" accept=".json,.txt,application/json"></label><button id="presetFileSave">Enregistrer un fichier</button></div>
+      <div class="row"><button id="presetExport">Exporter tout</button><button id="presetImport">Importer</button><span class="status" id="presetMsg"></span></div>
+      <textarea id="presetText" rows="4" hidden spellcheck="false" placeholder="Colle ici un export de préréglages, puis clique Importer."></textarea>
+      <p class="hint">Un préréglage garde toute la scène (tous ses effets). Mémorisés dans ce navigateur ; « Enregistrer un fichier » crée <code>m7effect_presets.json</code> (préréglages + scène en cours), à ranger dans ton pack et à rouvrir avec « Ouvrir un fichier ». Depuis la page publiée le téléchargement peut être bloqué : utilise alors « Exporter tout » (copie le même texte), ou la copie de l'atelier dans <code>Tools</code>.</p>
+    </div>
     <div class="card">
       <h2>Type d'effet</h2>
       <div class="types" id="types"></div>
@@ -272,10 +293,32 @@ const SCHEMA = [
   { k: 'l_speed', o: 'speed', l: 'Vitesse du scintillement', min: 0.5, max: 30, st: 0.5, t: ['light'] },
 ];
 
-// ------------------------------------------------------------------ etat
+// ------------------------------------------------------------------ etat : une SCENE de plusieurs effets
+const newSt = (x, y) => ({ x, y, dx: 0, dy: 0, path: [], speed: 32, loop: 'loop', smooth: true, bobamp: 0, bobfreq: 0.5, offset: 0 });
+let fxId = 0;
+const makeFx = (t, p, s) => ({ id: ++fxId, type: t, P: p, st: s, map: '*', cond: '', tile: '', tex: null, em: null, flareVis: 0, poly: [], cum: [], plen: 0, pos: [s.x, s.y, 0] });
 let type = 'flame';
 let P = defaultsFor(type);
-const st = { x: 512, y: 512, dx: 0, dy: 0, path: [], speed: 32, loop: 'loop', smooth: true, bobamp: 0, bobfreq: 0.5, offset: 0 };
+let st = newSt(512, 512);
+let effects = [makeFx(type, P, st)], cur = 0;
+let partTex = null;
+const curFx = () => effects[cur];
+// l'effet courant garde ses reglages (P, st sont partages) ; les champs texte sont recopies
+function syncCur() {
+  const e = effects[cur]; if (!e) return;
+  e.type = type; e.P = P; e.st = st; e.tex = partTex;
+  e.map = $('mapHash').value.trim() || '*'; e.cond = $('cond').value.trim(); e.tile = $('tileHash').value.trim();
+}
+function loadCur() {
+  const e = effects[cur];
+  type = e.type; P = e.P; st = e.st; partTex = e.tex;
+  $('mapHash').value = e.map; $('cond').value = e.cond; $('tileHash').value = e.tile;
+  for (const id of ['posX', 'posY', 'dx', 'dy', 'speed', 'bobamp', 'bobfreq', 'offset']) { const key = { posX: 'x', posY: 'y' }[id] || id; $(id).value = st[key]; $(id + 'Out').textContent = st[key]; }
+  $('loop').value = st.loop; $('smooth').checked = st.smooth; $('path').value = pathTextOf(st);
+  try { $('texture').value = e.tex ? e.tex.name : ''; } catch (x) {}
+  buildTypes(); buildParams(); buildPath(); buildBlock(); update();
+}
+function selectFx(i) { syncCur(); cur = Math.max(0, Math.min(effects.length - 1, i)); loadCur(); }
 
 function buildTypes() {
   const box = $('types'); box.innerHTML = '';
@@ -288,7 +331,7 @@ function buildTypes() {
   }
 }
 function setType(t, keepSame) {
-  const old = type, oldDef = defaultsFor(old);
+  const oldDef = defaultsFor(type);
   type = t;
   const nd = defaultsFor(t);
   // garde les valeurs deja modifiees par l'utilisateur, sinon prend le defaut du nouveau type
@@ -338,71 +381,76 @@ function buildParams() {
   $('motionCard').hidden = !(type === 'flame' || type === 'smoke' || type === 'flare' || type === 'magicfog' || type === 'fog');
 }
 
-// ------------------------------------------------------------------ mouvement (= SnesHdM7ModelInfo::BuildPath / EvalPath)
-let poly = [], cum = [], plen = 0;
-function buildPath() {
-  poly = []; cum = []; plen = 0;
-  const n = st.path.length; if (n < 2) return;
-  const closed = st.loop === 'loop';
-  const Pt = i => { const m = n; i = closed ? ((i % m) + m) % m : Math.max(0, Math.min(m - 1, i)); return st.path[i]; };
-  const segs = closed ? n : n - 1, sub = st.smooth ? 12 : 1;
-  for (let s = 0; s < segs; s++) for (let k = 0; k < sub; k++) {
+
+
+// ------------------------------------------------------------------ mouvement (= SnesHdM7ModelInfo::BuildPath / EvalPath), par effet
+function buildPathE(e) {
+  const s = e.st; e.poly = []; e.cum = []; e.plen = 0;
+  const n = s.path.length; if (n < 2) return;
+  const closed = s.loop === 'loop';
+  const Pt = i => { const m = n; i = closed ? ((i % m) + m) % m : Math.max(0, Math.min(m - 1, i)); return s.path[i]; };
+  const segs = closed ? n : n - 1, sub = s.smooth ? 12 : 1;
+  for (let g = 0; g < segs; g++) for (let k = 0; k < sub; k++) {
     const t = k / sub, q = [0, 0, 0];
-    if (st.smooth) { const p0 = Pt(s - 1), p1 = Pt(s), p2 = Pt(s + 1), p3 = Pt(s + 2), t2 = t * t, t3 = t2 * t;
+    if (s.smooth) { const p0 = Pt(g - 1), p1 = Pt(g), p2 = Pt(g + 1), p3 = Pt(g + 2), t2 = t * t, t3 = t2 * t;
       for (let c = 0; c < 3; c++) q[c] = 0.5 * (2 * p1[c] + (-p0[c] + p2[c]) * t + (2 * p0[c] - 5 * p1[c] + 4 * p2[c] - p3[c]) * t2 + (-p0[c] + 3 * p1[c] - 3 * p2[c] + p3[c]) * t3); }
-    else { const p1 = Pt(s), p2 = Pt(s + 1); for (let c = 0; c < 3; c++) q[c] = p1[c] + (p2[c] - p1[c]) * t; }
-    poly.push(q);
+    else { const p1 = Pt(g), p2 = Pt(g + 1); for (let c = 0; c < 3; c++) q[c] = p1[c] + (p2[c] - p1[c]) * t; }
+    e.poly.push(q);
   }
-  poly.push(closed ? poly[0].slice() : st.path[n - 1].slice());
-  cum.push(0);
-  for (let i = 1; i < poly.length; i++) { const du = poly[i][0] - poly[i - 1][0], dv = poly[i][1] - poly[i - 1][1]; plen += Math.hypot(du, dv); cum.push(plen); }
+  e.poly.push(closed ? e.poly[0].slice() : s.path[n - 1].slice());
+  e.cum.push(0);
+  for (let i = 1; i < e.poly.length; i++) { const du = e.poly[i][0] - e.poly[i - 1][0], dv = e.poly[i][1] - e.poly[i - 1][1]; e.plen += Math.hypot(du, dv); e.cum.push(e.plen); }
 }
-function evalPath(t) {
-  if (poly.length < 2 || plen <= 0) return null;
-  let s = st.speed * t;
-  if (st.loop === 'loop') { s %= plen; if (s < 0) s += plen; }
-  else if (st.loop === 'pingpong') { let m = s % (2 * plen); if (m < 0) m += 2 * plen; s = m > plen ? 2 * plen - m : m; }
-  else s = Math.max(0, Math.min(plen, s));
-  let lo = 0, hi = cum.length - 1;
-  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= s) lo = mid; else hi = mid; }
-  const span = cum[hi] - cum[lo], f = span > 1e-6 ? (s - cum[lo]) / span : 0;
-  const a = poly[lo], b = poly[hi];
+const buildPath = () => { syncCur(); buildPathE(curFx()); };
+function evalPathE(e, t) {
+  const s0 = e.st;
+  if (e.poly.length < 2 || e.plen <= 0) return null;
+  let s = s0.speed * t;
+  if (s0.loop === 'loop') { s %= e.plen; if (s < 0) s += e.plen; }
+  else if (s0.loop === 'pingpong') { let m = s % (2 * e.plen); if (m < 0) m += 2 * e.plen; s = m > e.plen ? 2 * e.plen - m : m; }
+  else s = Math.max(0, Math.min(e.plen, s));
+  let lo = 0, hi = e.cum.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (e.cum[mid] <= s) lo = mid; else hi = mid; }
+  const span = e.cum[hi] - e.cum[lo], f = span > 1e-6 ? (s - e.cum[lo]) / span : 0;
+  const a = e.poly[lo], b = e.poly[hi];
   return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
 }
-const onTile = () => /^[0-9a-f]{4,16}$/i.test($('tileHash').value.trim());
+const HEX = /^[0-9a-f]{4,16}$/i;
+const onTileE = e => HEX.test(e.tile || '');
+const onTile = () => HEX.test($('tileHash').value.trim());
 // tile= : centre de la case (moteur : case * 8 + 4) + dx, dy ; sinon x, y
-const baseX = () => onTile() ? Math.floor(st.x / 8) * 8 + 4 + st.dx : st.x;
-const baseY = () => onTile() ? Math.floor(st.y / 8) * 8 + 4 + st.dy : st.y;
-function effectPos(t) { // = fxPos du filtre
-  let u = baseX(), v = baseY(), h = P.elevation || 0;
-  const tt = t + st.offset;
-  const q = evalPath(tt);
-  if (q) { if (onTile()) { u = baseX() + q[0]; v = baseY() + q[1]; } else { u = q[0]; v = q[1]; } h += q[2]; }
-  if (st.bobamp) h += st.bobamp * Math.sin(6.2831853 * st.bobfreq * tt);
+const baseXE = e => onTileE(e) ? Math.floor(e.st.x / 8) * 8 + 4 + e.st.dx : e.st.x;
+const baseYE = e => onTileE(e) ? Math.floor(e.st.y / 8) * 8 + 4 + e.st.dy : e.st.y;
+function effectPosE(e, t) { // = fxPos du filtre
+  const s = e.st;
+  let u = baseXE(e), v = baseYE(e), h = e.P.elevation || 0;
+  const tt = t + s.offset;
+  const q = evalPathE(e, tt);
+  if (q) { if (onTileE(e)) { u = baseXE(e) + q[0]; v = baseYE(e) + q[1]; } else { u = q[0]; v = q[1]; } h += q[2]; }
+  if (s.bobamp) h += s.bobamp * Math.sin(6.2831853 * s.bobfreq * tt);
   return [u, v, h];
 }
-function pathCenter() {
-  if (st.path.length < 2) return [st.x, st.y];
-  let a = 0, b = 0; for (const p of st.path) { a += p[0]; b += p[1]; }
-  a /= st.path.length; b /= st.path.length;
-  return onTile() ? [st.x + a, st.y + b] : [a, b];
+function pathCenterE(e) {
+  const s = e.st;
+  if (s.path.length < 2) return [baseXE(e), baseYE(e)];
+  let a = 0, b = 0; for (const p of s.path) { a += p[0]; b += p[1]; }
+  a /= s.path.length; b /= s.path.length;
+  return onTileE(e) ? [baseXE(e) + a, baseYE(e) + b] : [a, b];
 }
 
-// ------------------------------------------------------------------ particules (= SnesHdM7EffectInfo::Step)
-let em = null;
+// ------------------------------------------------------------------ particules (= SnesHdM7EffectInfo::Step), un emetteur par effet
 function newEmitter() { const e = { parts: [], acc: 0, time: 0, rng: (0x2545F491 ^ Math.imul(6, 2654435761)) >>> 0 };
   e.rand = () => { let r = e.rng; r ^= r << 13; r >>>= 0; r ^= r >>> 17; r ^= r << 5; r >>>= 0; e.rng = r; return (r & 0xFFFFFF) / 16777216; }; return e; }
-function step(e, dt, su, sv, sh) {
+function stepP(P, e, dt, su, sv, sh) {
   e.time += dt; e.acc += P.rate * dt;
   while (e.acc >= 1) {
     e.acc -= 1;
     if (e.parts.length >= P.maxparticles) continue;
     const a = e.rand() * 6.2831853, r = P.radius * Math.sqrt(e.rand());
     const da = e.rand() * 6.2831853, dr = P.drift * e.rand();
-    const p = { du: su + Math.cos(a) * r, dv: sv + Math.sin(a) * r, h: sh, vu: Math.cos(da) * dr, vv: Math.sin(da) * dr,
+    e.parts.push({ du: su + Math.cos(a) * r, dv: sv + Math.sin(a) * r, h: sh, vu: Math.cos(da) * dr, vv: Math.sin(da) * dr,
       vh: P.risemin + (P.risemax - P.risemin) * e.rand(), life: Math.max(0.05, P.lifemin + (Math.max(P.lifemin, P.lifemax) - P.lifemin) * e.rand()),
-      size: 1 + P.sizerandom * (e.rand() * 2 - 1), seed: e.rand() * 6.2831853, age: 0 };
-    e.parts.push(p);
+      size: 1 + P.sizerandom * (e.rand() * 2 - 1), seed: e.rand() * 6.2831853, age: 0 });
   }
   const tw = 6.2831853 * P.turbulencefreq;
   for (let k = 0; k < e.parts.length;) {
@@ -415,7 +463,7 @@ function step(e, dt, su, sv, sh) {
   }
 }
 let simT = 0;
-function resetSim() { em = null; }
+function resetSim() { const e = curFx(); if (e) e.em = null; }
 
 // ------------------------------------------------------------------ bruit (= table du filtre : xorshift 0x6A09E667)
 const NT = new Float32Array(65536);
@@ -444,7 +492,7 @@ function loadImage(path) {
   const pr = f ? new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = URL.createObjectURL(f); }) : Promise.resolve(null);
   imgCache.set(key, pr); return pr;
 }
-let groundTex = null, mapThumb = null, partTex = null;
+let groundTex = null, mapThumb = null;
 function demoGround(u, v, o) {
   const lane = Math.abs(((v % 256) + 256) % 256 - 128);
   const n = ((Math.sin(u * 12.9898 + v * 78.233) * 43758.5453) % 1 + 1) % 1;
@@ -540,6 +588,8 @@ function blockAt(u, v) {
   return { c, k: (Math.min(c.n - 1, Math.floor(fv * c.n)) * c.n + Math.min(c.n - 1, Math.floor(fu * c.n))) * 4 };
 }
 
+
+
 // ------------------------------------------------------------------ controles generaux
 const bindRange = (id, fn, fmtf) => { const el = $(id); const o = $(id + 'Out'); const f = () => { fn(+el.value); if (o) o.textContent = fmtf ? fmtf(+el.value) : el.value; }; el.addEventListener('input', () => { f(); update(); }); f(); };
 bindRange('posX', v => { st.x = v; }); bindRange('posY', v => { st.y = v; });
@@ -553,53 +603,106 @@ $('path').addEventListener('input', () => { st.path = parsePath($('path').value)
 $('clearPath').onclick = () => { st.path = []; $('path').value = ''; buildPath(); resetSim(); update(); };
 for (const id of ['mapHash', 'tileHash', 'cond']) $(id).addEventListener('input', update);
 function parsePath(s) { const out = []; for (const pt of s.split('|')) { const c = pt.split(':').map(Number); if (c.length >= 2 && !isNaN(c[0]) && !isNaN(c[1])) out.push([c[0], c[1], isNaN(c[2]) ? 0 : c[2]]); } return out; }
-const pathText = () => st.path.map(p => `${Math.round(p[0])}:${Math.round(p[1])}:${Math.round(p[2])}`).join('|');
+const pathTextOf = s => s.path.map(p => `${Math.round(p[0])}:${Math.round(p[1])}:${Math.round(p[2])}`).join('|');
+const pathText = () => pathTextOf(st);
 let clickMode = 'pos';
-$('clickPos').onclick = () => { clickMode = 'pos'; $('clickPos').setAttribute('aria-pressed', 'true'); $('clickPath').setAttribute('aria-pressed', 'false'); };
-$('clickPath').onclick = () => { clickMode = 'path'; $('clickPath').setAttribute('aria-pressed', 'true'); $('clickPos').setAttribute('aria-pressed', 'false'); $('motionCard').open = true; };
-$('map').addEventListener('click', e => {
-  const r = e.target.getBoundingClientRect();
-  const u = Math.round((e.clientX - r.left) / r.width * 1024), v = Math.round((e.clientY - r.top) / r.height * 1024);
+const setClick = m => { clickMode = m; for (const [id, v] of [['clickPos', 'pos'], ['clickAdd', 'add'], ['clickPath', 'path']]) $(id).setAttribute('aria-pressed', m === v ? 'true' : 'false'); };
+$('clickPos').onclick = () => setClick('pos');
+$('clickAdd').onclick = () => setClick('add');
+$('clickPath').onclick = () => { setClick('path'); $('motionCard').open = true; };
+$('map').addEventListener('click', ev => {
+  const r = ev.target.getBoundingClientRect();
+  const u = Math.round((ev.clientX - r.left) / r.width * 1024), v = Math.round((ev.clientY - r.top) / r.height * 1024);
+  if (clickMode === 'add') { addFx(u, v); return; }
   if (clickMode === 'pos') { st.x = u; st.y = v; $('posX').value = u; $('posY').value = v; $('posXOut').textContent = u; $('posYOut').textContent = v; }
   else { const rel = onTile(); st.path.push([rel ? u - st.x : u, rel ? v - st.y : v, +$('ptH').value]); $('path').value = pathText(); buildPath(); }
   resetSim(); update();
 });
 
-// ------------------------------------------------------------------ ligne generee
-function update() {
+// ------------------------------------------------------------------ liste des effets de la scene
+function addFx(u, v) {
+  syncCur();
+  const src = curFx();
+  const s = JSON.parse(JSON.stringify(src.st)); s.x = u; s.y = v;
+  if (!onTileE(src)) s.path = []; // un trajet absolu n'a pas de sens a un autre endroit
+  const e = makeFx(src.type, Object.assign({}, src.P), s);
+  e.map = src.map; e.cond = src.cond; e.tile = src.tile; e.tex = src.tex;
+  effects.push(e); cur = effects.length - 1; loadCur();
+}
+$('fxAdd').onclick = () => { const e = curFx(); addFx(Math.min(1023, e.st.x + 24), e.st.y); };
+$('fxDel').onclick = () => {
+  if (effects.length <= 1) { effects = [makeFx('flame', defaultsFor('flame'), newSt(512, 512))]; cur = 0; loadCur(); return; }
+  effects.splice(cur, 1); cur = Math.min(cur, effects.length - 1); loadCur();
+};
+function renderFxList() {
+  const box = $('fxList'); box.innerHTML = '';
+  effects.forEach((e, i) => {
+    const b = document.createElement('button');
+    b.setAttribute('aria-pressed', i === cur ? 'true' : 'false');
+    const label = (TYPES.find(t => t.id === e.type) || {}).label || e.type;
+    b.innerHTML = `<b>${i + 1}</b> ${label} <span>${onTileE(e) ? 'tile ' + e.tile.toUpperCase() : '(' + e.st.x + ', ' + e.st.y + ')'}${e.st.path.length >= 2 ? ' · trajet' : ''}</span>`;
+    b.onclick = () => selectFx(i);
+    box.appendChild(b);
+  });
+  $('fxCount').textContent = `${effects.length} effet(s)`;
+}
+
+// ------------------------------------------------------------------ lignes generees (une par effet)
+function lineOf(e) {
+  const type = e.type, P = e.P, st = e.st;
   const d = defaultsFor(type);
   const keys = [];
   for (const sp of SCHEMA) {
     if (!sp.t.includes(type)) continue;
-    if (keys.some(k => k.startsWith(sp.k + '='))) continue;
+    if (keys.some(k => k.startsWith((sp.o || sp.k) + '='))) continue;
     if (String(P[sp.k]) !== String(d[sp.k])) keys.push(`${sp.o || sp.k}=${sp.c ? String(P[sp.k]).toUpperCase() : fmt(P[sp.k])}`);
   }
-  if (partTex && PART.includes(type)) keys.push(`texture=${partTex.name.replace(/\//g, '\\')}`);
+  if (e.tex && PART.includes(type)) keys.push(`texture=${e.tex.name.replace(/\//g, '\\')}`);
   if (type !== 'light' && st.path.length >= 2) {
-    keys.push(`path=${pathText()}`);
+    keys.push(`path=${pathTextOf(st)}`);
     if (st.speed !== 32) keys.push(`speed=${st.speed}`);
     if (st.loop !== 'loop') keys.push(`loop=${st.loop}`);
     if (!st.smooth) keys.push('smooth=0');
   }
   if (type !== 'light' && st.bobamp) { keys.push(`bobamp=${fmt(st.bobamp)}`); if (st.bobfreq !== 0.5) keys.push(`bobfreq=${fmt(st.bobfreq)}`); }
   if (type !== 'light' && st.offset) keys.push(`offset=${fmt(st.offset)}`);
-  const map = $('mapHash').value.trim() || '*';
-  const cond = $('cond').value.trim();
-  let anchor = '';
-  const tile = $('tileHash').value.trim();
+  const map = e.map || '*', cond = e.cond, tile = e.tile;
+  const pre = cond ? '[' + cond + ']' : '';
   const needPos = PART.includes(type) || ((type === 'fog' || type === 'magicfog' || type === 'clouds') && P.region > 0) || (type === 'flare' && P.sun != 1);
-  const dxy = onTile() ? (st.dx ? `,dx=${st.dx}` : '') + (st.dy ? `,dy=${st.dy}` : '') : '';
-  if (onTile()) anchor = `,tile=${tile.toUpperCase()}${dxy}`;
-  else if (needPos && !(st.path.length >= 2)) anchor = `,${st.x},${st.y}`;
+  const dxy = onTileE(e) ? (st.dx ? `,dx=${st.dx}` : '') + (st.dy ? `,dy=${st.dy}` : '') : '';
   if (type === 'light') {
-    // <m7light> : carte + x, y ; ou tile= (la carte passe alors par map=)
-    const lk = keys;
-    const head = onTile() ? `tile=${tile.toUpperCase()}${map !== '*' ? ',map=' + map : ''}${dxy}` : `${map},${st.x},${st.y}`;
-    $('out').value = `${cond ? '[' + cond + ']' : ''}<m7light>${head}${lk.length ? ',' + lk.join(',') : ''}`;
-  } else
-  $('out').value = `${cond ? '[' + cond + ']' : ''}<m7Effect>${map},type=${type}${anchor}${keys.length ? ',' + keys.join(',') : ''}`;
-  try { localStorage.setItem('m7fx.state', JSON.stringify({ type, P, st, map, cond, tile, block: $('blockTiles').value, cam: [$('camDist').value, $('camHead').value, $('amb').value] })); } catch (e) {}
+    const head = onTileE(e) ? `tile=${tile.toUpperCase()}${map !== '*' ? ',map=' + map : ''}${dxy}` : `${map},${st.x},${st.y}`;
+    return `${pre}<m7light>${head}${keys.length ? ',' + keys.join(',') : ''}`;
+  }
+  let anchor = '';
+  if (onTileE(e)) anchor = `,tile=${tile.toUpperCase()}${dxy}`;
+  else if (needPos && !(st.path.length >= 2)) anchor = `,${st.x},${st.y}`;
+  return `${pre}<m7Effect>${map},type=${type}${anchor}${keys.length ? ',' + keys.join(',') : ''}`;
 }
+let outEditing = false;
+function update() {
+  syncCur();
+  if (!outEditing) $('out').value = effects.map(lineOf).join('\n');
+  renderFxList();
+  try { localStorage.setItem('m7fx.state', JSON.stringify(getPresetState())); } catch (e) {}
+}
+// effacer une ligne dans la zone de texte supprime l'effet correspondant
+$('out').addEventListener('focus', () => { outEditing = true; });
+$('out').addEventListener('input', () => {
+  clearTimeout(update.e);
+  update.e = setTimeout(() => {
+    const lines = new Set($('out').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean));
+    syncCur();
+    const keep = effects.filter(e => lines.has(lineOf(e)));
+    if (keep.length === effects.length) return;
+    const curId = curFx().id;
+    effects = keep.length ? keep : [makeFx('flame', defaultsFor('flame'), newSt(512, 512))];
+    cur = Math.max(0, effects.findIndex(e => e.id === curId));
+    loadCur();
+    $('copyMsg').textContent = `${effects.length} effet(s) gardé(s)`;
+  }, 500);
+});
+$('out').addEventListener('blur', () => { outEditing = false; update(); });
 $('copyBtn').onclick = async () => {
   const t = $('out');
   try { await navigator.clipboard.writeText(t.value); $('copyMsg').textContent = 'Copié'; }
@@ -607,76 +710,74 @@ $('copyBtn').onclick = async () => {
   clearTimeout(update.m); update.m = setTimeout(() => $('copyMsg').textContent = '', 2500);
 };
 
-// ------------------------------------------------------------------ rendu
+// ------------------------------------------------------------------ rendu (tous les effets de la scene)
 const img = ctx.createImageData(W, H), buf = img.data;
 const gu = new Float32Array(W * H), gv = new Float32Array(W * H), gd = new Float32Array(W * H);
-let heading = 0, last = performance.now(), flareVis = 0;
+let heading = 0, last = performance.now();
 const col = [0, 0, 0];
+function lightOfE(e, tA) { // lumiere automatique de la flamme, ou <m7light>
+  const P = e.P, [eu, ev, eh] = e.pos, sx = e.st.x * 0.13 + e.st.y * 0.07;
+  if (e.type === 'flame' && P.light == 1) {
+    const n = 0.6 * Math.sin(tA * 9 + sx) + 0.4 * Math.sin(tA * 9 * 2.31 + sx * 1.7);
+    const k = P.lightintensity * (1 - P.lightflicker * (0.5 + 0.5 * n)) / 255, c = hexRGB(P.lightcolor);
+    return { u: eu, v: ev, h2: Math.pow(eh + P.sizestart * 1.5, 2), r2: P.lightradius * P.lightradius, cr: c[0] * k, cg: c[1] * k, cb: c[2] * k, add: false };
+  }
+  if (e.type === 'light') {
+    const n = 0.6 * Math.sin(tA * P.l_speed + sx) + 0.4 * Math.sin(tA * P.l_speed * 2.31 + sx * 1.7);
+    const k = P.l_intensity * (P.l_flicker > 0 ? 1 - P.l_flicker * (0.5 + 0.5 * n) : 1) / 255, c = hexRGB(P.l_color);
+    let cr = c[0] * k, cg = c[1] * k, cb = c[2] * k;
+    if (P.l_mode === 'shadow') { cr = -(255 - c[0]) * k; cg = -(255 - c[1]) * k; cb = -(255 - c[2]) * k; }
+    return { u: baseXE(e), v: baseYE(e), h2: P.l_height * P.l_height, r2: P.l_radius * P.l_radius, cr, cg, cb, add: P.l_mode === 'add' };
+  }
+  return null;
+}
 function frame(now) {
   const dt = Math.max(0, Math.min(0.1, (now - last) / 1000)); last = now;
   simT += dt;
   if ($('orbit').checked) { heading += dt * 0.25; $('camHead').value = Math.round(((heading * 57.2958) % 360 + 360) % 360); $('camHeadOut').textContent = $('camHead').value + '°'; }
   else heading = +$('camHead').value / 57.2958;
-  const amb = +$('amb').value;
-  const tA = simT;
-  const [eu, ev, eh] = effectPos(tA);
-  const [tu, tv] = $('follow').checked ? [eu, ev] : pathCenter();
+  const amb = +$('amb').value, tA = simT, repeat = $('repeatMap').checked;
+  for (const e of effects) e.pos = effectPosE(e, tA);
+  const ce = curFx();
+  const [tu, tv] = $('follow').checked ? ce.pos : pathCenterE(ce);
   const Fx = Math.cos(heading), Fy = Math.sin(heading), Rx = -Fy, Ry = Fx;
   const dist = +$('camDist').value;
   const Cu = tu - Fx * dist, Cv = tv - Fy * dist;
   const proj = (u, v, h) => { const D = (u - Cu) * Fx + (v - Cv) * Fy; if (D < 1) return null; const L = (u - Cu) * Rx + (v - Cv) * Ry; const ppt = FOC / D; return [CX + L * ppt, HZ + (CAMH - h) * ppt, ppt, D]; };
-
-  // lumiere automatique de la flamme (= <m7light> : multiplie, vacille)
-  let light = null;
-  if (type === 'flame' && P.light == 1) {
-    const n = 0.6 * Math.sin(tA * 9 + st.x * 0.13 + st.y * 0.07) + 0.4 * Math.sin(tA * 9 * 2.31 + (st.x * 0.13 + st.y * 0.07) * 1.7);
-    const k = P.lightintensity * (1 - P.lightflicker * (0.5 + 0.5 * n)) / 255;
-    const c = hexRGB(P.lightcolor);
-    light = { u: eu, v: ev, h2: Math.pow(eh + P.sizestart * 1.5, 2), r2: P.lightradius * P.lightradius, cr: c[0] * k, cg: c[1] * k, cb: c[2] * k };
-  }
-  let addLight = false;
-  if (type === 'light') {
-    const n = 0.6 * Math.sin(tA * P.l_speed + st.x * 0.13 + st.y * 0.07) + 0.4 * Math.sin(tA * P.l_speed * 2.31 + (st.x * 0.13 + st.y * 0.07) * 1.7);
-    const k = P.l_intensity * (P.l_flicker > 0 ? 1 - P.l_flicker * (0.5 + 0.5 * n) : 1) / 255;
-    const c = hexRGB(P.l_color);
-    let cr = c[0] * k, cg = c[1] * k, cb = c[2] * k;
-    if (P.l_mode === 'shadow') { cr = -(255 - c[0]) * k; cg = -(255 - c[1]) * k; cb = -(255 - c[2]) * k; }
-    addLight = P.l_mode === 'add';
-    light = { u: baseX(), v: baseY(), h2: P.l_height * P.l_height, r2: P.l_radius * P.l_radius, cr, cg, cb };
-  }
+  const lights = effects.map(e => lightOfE(e, tA)).filter(Boolean);
+  const shade = (u, v, o) => {
+    let mr = amb, mg = amb, mb = amb, ar = 0, ag = 0, ab = 0;
+    for (const l of lights) { const du = u - l.u, dv = v - l.v, d2 = du * du + dv * dv + l.h2; if (d2 >= l.r2) continue; let a = 1 - d2 / l.r2; a *= a;
+      if (l.add) { ar += l.cr * a * 255; ag += l.cg * a * 255; ab += l.cb * a * 255; } else { mr += l.cr * a; mg += l.cg * a; mb += l.cb * a; } }
+    o[0] = Math.min(255, o[0] * Math.max(0, mr) + ar); o[1] = Math.min(255, o[1] * Math.max(0, mg) + ag); o[2] = Math.min(255, o[2] * Math.max(0, mb) + ab);
+  };
   // ciel
   for (let y = 0; y <= HZ; y++) { const t = y / HZ, r = 110 + 80 * t, g = 165 + 55 * t, b = 225 + 20 * t;
     for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; buf[i] = r; buf[i + 1] = g; buf[i + 2] = b; buf[i + 3] = 255; } }
-  // sol
+  // sol (carte repetee, ou non : hors de la carte = sombre, comme une piste qui ne se repete pas)
   for (let y = HZ + 1; y < H; y++) {
     const D = CAMH * FOC / (y - HZ);
     for (let x = 0; x < W; x++) {
       const L = (x - CX) * D / FOC, u = Cu + Fx * D + Rx * L, v = Cv + Fy * D + Ry * L, j = y * W + x;
       gu[j] = u; gv[j] = v; gd[j] = D;
-      if (groundTex) { const k = ((Math.floor(v) & 1023) * 1024 + (Math.floor(u) & 1023)) * 4; col[0] = groundTex[k]; col[1] = groundTex[k + 1]; col[2] = groundTex[k + 2]; }
+      if (!repeat && (u < 0 || v < 0 || u >= 1024 || v >= 1024)) { col[0] = 16; col[1] = 16; col[2] = 20; }
+      else if (groundTex) { const k = ((Math.floor(v) & 1023) * 1024 + (Math.floor(u) & 1023)) * 4; col[0] = groundTex[k]; col[1] = groundTex[k + 1]; col[2] = groundTex[k + 2]; }
       else demoGround(u, v, col);
-      let mr = amb, mg = amb, mb = amb;
-      let ar = 0, ag = 0, ab = 0;
-      if (light) { const du = u - light.u, dv = v - light.v, d2 = du * du + dv * dv + light.h2; if (d2 < light.r2) { let a = 1 - d2 / light.r2; a *= a;
-        if (addLight) { ar = light.cr * a * 255; ag = light.cg * a * 255; ab = light.cb * a * 255; } else { mr += light.cr * a; mg += light.cg * a; mb += light.cb * a; } } }
-      const i = j * 4; buf[i] = Math.min(255, col[0] * Math.max(0, mr) + ar); buf[i + 1] = Math.min(255, col[1] * Math.max(0, mg) + ag); buf[i + 2] = Math.min(255, col[2] * Math.max(0, mb) + ab); buf[i + 3] = 255;
+      if (lights.length || amb !== 1) shade(u, v, col);
+      const i = j * 4; buf[i] = col[0]; buf[i + 1] = col[1]; buf[i + 2] = col[2]; buf[i + 3] = 255;
     }
   }
   // tiles Mode 7 du bloc + relief (= renderReliefBand : par colonne, du bas vers l'horizon, sommet = ligne - hauteur x ppt)
   if (block) {
-    const lightAt = (u, v, o) => { let mr = amb, mg = amb, mb = amb, ar = 0, ag = 0, ab = 0;
-      if (light) { const du = u - light.u, dv = v - light.v, d2 = du * du + dv * dv + light.h2; if (d2 < light.r2) { let a = 1 - d2 / light.r2; a *= a;
-        if (addLight) { ar = light.cr * a * 255; ag = light.cg * a * 255; ab = light.cb * a * 255; } else { mr += light.cr * a; mg += light.cg * a; mb += light.cb * a; } } }
-      o[0] = Math.min(255, o[0] * Math.max(0, mr) + ar); o[1] = Math.min(255, o[1] * Math.max(0, mg) + ag); o[2] = Math.min(255, o[2] * Math.max(0, mb) + ab); };
     const tc = [0, 0, 0];
     for (let x = 0; x < W; x++) {
-      let ceil = H; // plus haute ligne deja remplie dans la colonne
+      let ceil = H;
       for (let y = H - 1; y > HZ; y--) {
         const j = y * W + x, b = blockAt(gu[j], gv[j]); if (!b) continue;
         const hgt = b.c.height, D = gd[j], ppt = FOC / D;
         tc[0] = b.c.data[b.k]; tc[1] = b.c.data[b.k + 1]; tc[2] = b.c.data[b.k + 2];
         if (b.c.data[b.k + 3] < 8) continue;
-        lightAt(gu[j], gv[j], tc);
+        shade(gu[j], gv[j], tc);
         const top = Math.max(0, Math.round(y - hgt * ppt));
         for (let yy = Math.min(y, ceil - 1); yy >= top; yy--) {
           const i = (yy * W + x) * 4, side = yy > top && hgt > 0 ? 0.7 : 1;
@@ -686,166 +787,258 @@ function frame(now) {
       }
     }
   }
-  // particules
-  if (PART.includes(type)) {
-    if (!em) { em = newEmitter(); const pre = Math.min(P.lifemax * 60, 600); for (let s = 0; s < pre; s++) step(em, 1 / 60, eu, ev, eh - (P.elevation || 0)); }
-    step(em, dt, eu, ev, eh - (P.elevation || 0));
-    const c0 = hexRGB(P.color0), c1 = hexRGB(P.color1), c2 = hexRGB(P.color2), add = P.blend === 'additive';
-    const list = [];
-    for (const p of em.parts) {
-      const q = proj(p.du, p.dv, (P.elevation || 0) + p.h); if (!q) continue;
-      const D = q[3]; if (D < 2) continue;
-      const t = p.age / p.life;
-      let a = P.alphastart + (P.alphaend - P.alphastart) * t;
-      if (P.fadein > 0 && t < P.fadein) a *= t / P.fadein;
-      if (P.nearfade > 0 && D < P.nearfade) a *= D / P.nearfade;
-      let sz = p.size * (P.sizestart + (P.sizeend - P.sizestart) * t) * q[2];
-      if (sz <= 0) continue;
-      if (sz < P.minpixelsize) { a *= sz / P.minpixelsize; sz = P.minpixelsize; }
-      if (a <= 0.003) continue;
-      const ca = t < 0.5 ? c0 : c1, cb = t < 0.5 ? c1 : c2, f = t < 0.5 ? t * 2 : (t - 0.5) * 2;
-      list.push({ x: q[0], y: q[1], hw: sz / 2, a: Math.min(1, a), D, r: ca[0] + (cb[0] - ca[0]) * f, g: ca[1] + (cb[1] - ca[1]) * f, b: ca[2] + (cb[2] - ca[2]) * f });
-    }
-    list.sort((A, B) => B.D - A.D);
-    const T = partTex;
-    for (const d of list) {
-      const hh = T ? d.hw * T.h / T.w : d.hw;
-      const x0 = Math.max(0, Math.floor(d.x - d.hw)), x1 = Math.min(W - 1, Math.ceil(d.x + d.hw)), y0 = Math.max(0, Math.floor(d.y - hh)), y1 = Math.min(H - 1, Math.ceil(d.y + hh));
-      for (let y = y0; y <= y1; y++) { const dy = y + 0.5 - d.y;
-        for (let x = x0; x <= x1; x++) { const dx = x + 0.5 - d.x;
-          let sa, sr = 255, sg = 255, sb = 255;
-          if (T) { const iu = Math.floor((dx / d.hw * 0.5 + 0.5) * T.w), iv = Math.floor((dy / hh * 0.5 + 0.5) * T.h); if (iu < 0 || iv < 0 || iu >= T.w || iv >= T.h) continue; const k = (iv * T.w + iu) * 4; sa = T.d[k + 3] / 255; if (sa <= 0.002) continue; sr = T.d[k]; sg = T.d[k + 1]; sb = T.d[k + 2]; }
-          else { const dd = Math.hypot(dx, dy) / d.hw; if (dd >= 1) continue; const s = 1 - dd * dd; sa = s * s; }
-          const aa = sa * d.a; if (aa < 0.004) continue;
-          const i = (y * W + x) * 4, cr = sr * d.r / 255, cg = sg * d.g / 255, cb = sb * d.b / 255;
-          if (add) { buf[i] = Math.min(255, buf[i] + cr * aa); buf[i + 1] = Math.min(255, buf[i + 1] + cg * aa); buf[i + 2] = Math.min(255, buf[i + 2] + cb * aa); }
-          else { buf[i] += (cr - buf[i]) * aa; buf[i + 1] += (cg - buf[i + 1]) * aa; buf[i + 2] += (cb - buf[i + 2]) * aa; }
-        } }
-    }
-  }
-  // atmosphere (= evalPoint du filtre)
-  if (type === 'fog' || type === 'magicfog' || type === 'clouds') {
-    const c0 = hexRGB(P.color0), c1 = hexRGB(P.color1);
-    const Ru = eu, Rv = ev;
-    const nc = Math.max(4, Math.min(128, Math.round(5000 / P.scale)));
-    for (let y = 0; y < H; y++) {
-      const sky = y <= HZ, skyRel = sky ? (HZ - y) / HZ : 0, skyRows = (HZ - y) / S;
-      for (let x = 0; x < W; x++) {
-        const j = y * W + x, i = j * 4;
-        let M = 1, A0 = 0, A1 = 0, A2 = 0;
-        const lerpTo = (k, r, g, b) => { M *= 1 - k; A0 = A0 * (1 - k) + r * k; A1 = A1 * (1 - k) + g * k; A2 = A2 * (1 - k) + b * k; };
-        const u = gu[j], v = gv[j], D = gd[j];
-        let regionW = 1;
-        if (!sky && P.region > 0) { const du = u - Ru, dv = v - Rv, d2 = du * du + dv * dv; if (d2 >= P.region * P.region) continue; regionW = Math.max(0, Math.min(1, (P.region - Math.sqrt(d2)) / (P.region * 0.3))); }
-        let Mr = 1, Mg = 1, Mb = 1;
-        if (type === 'fog') {
-          let f;
-          if (sky) { if (P.region > 0) continue; f = P.density * P.sky * (1 - 0.5 * skyRel); }
-          else { const fd = Math.max(0, Math.min(1, (D - P.start) / Math.max(1, P.end - P.start))) * P.density; let fn = 0;
-            if (P.patches > 0) { const n = fbm((u + tA * P.windx) / P.scale, (v + tA * P.windy) / P.scale, 0); fn = P.patches * smooth01(0.35, 0.85, n); }
-            f = Math.max(0, Math.min(1, fd + (1 - fd) * fn * 0.75)) * regionW; }
-          if (f > 0.001) lerpTo(f, c0[0], c0[1], c0[2]);
-        } else if (type === 'magicfog') {
-          if (sky) continue;
-          const n = fbm((u + tA * P.windx) / P.scale, (v + tA * P.windy) / P.scale, 0);
-          const pulse = 0.75 + 0.25 * Math.sin(6.2831853 * P.pulse * tA + n * 4);
-          const gl = P.intensity * P.patches * smooth01(0.3, 0.85, n) * regionW * pulse;
-          if (gl <= 0.001) continue;
-          const m = 0.5 + 0.5 * Math.sin(tA * 0.7 + n * 6);
-          A0 += (c0[0] + (c1[0] - c0[0]) * m) * gl; A1 += (c0[1] + (c1[1] - c0[1]) * m) * gl; A2 += (c0[2] + (c1[2] - c0[2]) * m) * gl;
-        } else {
-          if (sky) {
-            if (P.sky <= 0 || skyRel > P.skyheight) continue;
-            const colAng = heading + Math.atan((x + 0.5 - CX) / FOC);
-            const su = colAng / 6.2831853 * nc + tA * P.windx * 0.002 * nc, sv = skyRows / (P.scale * 0.12);
-            const n = fbm(su, sv, nc);
-            let cov = smooth01(1 - P.coverage - 0.12, 1 - P.coverage + 0.12, n);
-            cov *= Math.max(0, Math.min(1, skyRel * 6)) * Math.max(0, Math.min(1, (P.skyheight - skyRel) * 8)) * P.sky;
-            const sh = 0.82 + 0.18 * n;
-            if (cov > 0.001) lerpTo(cov * 0.9, c0[0] * sh, c0[1] * sh, c0[2] * sh);
-          } else if (P.shadow > 0) {
-            const n = fbm((u + tA * P.windx) / P.scale, (v + tA * P.windy) / P.scale, 0);
-            const k = 1 - P.shadow * smooth01(1 - P.coverage - 0.12, 1 - P.coverage + 0.12, n) * regionW;
-            M *= k; A0 *= k; A1 *= k; A2 *= k;
-          }
-        }
-        buf[i] = Math.max(0, Math.min(255, buf[i] * M + A0)); buf[i + 1] = Math.max(0, Math.min(255, buf[i + 1] * M + A1)); buf[i + 2] = Math.max(0, Math.min(255, buf[i + 2] * M + A2));
-      }
-    }
-  }
-  // reflet de lentille (= passe flare du filtre)
-  if (type === 'flare') {
-    let sx = 0, sy = 0, vis = false;
-    if (P.sun == 1) { const az = P.sunaz * 0.01745329, el = P.sunel * 0.01745329, dx = Math.cos(az), dy = Math.sin(az), dF = dx * Fx + dy * Fy;
-      if (dF > 0.05) { sx = CX + (dx * Rx + dy * Ry) / dF * FOC; sy = HZ - Math.tan(el) / dF * FOC; vis = sy < HZ; } }
-    else { const q = proj(eu, ev, eh); if (q && q[3] > 2) { sx = q[0]; sy = q[1]; vis = true; } }
-    const target = vis && sx >= 0 && sx < W && sy >= 0 && sy < H ? 1 : 0;
-    flareVis += (target - flareVis) * 0.35;
-    if (flareVis > 0.01 && vis) {
-      const c = hexRGB(P.color0).map(v => v / 255), R = P.flaresize * S, inten = P.intensity * flareVis;
-      const addGlow = (cx, cy, rad, cr, cg, cb, it, ring) => {
-        if (rad < 1 || it <= 0.002) return;
-        for (let y = Math.max(0, Math.floor(cy - rad)); y <= Math.min(H - 1, Math.ceil(cy + rad)); y++)
-          for (let x = Math.max(0, Math.floor(cx - rad)); x <= Math.min(W - 1, Math.ceil(cx + rad)); x++) {
-            const dx = (x + 0.5 - cx) / rad, dy = (y + 0.5 - cy) / rad, d = Math.hypot(dx, dy); if (d >= 1) continue;
-            let k; if (ring) { const e = (d - 0.8) / 0.12; k = Math.exp(-e * e); } else { k = (1 - d); k *= k; }
-            k *= it * 255; const i = (y * W + x) * 4;
-            buf[i] = Math.min(255, buf[i] + cr * k); buf[i + 1] = Math.min(255, buf[i + 1] + cg * k); buf[i + 2] = Math.min(255, buf[i + 2] + cb * k);
-          }
-      };
-      addGlow(sx, sy, R, c[0], c[1], c[2], inten, false);
-      addGlow(sx, sy, R * 0.35, 1, 1, 1, inten * 0.8, false);
-      if (P.streak > 0) { const half = R * 3, th = Math.max(1, R * 0.05);
-        for (let y = Math.max(0, Math.floor(sy - th * 2)); y <= Math.min(H - 1, Math.ceil(sy + th * 2)); y++) { const fy = 1 - Math.min(1, Math.abs(y + 0.5 - sy) / (th * 2));
-          for (let x = Math.max(0, Math.floor(sx - half)); x <= Math.min(W - 1, Math.ceil(sx + half)); x++) { const fxv = 1 - Math.abs(x + 0.5 - sx) / half; if (fxv <= 0) continue;
-            const k = P.streak * inten * fxv * fxv * fy * 160, i = (y * W + x) * 4;
-            buf[i] = Math.min(255, buf[i] + c[0] * k); buf[i + 1] = Math.min(255, buf[i + 1] + c[1] * k); buf[i + 2] = Math.min(255, buf[i + 2] + c[2] * k); } } }
-      if (P.ghosts > 0) {
-        const kG = [[0.55, 0.20, 1.0, 0.6, 0.3, 0], [0.90, 0.10, 0.4, 1.0, 0.5, 0], [1.25, 0.32, 0.5, 0.6, 1.0, 1], [1.60, 0.14, 1.0, 0.4, 0.8, 0], [2.10, 0.45, 0.4, 0.9, 1.0, 1]];
-        const ccx = W / 2, ccy = H / 2;
-        for (const g of kG) addGlow(sx + (ccx - sx) * g[0], sy + (ccy - sy) * g[0], R * g[1] * 2, g[2] * c[0], g[3] * c[1], g[4] * c[2], 0.18 * P.ghosts * inten, g[5] > 0.5);
-      }
-    }
-  }
+  for (const e of effects) if (PART.includes(e.type)) drawParticles(e, dt, proj);
+  for (const e of effects) if (e.type === 'fog' || e.type === 'magicfog' || e.type === 'clouds') drawAtmo(e, tA);
+  for (const e of effects) if (e.type === 'flare') drawFlare(e, proj, Fx, Fy, Rx, Ry);
   ctx.putImageData(img, 0, 0);
-  drawMap(eu, ev, Cu, Cv, Fx, Fy);
+  drawMap(Cu, Cv, Fx, Fy);
   requestAnimationFrame(frame);
 }
+function drawParticles(e, dt, proj) {
+  const P = e.P, [eu, ev, eh] = e.pos;
+  if (!e.em) { e.em = newEmitter(); const pre = Math.min(P.lifemax * 60, 600); for (let s = 0; s < pre; s++) stepP(P, e.em, 1 / 60, eu, ev, eh - (P.elevation || 0)); }
+  stepP(P, e.em, dt, eu, ev, eh - (P.elevation || 0));
+  const c0 = hexRGB(P.color0), c1 = hexRGB(P.color1), c2 = hexRGB(P.color2), add = P.blend === 'additive';
+  const list = [];
+  for (const p of e.em.parts) {
+    const q = proj(p.du, p.dv, (P.elevation || 0) + p.h); if (!q) continue;
+    const D = q[3]; if (D < 2) continue;
+    const t = p.age / p.life;
+    let a = P.alphastart + (P.alphaend - P.alphastart) * t;
+    if (P.fadein > 0 && t < P.fadein) a *= t / P.fadein;
+    if (P.nearfade > 0 && D < P.nearfade) a *= D / P.nearfade;
+    let sz = p.size * (P.sizestart + (P.sizeend - P.sizestart) * t) * q[2];
+    if (sz <= 0) continue;
+    if (sz < P.minpixelsize) { a *= sz / P.minpixelsize; sz = P.minpixelsize; }
+    if (a <= 0.003) continue;
+    const ca = t < 0.5 ? c0 : c1, cb = t < 0.5 ? c1 : c2, f = t < 0.5 ? t * 2 : (t - 0.5) * 2;
+    list.push({ x: q[0], y: q[1], hw: sz / 2, a: Math.min(1, a), D, r: ca[0] + (cb[0] - ca[0]) * f, g: ca[1] + (cb[1] - ca[1]) * f, b: ca[2] + (cb[2] - ca[2]) * f });
+  }
+  list.sort((A, B) => B.D - A.D);
+  const T = e.tex;
+  for (const d of list) {
+    const hh = T ? d.hw * T.h / T.w : d.hw;
+    const x0 = Math.max(0, Math.floor(d.x - d.hw)), x1 = Math.min(W - 1, Math.ceil(d.x + d.hw)), y0 = Math.max(0, Math.floor(d.y - hh)), y1 = Math.min(H - 1, Math.ceil(d.y + hh));
+    for (let y = y0; y <= y1; y++) { const dy = y + 0.5 - d.y;
+      for (let x = x0; x <= x1; x++) { const dx = x + 0.5 - d.x;
+        let sa, sr = 255, sg = 255, sb = 255;
+        if (T) { const iu = Math.floor((dx / d.hw * 0.5 + 0.5) * T.w), iv = Math.floor((dy / hh * 0.5 + 0.5) * T.h); if (iu < 0 || iv < 0 || iu >= T.w || iv >= T.h) continue; const k = (iv * T.w + iu) * 4; sa = T.d[k + 3] / 255; if (sa <= 0.002) continue; sr = T.d[k]; sg = T.d[k + 1]; sb = T.d[k + 2]; }
+        else { const dd = Math.hypot(dx, dy) / d.hw; if (dd >= 1) continue; const s = 1 - dd * dd; sa = s * s; }
+        const aa = sa * d.a; if (aa < 0.004) continue;
+        const i = (y * W + x) * 4, cr = sr * d.r / 255, cg = sg * d.g / 255, cb = sb * d.b / 255;
+        if (add) { buf[i] = Math.min(255, buf[i] + cr * aa); buf[i + 1] = Math.min(255, buf[i + 1] + cg * aa); buf[i + 2] = Math.min(255, buf[i + 2] + cb * aa); }
+        else { buf[i] += (cr - buf[i]) * aa; buf[i + 1] += (cg - buf[i + 1]) * aa; buf[i + 2] += (cb - buf[i + 2]) * aa; }
+      } }
+  }
+}
+function drawAtmo(e, tA) { // = evalPoint du filtre
+  const P = e.P, type = e.type, [Ru, Rv] = e.pos;
+  const c0 = hexRGB(P.color0), c1 = hexRGB(P.color1);
+  const nc = Math.max(4, Math.min(128, Math.round(5000 / P.scale)));
+  for (let y = 0; y < H; y++) {
+    const sky = y <= HZ, skyRel = sky ? (HZ - y) / HZ : 0, skyRows = (HZ - y) / S;
+    for (let x = 0; x < W; x++) {
+      const j = y * W + x, i = j * 4;
+      let M = 1, A0 = 0, A1 = 0, A2 = 0;
+      const lerpTo = (k, r, g, b) => { M *= 1 - k; A0 = A0 * (1 - k) + r * k; A1 = A1 * (1 - k) + g * k; A2 = A2 * (1 - k) + b * k; };
+      const u = gu[j], v = gv[j], D = gd[j];
+      let regionW = 1;
+      if (!sky && P.region > 0) { const du = u - Ru, dv = v - Rv, d2 = du * du + dv * dv; if (d2 >= P.region * P.region) continue; regionW = Math.max(0, Math.min(1, (P.region - Math.sqrt(d2)) / (P.region * 0.3))); }
+      if (type === 'fog') {
+        let f;
+        if (sky) { if (P.region > 0) continue; f = P.density * P.sky * (1 - 0.5 * skyRel); }
+        else { const fd = Math.max(0, Math.min(1, (D - P.start) / Math.max(1, P.end - P.start))) * P.density; let fn = 0;
+          if (P.patches > 0) { const n = fbm((u + tA * P.windx) / P.scale, (v + tA * P.windy) / P.scale, 0); fn = P.patches * smooth01(0.35, 0.85, n); }
+          f = Math.max(0, Math.min(1, fd + (1 - fd) * fn * 0.75)) * regionW; }
+        if (f > 0.001) lerpTo(f, c0[0], c0[1], c0[2]);
+      } else if (type === 'magicfog') {
+        if (sky) continue;
+        const n = fbm((u + tA * P.windx) / P.scale, (v + tA * P.windy) / P.scale, 0);
+        const pulse = 0.75 + 0.25 * Math.sin(6.2831853 * P.pulse * tA + n * 4);
+        const gl = P.intensity * P.patches * smooth01(0.3, 0.85, n) * regionW * pulse;
+        if (gl <= 0.001) continue;
+        const m = 0.5 + 0.5 * Math.sin(tA * 0.7 + n * 6);
+        A0 += (c0[0] + (c1[0] - c0[0]) * m) * gl; A1 += (c0[1] + (c1[1] - c0[1]) * m) * gl; A2 += (c0[2] + (c1[2] - c0[2]) * m) * gl;
+      } else {
+        if (sky) {
+          if (P.sky <= 0 || skyRel > P.skyheight) continue;
+          const colAng = heading + Math.atan((x + 0.5 - CX) / FOC);
+          const su = colAng / 6.2831853 * nc + tA * P.windx * 0.002 * nc, sv = skyRows / (P.scale * 0.12);
+          const n = fbm(su, sv, nc);
+          let cov = smooth01(1 - P.coverage - 0.12, 1 - P.coverage + 0.12, n);
+          cov *= Math.max(0, Math.min(1, skyRel * 6)) * Math.max(0, Math.min(1, (P.skyheight - skyRel) * 8)) * P.sky;
+          const sh = 0.82 + 0.18 * n;
+          if (cov > 0.001) lerpTo(cov * 0.9, c0[0] * sh, c0[1] * sh, c0[2] * sh);
+        } else if (P.shadow > 0) {
+          const n = fbm((u + tA * P.windx) / P.scale, (v + tA * P.windy) / P.scale, 0);
+          const k = 1 - P.shadow * smooth01(1 - P.coverage - 0.12, 1 - P.coverage + 0.12, n) * regionW;
+          M *= k; A0 *= k; A1 *= k; A2 *= k;
+        }
+      }
+      buf[i] = Math.max(0, Math.min(255, buf[i] * M + A0)); buf[i + 1] = Math.max(0, Math.min(255, buf[i + 1] * M + A1)); buf[i + 2] = Math.max(0, Math.min(255, buf[i + 2] * M + A2));
+    }
+  }
+}
+function drawFlare(e, proj, Fx, Fy, Rx, Ry) { // = passe flare du filtre
+  const P = e.P, [eu, ev, eh] = e.pos;
+  let sx = 0, sy = 0, vis = false;
+  if (P.sun == 1) { const az = P.sunaz * 0.01745329, el = P.sunel * 0.01745329, dx = Math.cos(az), dy = Math.sin(az), dF = dx * Fx + dy * Fy;
+    if (dF > 0.05) { sx = CX + (dx * Rx + dy * Ry) / dF * FOC; sy = HZ - Math.tan(el) / dF * FOC; vis = sy < HZ; } }
+  else { const q = proj(eu, ev, eh); if (q && q[3] > 2) { sx = q[0]; sy = q[1]; vis = true; } }
+  const target = vis && sx >= 0 && sx < W && sy >= 0 && sy < H ? 1 : 0;
+  e.flareVis += (target - e.flareVis) * 0.35;
+  if (e.flareVis <= 0.01 || !vis) return;
+  const c = hexRGB(P.color0).map(v => v / 255), R = P.flaresize * S, inten = P.intensity * e.flareVis;
+  const addGlow = (cx, cy, rad, cr, cg, cb, it, ring) => {
+    if (rad < 1 || it <= 0.002) return;
+    for (let y = Math.max(0, Math.floor(cy - rad)); y <= Math.min(H - 1, Math.ceil(cy + rad)); y++)
+      for (let x = Math.max(0, Math.floor(cx - rad)); x <= Math.min(W - 1, Math.ceil(cx + rad)); x++) {
+        const dx = (x + 0.5 - cx) / rad, dy = (y + 0.5 - cy) / rad, d = Math.hypot(dx, dy); if (d >= 1) continue;
+        let k; if (ring) { const q = (d - 0.8) / 0.12; k = Math.exp(-q * q); } else { k = (1 - d); k *= k; }
+        k *= it * 255; const i = (y * W + x) * 4;
+        buf[i] = Math.min(255, buf[i] + cr * k); buf[i + 1] = Math.min(255, buf[i + 1] + cg * k); buf[i + 2] = Math.min(255, buf[i + 2] + cb * k);
+      }
+  };
+  addGlow(sx, sy, R, c[0], c[1], c[2], inten, false);
+  addGlow(sx, sy, R * 0.35, 1, 1, 1, inten * 0.8, false);
+  if (P.streak > 0) { const half = R * 3, th = Math.max(1, R * 0.05);
+    for (let y = Math.max(0, Math.floor(sy - th * 2)); y <= Math.min(H - 1, Math.ceil(sy + th * 2)); y++) { const fy = 1 - Math.min(1, Math.abs(y + 0.5 - sy) / (th * 2));
+      for (let x = Math.max(0, Math.floor(sx - half)); x <= Math.min(W - 1, Math.ceil(sx + half)); x++) { const fxv = 1 - Math.abs(x + 0.5 - sx) / half; if (fxv <= 0) continue;
+        const k = P.streak * inten * fxv * fxv * fy * 160, i = (y * W + x) * 4;
+        buf[i] = Math.min(255, buf[i] + c[0] * k); buf[i + 1] = Math.min(255, buf[i + 1] + c[1] * k); buf[i + 2] = Math.min(255, buf[i + 2] + c[2] * k); } } }
+  if (P.ghosts > 0) {
+    const kG = [[0.55, 0.20, 1.0, 0.6, 0.3, 0], [0.90, 0.10, 0.4, 1.0, 0.5, 0], [1.25, 0.32, 0.5, 0.6, 1.0, 1], [1.60, 0.14, 1.0, 0.4, 0.8, 0], [2.10, 0.45, 0.4, 0.9, 1.0, 1]];
+    for (const g of kG) addGlow(sx + (W / 2 - sx) * g[0], sy + (H / 2 - sy) * g[0], R * g[1] * 2, g[2] * c[0], g[3] * c[1], g[4] * c[2], 0.18 * P.ghosts * inten, g[5] > 0.5);
+  }
+}
 
-// ------------------------------------------------------------------ carte vue de dessus
+// ------------------------------------------------------------------ carte vue de dessus (tous les effets)
 const mctx = $('map').getContext('2d');
-function drawMap(eu, ev, Cu, Cv, Fx, Fy) {
+function drawMap(Cu, Cv, Fx, Fy) {
   const k = 200 / 1024;
+  mctx.fillStyle = '#101214'; mctx.fillRect(0, 0, 200, 200); // fond : les zones transparentes de la piste ne gardent plus les anciens traces
   mctx.drawImage(mapThumb, 0, 0, 200, 200);
   const css = getComputedStyle(document.documentElement);
   const acc = css.getPropertyValue('--accent').trim() || '#0E7C86', warm = css.getPropertyValue('--warm').trim() || '#C2550F';
-  if (P.region > 0 && (type === 'fog' || type === 'magicfog' || type === 'clouds')) { mctx.strokeStyle = acc; mctx.setLineDash([4, 3]); mctx.beginPath(); mctx.arc(eu * k, ev * k, P.region * k, 0, 6.283); mctx.stroke(); mctx.setLineDash([]); }
-  if (poly.length > 1) { mctx.strokeStyle = warm; mctx.lineWidth = 1.5; mctx.beginPath();
-    const off = onTile() ? [st.x, st.y] : [0, 0];
-    poly.forEach((p, i) => { const x = (p[0] + off[0]) * k, y = (p[1] + off[1]) * k; i ? mctx.lineTo(x, y) : mctx.moveTo(x, y); }); mctx.stroke();
-    mctx.fillStyle = warm; for (const p of st.path) { mctx.fillRect((p[0] + off[0]) * k - 2, (p[1] + off[1]) * k - 2, 4, 4); } }
-  mctx.fillStyle = '#fff'; mctx.strokeStyle = '#000'; mctx.lineWidth = 1;
-  mctx.beginPath(); mctx.arc(eu * k, ev * k, 4, 0, 6.283); mctx.fill(); mctx.stroke();
-  // camera
+  effects.forEach((e, idx) => {
+    const isCur = idx === cur, [eu, ev] = e.pos;
+    if (e.P.region > 0 && (e.type === 'fog' || e.type === 'magicfog' || e.type === 'clouds')) { mctx.strokeStyle = acc; mctx.setLineDash([4, 3]); mctx.beginPath(); mctx.arc(eu * k, ev * k, e.P.region * k, 0, 6.283); mctx.stroke(); mctx.setLineDash([]); }
+    if (e.poly.length > 1) { mctx.strokeStyle = warm; mctx.globalAlpha = isCur ? 1 : 0.5; mctx.lineWidth = 1.5; mctx.beginPath();
+      const off = onTileE(e) ? [baseXE(e), baseYE(e)] : [0, 0];
+      e.poly.forEach((p, i) => { const x = (p[0] + off[0]) * k, y = (p[1] + off[1]) * k; i ? mctx.lineTo(x, y) : mctx.moveTo(x, y); }); mctx.stroke();
+      if (isCur) { mctx.fillStyle = warm; for (const p of e.st.path) mctx.fillRect((p[0] + off[0]) * k - 2, (p[1] + off[1]) * k - 2, 4, 4); }
+      mctx.globalAlpha = 1; }
+    mctx.fillStyle = isCur ? '#fff' : 'rgba(255,255,255,0.75)'; mctx.strokeStyle = isCur ? acc : '#000'; mctx.lineWidth = isCur ? 2 : 1;
+    mctx.beginPath(); mctx.arc(eu * k, ev * k, isCur ? 4.5 : 3, 0, 6.283); mctx.fill(); mctx.stroke();
+  });
   const cx = Cu * k, cy = Cv * k, a = Math.atan2(Fy, Fx);
   mctx.fillStyle = acc; mctx.beginPath();
   mctx.moveTo(cx + Math.cos(a) * 8, cy + Math.sin(a) * 8); mctx.lineTo(cx + Math.cos(a + 2.5) * 6, cy + Math.sin(a + 2.5) * 6); mctx.lineTo(cx + Math.cos(a - 2.5) * 6, cy + Math.sin(a - 2.5) * 6); mctx.closePath(); mctx.fill();
 }
 
+// ------------------------------------------------------------------ scene : sauvegarde / chargement
+const serialFx = e => ({ type: e.type, P: e.P, st: e.st, map: e.map, cond: e.cond, tile: e.tile, tex: e.tex ? e.tex.name : '' });
+function getPresetState() {
+  syncCur();
+  return { v: 2, effects: effects.map(serialFx), cur, block: $('blockTiles').value, repeat: $('repeatMap').checked, cam: [$('camDist').value, $('camHead').value, $('amb').value] };
+}
+async function texFor(e, name) {
+  if (!name) return;
+  const im = await loadImage(name); if (!im) return;
+  const c = document.createElement('canvas'); c.width = im.width; c.height = im.height; const g = c.getContext('2d'); g.drawImage(im, 0, 0);
+  e.tex = { w: im.width, h: im.height, d: g.getImageData(0, 0, im.width, im.height).data, name };
+  if (e === curFx()) { partTex = e.tex; update(); }
+}
+function applyPresetState(s) {
+  if (!s) return;
+  if (s.type && !s.effects) s = { effects: [{ type: s.type, P: s.P, st: s.st, map: s.map, cond: s.cond, tile: s.tile }], cur: 0, block: s.block, cam: s.cam }; // ancien format (un effet)
+  if (!Array.isArray(s.effects) || !s.effects.length) return;
+  effects = s.effects.filter(o => OVER[o.type]).map(o => {
+    const e = makeFx(o.type, Object.assign(defaultsFor(o.type), o.P), Object.assign(newSt(512, 512), o.st));
+    e.map = o.map || '*'; e.cond = o.cond || ''; e.tile = o.tile || '';
+    buildPathE(e); texFor(e, o.tex);
+    return e;
+  });
+  if (!effects.length) effects = [makeFx('flame', defaultsFor('flame'), newSt(512, 512))];
+  cur = Math.max(0, Math.min(effects.length - 1, s.cur || 0));
+  if (s.cam) { $('camDist').value = s.cam[0]; $('camHead').value = s.cam[1]; $('amb').value = s.cam[2]; }
+  if (s.repeat != null) $('repeatMap').checked = !!s.repeat;
+  $('blockTiles').value = s.block || '';
+  $('camDistOut').textContent = $('camDist').value; $('ambOut').textContent = (+$('amb').value).toFixed(2);
+  loadCur();
+}
+$('repeatMap').addEventListener('change', update);
+
 // ------------------------------------------------------------------ depart
-try {
-  const s = JSON.parse(localStorage.getItem('m7fx.state') || 'null');
-  if (s && OVER[s.type]) {
-    type = s.type; P = Object.assign(defaultsFor(type), s.P); Object.assign(st, s.st);
-    $('mapHash').value = s.map || '*'; $('cond').value = s.cond || ''; $('tileHash').value = s.tile || '';
-    if (s.cam) { $('camDist').value = s.cam[0]; $('camHead').value = s.cam[1]; $('amb').value = s.cam[2]; }
-    $('blockTiles').value = s.block || '';
-    for (const id of ['posX', 'posY', 'dx', 'dy', 'speed', 'bobamp', 'bobfreq', 'offset']) { const key = { posX: 'x', posY: 'y' }[id] || id; if (st[key] == null) continue; $(id).value = st[key]; $(id + 'Out').textContent = st[key]; }
-    $('loop').value = st.loop; $('smooth').checked = st.smooth; $('path').value = pathText();
-    $('camDistOut').textContent = $('camDist').value; $('ambOut').textContent = (+$('amb').value).toFixed(2);
-  }
-} catch (e) {}
 buildTypes(); buildParams(); buildPath(); update();
+try { const s0 = JSON.parse(localStorage.getItem('m7fx.state') || 'null'); if (s0) applyPresetState(s0); } catch (e) {}
+// ------------------------------------------------------------------ preréglages : dans ce navigateur, en texte ou en FICHIER (.json)
+(() => {
+  const KEY = 'm7fx.presets';
+  const read = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { return {}; } };
+  const write = o => { try { localStorage.setItem(KEY, JSON.stringify(o)); return true; } catch (e) { return false; } };
+  const msg = t => { $('presetMsg').textContent = t; clearTimeout(msg.t); msg.t = setTimeout(() => $('presetMsg').textContent = '', 4000); };
+  const refresh = sel => {
+    const o = read(), names = Object.keys(o).sort((a, b) => a.localeCompare(b));
+    $('presetList').innerHTML = names.length ? names.map(n => `<option>${n.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))}</option>`).join('') : '<option value="">aucun préréglage</option>';
+    if (sel && names.includes(sel)) $('presetList').value = sel;
+  };
+  $('presetSave').onclick = () => {
+    const n = $('presetName').value.trim(); if (!n) { msg('Donne un nom au préréglage.'); $('presetName').focus(); return; }
+    const o = read(); const existed = n in o; o[n] = getPresetState();
+    msg(write(o) ? (existed ? `« ${n} » remplacé` : `« ${n} » enregistré (${effects.length} effet(s))`) : 'Mémoire du navigateur indisponible : enregistre un fichier.'); refresh(n);
+  };
+  $('presetLoad').onclick = () => { const n = $('presetList').value, o = read(); if (!n || !o[n]) return; applyPresetState(o[n]); $('presetName').value = n; msg(`« ${n} » chargé`); };
+  let delArm = null;
+  $('presetDel').onclick = () => {
+    const n = $('presetList').value; if (!n) return;
+    if (delArm !== n) { delArm = n; $('presetDel').textContent = 'Confirmer'; setTimeout(() => { delArm = null; $('presetDel').textContent = 'Supprimer'; }, 3000); return; }
+    const o = read(); delete o[n]; write(o); delArm = null; $('presetDel').textContent = 'Supprimer'; refresh(); msg(`« ${n} » supprimé`);
+  };
+  // fichier : tous les prereglages + la scene en cours
+  const fileText = () => JSON.stringify({ format: 'atelier-m7effect', presets: read(), current: getPresetState() }, null, 1);
+  $('presetFileSave').onclick = () => {
+    const t = fileText();
+    try {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([t], { type: 'application/json' }));
+      a.download = 'm7effect_presets.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      msg('Fichier m7effect_presets.json enregistré (si rien ne se télécharge : Exporter tout).');
+    } catch (e) { msg('Téléchargement impossible ici : utilise Exporter tout.'); }
+  };
+  $('presetFile').addEventListener('change', async ev => {
+    const f = ev.target.files[0]; if (!f) return;
+    try {
+      const o = JSON.parse(await f.text());
+      if (o && o.format === 'atelier-m7effect') {
+        const n = Object.keys(o.presets || {}).length;
+        write(Object.assign(read(), o.presets || {})); refresh();
+        if (o.current) applyPresetState(o.current);
+        msg(`${n} préréglage(s) ouvert(s) + la scène du fichier`);
+      } else if (o && (o.effects || o.type)) { applyPresetState(o); msg('Scène ouverte'); }
+      else if (o && typeof o === 'object') { write(Object.assign(read(), o)); refresh(); msg(`${Object.keys(o).length} préréglage(s) ouvert(s)`); }
+    } catch (e) { msg('Fichier non reconnu (un .json enregistré par l\'atelier).'); }
+    ev.target.value = '';
+  });
+  $('presetExport').onclick = async () => {
+    const t = $('presetText'); t.hidden = false; t.value = fileText();
+    try { await navigator.clipboard.writeText(t.value); msg('Copié : colle-le dans un fichier .json'); } catch (e) { t.focus(); t.select(); msg('Texte sélectionné : Ctrl+C'); }
+  };
+  $('presetImport').onclick = () => {
+    const t = $('presetText');
+    if (t.hidden || !t.value.trim()) { t.hidden = false; t.value = ''; t.focus(); msg('Colle l\'export puis clique Importer'); return; }
+    try {
+      const o = JSON.parse(t.value);
+      if (o && o.format === 'atelier-m7effect') { write(Object.assign(read(), o.presets || {})); if (o.current) applyPresetState(o.current); }
+      else if (o && typeof o === 'object') write(Object.assign(read(), o));
+      refresh(); t.hidden = true; msg('Importé');
+    } catch (e) { msg('Texte non reconnu : colle un export complet.'); }
+  };
+  refresh();
+})();
+
+
 requestAnimationFrame(frame);
 })();
 </script>

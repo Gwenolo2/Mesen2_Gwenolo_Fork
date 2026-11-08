@@ -391,6 +391,13 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 	// Blocs entre accolades : 'F' = <fallback ...>{ , 'R' = <FrontOf3D>{ (pile commune pour la fermeture '}')
 	std::vector<char> blockKinds;
 	std::vector<std::vector<SnesHdPackCondition*>> frontBlockStack; // conditions de chaque bloc <FrontOf3D>{ ouvert
+	std::vector<std::vector<SnesHdPackCondition*>> noReflBlockStack; // conditions de chaque bloc <NoLiquidReflect>{ ouvert ('N')
+	std::vector<int> noReflBlockCount;
+	std::unordered_set<std::string> noReflSeen;
+	auto isNoReflTag = [](const std::string& line) -> size_t { // longueur de la balise, 0 si absente (accepte la faute "refelct")
+		const std::string l = StringUtilities::ToLower(line.substr(0, 17));
+		return (l == "<noliquidreflect>" || l == "<noliquidrefelct>") ? 17 : 0;
+	};
 	std::vector<int> frontBlockId, frontBlockCount;                 // numero du bloc, tiles ajoutees
 	int frontBlockNext = 0;
 	std::vector<SnesHdSpriteLightInfo> spriteLightBlockStack;     // modele de chaque bloc <SpriteLight ...>{ ouvert ('L')
@@ -723,6 +730,13 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <SpriteLight>{ } : " + std::to_string(spriteLightBlockCount.back()) + " tile(s) avec une lumiere 3D");
 					spriteLightBlockCount.pop_back();
 				}
+			} else if(!blockKinds.empty() && blockKinds.back() == 'N') {
+				blockKinds.pop_back();
+				if(!noReflBlockStack.empty()) noReflBlockStack.pop_back();
+				if(!noReflBlockCount.empty()) {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <NoLiquidReflect>{ } : " + std::to_string(noReflBlockCount.back()) + " tile(s) sans reflet");
+					noReflBlockCount.pop_back();
+				}
 			} else if(!blockKinds.empty() && blockKinds.back() == 'R') {
 				blockKinds.pop_back();
 				if(!frontBlockStack.empty()) frontBlockStack.pop_back();
@@ -769,6 +783,16 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			frontBlockStack.push_back(blockConds);
 			frontBlockId.push_back(frontBlockNext++); frontBlockCount.push_back(0);
 			blockKinds.push_back('R');
+			continue;
+		}
+
+		// DÉBUT DE BLOC [conditions]<NoLiquidReflect>{ ... } : les <tile...> du bloc ne se refletent pas dans le liquide
+		if(size_t nl = isNoReflTag(lineContent); nl && StringUtilities::Trim(lineContent.substr(nl)).substr(0, 1) == "{") {
+			std::vector<SnesHdPackCondition*> blockConds = currentConditions;
+			if(!noReflBlockStack.empty()) blockConds.insert(blockConds.begin(), noReflBlockStack.back().begin(), noReflBlockStack.back().end());
+			noReflBlockStack.push_back(blockConds);
+			noReflBlockCount.push_back(0);
+			blockKinds.push_back('N');
 			continue;
 		}
 
@@ -830,6 +854,26 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 			while(std::getline(ss, item, ',')) {
 				tokens.push_back(StringUtilities::Trim(item));
+			}
+
+			// <NoLiquidReflect>{ ... } : la tile (hash, palette) ne se reflete pas (Lakitu en l'air, piece qui s'envole...)
+			if(!noReflBlockStack.empty() && !tokens.empty()) {
+				auto addNoRefl = [&](const std::string& palTok) {
+					auto rule = std::make_unique<SnesHdNoLightRule>();
+					try { rule->Hash = std::stoull(tokens[0], nullptr, 16); } catch(...) { return; }
+					std::string p = StringUtilities::ToLower(StringUtilities::Trim(palTok));
+					if(!(p.empty() || p == "*" || p == "all")) {
+						try { rule->Palette = (uint32_t)std::stoul(p); rule->AnyPalette = false; } catch(...) {}
+					}
+					const std::string key = std::to_string(noReflBlockStack.size()) + "|" + std::to_string((uintptr_t)noReflBlockCount.size()) + "|" + StringUtilities::ToLower(tokens[0]) + "|" + (rule->AnyPalette ? std::string("*") : std::to_string(rule->Palette));
+					if(!noReflSeen.insert(key).second) return;
+					noReflBlockCount.back()++;
+					rule->Conditions = noReflBlockStack.back();
+					outData->NoReflectRules.push_back(std::move(rule));
+				};
+				addNoRefl(tokens.size() >= 2 ? tokens[1] : std::string("*"));
+				for(const auto& fbState : fallbackStack) addNoRefl(fbState.Palette);
+				if(tokens.size() < 3 && frontBlockStack.empty() && spriteLightBlockStack.empty()) continue; // simple reference
 			}
 
 			// <SpriteLight ...>{ ... } : la tile (hash, palette) porte la lumiere du bloc
@@ -1633,7 +1677,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				if(!v.empty() && v[0] == '#') v = v.substr(1);
 				try { return (uint32_t)std::stoul(v, nullptr, 16) & 0xFFFFFF; } catch(...) { return def; }
 			};
-			bool styleSet = false, colorSet = false, deepSet = false, skySet = false, speedSet = false;
+			bool styleSet = false, colorSet = false, deepSet = false, skySet = false, speedSet = false, objSet = false, rippleSet = false;
 			std::string texName;
 			for(size_t t = 0; t < tokens.size(); t++) {
 				std::string tok = StringUtilities::Trim(tokens[t]);
@@ -1658,6 +1702,20 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 					else if(k == "specular") lq->Specular = std::clamp(std::stof(v), 0.0f, 4.0f);
 					else if(k == "reflect" || k == "reflet") lq->Reflect = std::clamp(std::stof(v), 0.0f, 1.0f);
 					else if(k == "foam" || k == "ecume") lq->Foam = std::clamp(std::stof(v), 0.0f, 1.0f);
+					else if(k == "objreflect" || k == "reflets") { lq->ObjReflect = std::clamp(std::stof(v), 0.0f, 1.0f); objSet = true; }
+					else if(k == "reflectfade" || k == "longueurreflet") lq->ReflectFade = std::max(1.0f, std::stof(v));
+					else if(k == "reflectviews" || k == "vuesreflet") {
+						// all | top | bottom | 1 | 2 | 1+2 (vue 1 = haut de l'ecran, vue 2 = bas)
+						const std::string m = StringUtilities::ToLower(v);
+						lq->ReflectViews = 0;
+						if(m == "all" || m == "toutes" || m.empty()) lq->ReflectViews = 0;
+						else {
+							if(m.find("top") != std::string::npos || m.find("haut") != std::string::npos || m.find('1') != std::string::npos) lq->ReflectViews |= 1;
+							if(m.find("bottom") != std::string::npos || m.find("bas") != std::string::npos || m.find('2') != std::string::npos) lq->ReflectViews |= 2;
+							if(lq->ReflectViews == 0) lq->ReflectViews = 4; // valeur inconnue : aucune vue (voir le journal)
+						}
+					}
+					else if(k == "ripple" || k == "ondulation") { lq->Ripple = std::clamp(std::stof(v), 0.0f, 8.0f); rippleSet = true; }
 					else if(k == "texture") texName = v;
 					else if(k == "texscale") lq->TexScale = std::max(1.0f, std::stof(v));
 					else if(k == "map") SnesHdParseMaps(v, lq->AnyMap, lq->MapHash, lq->MapHashes);
@@ -1669,6 +1727,8 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				if(!deepSet) lq->Deep = 0x7A1004;
 				if(!skySet) lq->Sky = 0xFFD050;
 				if(!speedSet) lq->Speed = 3.0f;
+				if(!objSet) lq->ObjReflect = 0.15f;  // lave : reflet faible
+				if(!rippleSet) lq->Ripple = 0.5f;
 			}
 			if(!texName.empty()) {
 				std::string filename = NormalizePath(texName);
@@ -1717,6 +1777,21 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			} else {
 				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <SpriteLight> : hash invalide.");
 			}
+		}
+
+		/// PARSING <NoLiquidReflect> (ligne seule) : [conditions]<NoLiquidReflect>HASH_TILE[,palette|*]
+		else if(size_t nl = isNoReflTag(lineContent); nl) {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(nl), ',');
+			auto rule = std::make_unique<SnesHdNoLightRule>();
+			rule->Conditions = currentConditions;
+			bool ok = !tokens.empty();
+			if(ok) { try { rule->Hash = std::stoull(StringUtilities::Trim(tokens[0]), nullptr, 16); } catch(...) { ok = false; } }
+			if(ok && tokens.size() >= 2) {
+				std::string p = StringUtilities::ToLower(StringUtilities::Trim(tokens[1]));
+				if(!(p.empty() || p == "*" || p == "all")) { try { rule->Palette = (uint32_t)std::stoul(p); rule->AnyPalette = false; } catch(...) {} }
+			}
+			if(ok) { MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <NoLiquidReflect> tile " + StringUtilities::Trim(tokens[0])); outData->NoReflectRules.push_back(std::move(rule)); }
+			else MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <NoLiquidReflect> : hash invalide.");
 		}
 
 		/// PARSING <FrontOf3D> : tiles / sprites qui restent DEVANT le relief, les panneaux, les modeles 3D et les effets
@@ -1781,6 +1856,190 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			}
 		}
 
+		/// PARSING <m7material> : materiaux 3D des pistes (cartes PBR standard, textures du web)
+		// [conditions]<m7material>HASH_TILE,cle=valeur...            -> une tile <m7tiles>
+		// [conditions]<m7material>img,map=HASH_CARTE|*,cle=valeur... -> toute la grosse texture <m7img>
+		// set=dossier/ (reconnu par suffixes) ou albedo= normal= roughness= gloss= metallic= ao= height= emissive= orm=
+		// scale= normalconv=gl|dx color=tile|texture|mix mix= strength= aostrength= specular= emissivestrength= rough= metal=
+		else if(StringUtilities::ToLower(lineContent.substr(0, 12)) == "<m7material>") {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(12), ',');
+			auto mt = std::make_unique<SnesHdM7MaterialInfo>();
+			mt->Conditions = currentConditions;
+			std::string fAlbedo, fNormal, fRough, fGloss, fMetal, fAo, fHeight, fEmis, fOrm, setDir;
+			int normalConv = -1; // -1 = selon le nom du fichier
+			float heightStrength = 2.0f;
+			bool targetOk = false;
+			for(size_t ti = 0; ti < tokens.size(); ti++) {
+				std::string tok = StringUtilities::Trim(tokens[ti]);
+				if(tok.empty()) continue;
+				size_t eq = tok.find('=');
+				if(eq == std::string::npos) {
+					std::string low = StringUtilities::ToLower(tok);
+					if(low == "img" || low == "image") { mt->OnImg = true; targetOk = true; }
+					else if(!targetOk) { try { mt->TileHash = (uint32_t)HexUtilities::FromHex(tok); targetOk = true; } catch(...) {} }
+					continue;
+				}
+				const std::string k = StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)));
+				const std::string v = StringUtilities::Trim(tok.substr(eq + 1));
+				const std::string lv = StringUtilities::ToLower(v);
+				try {
+					if(k == "map") { SnesHdParseMaps(v, mt->AnyMap, mt->MapHash, mt->MapHashes); if(!targetOk) { mt->OnImg = true; targetOk = true; } }
+					else if(k == "tile") { mt->TileHash = (uint32_t)HexUtilities::FromHex(v); targetOk = true; }
+					else if(k == "set" || k == "dossier") setDir = v;
+					else if(k == "albedo" || k == "basecolor" || k == "color_map" || k == "diffuse") fAlbedo = v;
+					else if(k == "normal") fNormal = v;
+					else if(k == "roughness") fRough = v;
+					else if(k == "gloss" || k == "glossiness") fGloss = v;
+					else if(k == "metallic" || k == "metalness") fMetal = v;
+					else if(k == "ao" || k == "occlusion") fAo = v;
+					else if(k == "height" || k == "displacement" || k == "bump") fHeight = v;
+					else if(k == "emissive" || k == "emission") fEmis = v;
+					else if(k == "orm" || k == "arm") fOrm = v;
+					else if(k == "scale" || k == "echelle") mt->Scale = std::max(0.0f, std::stof(v));
+					else if(k == "normalconv") normalConv = (lv == "dx" || lv == "directx") ? 1 : 0;
+					else if(k == "color" || k == "couleur") mt->ColorMode = (lv == "texture" || lv == "materiau") ? 1 : (lv == "mix" || lv == "melange") ? 2 : 0;
+					else if(k == "mix") { mt->Mix = std::clamp(std::stof(v), 0.0f, 1.0f); if(mt->ColorMode == 0) mt->ColorMode = 2; }
+					else if(k == "strength" || k == "force") mt->Strength = std::clamp(std::stof(v), 0.0f, 5.0f);
+					else if(k == "heightstrength") heightStrength = std::max(0.0f, std::stof(v));
+					else if(k == "aostrength") mt->AoStrength = std::clamp(std::stof(v), 0.0f, 2.0f);
+					else if(k == "specular" || k == "brillance") mt->Specular = std::clamp(std::stof(v), 0.0f, 4.0f);
+					else if(k == "emissivestrength") mt->EmissiveStrength = std::clamp(std::stof(v), 0.0f, 8.0f);
+					else if(k == "rough" || k == "rugosite") mt->RoughValue = std::clamp(std::stof(v), 0.0f, 1.0f);
+					else if(k == "metal") mt->MetalValue = std::clamp(std::stof(v), 0.0f, 1.0f);
+					else if(k == "debug") mt->Debug = (lv == "normal" || lv == "normals") ? 1 : (lv == "light" || lv == "lumiere" || lv == "sun") ? 2 : 0;
+				} catch(...) {}
+			}
+			// dossier de textures du web : chaque image reconnue par les mots de son nom
+			// (ambientCG : _Color _NormalGL _NormalDX _Roughness _Metalness _AmbientOcclusion _Displacement _Emission ;
+			//  Poly Haven : _diff _nor_gl _nor_dx _rough _metal _ao _disp _arm ; autres : albedo, basecolor, gloss, height, orm...)
+			if(!setDir.empty()) {
+				std::vector<std::string> names;
+				try {
+					for(const auto& e : std::filesystem::directory_iterator(FolderUtilities::CombinePath(rootFolder, NormalizePath(setDir)))) {
+						if(!e.is_regular_file()) continue;
+						std::string ext = StringUtilities::ToLower(e.path().extension().string());
+						if(ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp") names.push_back(e.path().filename().string());
+					}
+				} catch(...) {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7material> : dossier introuvable : " + setDir);
+				}
+				std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) {
+					auto png = [](const std::string& s) { return StringUtilities::ToLower(s).find(".png") != std::string::npos; };
+					if(png(a) != png(b)) return png(a); // PNG en priorite
+					return a < b;
+				});
+				auto words = [](std::string s) {
+					s = StringUtilities::ToLower(s);
+					std::vector<std::string> w; std::string cur;
+					for(char c : s) { if(std::isalnum((unsigned char)c)) cur += c; else { if(!cur.empty()) w.push_back(cur); cur.clear(); } }
+					if(!cur.empty()) w.push_back(cur);
+					return w;
+				};
+				std::string setNormGL, setNormDX;
+				for(const std::string& n : names) {
+					std::vector<std::string> w = words(n);
+					auto has = [&](std::initializer_list<const char*> l) { for(auto& x : w) for(const char* y : l) if(x == y) return true; return false; };
+					const std::string rel = setDir + (setDir.back() == '/' || setDir.back() == '\\' ? "" : "/") + n;
+					if(has({ "preview", "thumb", "sphere", "cube" })) continue;
+					if(has({ "normal", "normalgl", "normaldx", "nor", "nrm", "normalmap", "norm" })) {
+						const bool dx = has({ "normaldx", "dx", "directx" });
+						std::string& slot = dx ? setNormDX : setNormGL;
+						if(slot.empty()) slot = rel;
+					}
+					else if(has({ "roughness", "rough", "rgh" })) { if(fRough.empty()) fRough = rel; }
+					else if(has({ "glossiness", "gloss" })) { if(fGloss.empty()) fGloss = rel; }
+					else if(has({ "metalness", "metallic", "metal", "mtl" })) { if(fMetal.empty()) fMetal = rel; }
+					else if(has({ "arm", "orm" })) { if(fOrm.empty()) fOrm = rel; }
+					else if(has({ "ambientocclusion", "occlusion", "ao" })) { if(fAo.empty()) fAo = rel; }
+					else if(has({ "displacement", "disp", "height", "bump", "depth" })) { if(fHeight.empty()) fHeight = rel; }
+					else if(has({ "emission", "emissive", "emit", "glow" })) { if(fEmis.empty()) fEmis = rel; }
+					else if(has({ "basecolor", "albedo", "diffuse", "diff", "color", "col", "colour" })) { if(fAlbedo.empty()) fAlbedo = rel; }
+				}
+				// normal map du dossier : OpenGL de preference (sauf si normalconv= ou normal= est donne)
+				if(fNormal.empty()) {
+					if(!setNormGL.empty() && normalConv != 1) { fNormal = setNormGL; if(normalConv < 0) normalConv = 0; }
+					else if(!setNormDX.empty()) { fNormal = setNormDX; if(normalConv < 0) normalConv = 1; }
+					else if(!setNormGL.empty()) fNormal = setNormGL;
+				}
+			}
+			mt->NormalDX = normalConv == 1;
+			// lecture d'une image (PNG, sinon JPG / TGA / BMP par stb_image)
+			auto readImg = [&](const std::string& f, std::vector<uint32_t>& px, uint32_t& w, uint32_t& h) -> bool {
+				if(f.empty()) return false;
+				VirtualFile vf(FolderUtilities::CombinePath(rootFolder, NormalizePath(f)));
+				std::vector<uint8_t> raw;
+				if(!vf.IsValid() || !vf.ReadFile(raw)) { MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7material> : image introuvable : " + f); return false; }
+				if(PNGHelper::ReadPNG(raw, px, w, h)) return true;
+				if(SnesHdDecodeImageFallback(raw, px, w, h)) return true;
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7material> : format non lu : " + f);
+				return false;
+			};
+			auto loadMap = [&](const std::string& f, SnesHdMaterialMap& m) {
+				std::vector<uint32_t> px; uint32_t w = 0, h = 0;
+				if(readImg(f, px, w, h)) m.Set(std::move(px), w, h);
+			};
+			loadMap(fAlbedo, mt->Albedo); loadMap(fNormal, mt->Normal); loadMap(fMetal, mt->Metal);
+			loadMap(fAo, mt->Ao); loadMap(fEmis, mt->Emissive); loadMap(fOrm, mt->Orm);
+			if(!fRough.empty()) loadMap(fRough, mt->Rough);
+			else if(!fGloss.empty()) { loadMap(fGloss, mt->Rough); mt->GlossInverted = true; }
+			// pas de normal map mais une carte de hauteur : normales calculees (Sobel), convention GL
+			if(!mt->Normal.Valid() && !fHeight.empty()) {
+				std::vector<uint32_t> hp; uint32_t w = 0, h = 0;
+				if(readImg(fHeight, hp, w, h)) {
+					std::vector<uint32_t> np((size_t)w * h);
+					auto H = [&](int x, int y) { x = (x % (int)w + (int)w) % (int)w; y = (y % (int)h + (int)h) % (int)h; return (float)((hp[(size_t)y * w + x] >> 16) & 0xFF) / 255.0f; };
+					for(uint32_t y = 0; y < h; y++) for(uint32_t x = 0; x < w; x++) {
+						const float dx = (H(x + 1, y - 1) + 2 * H(x + 1, y) + H(x + 1, y + 1)) - (H(x - 1, y - 1) + 2 * H(x - 1, y) + H(x - 1, y + 1));
+						const float dy = (H(x - 1, y + 1) + 2 * H(x, y + 1) + H(x + 1, y + 1)) - (H(x - 1, y - 1) + 2 * H(x, y - 1) + H(x + 1, y - 1));
+						float nx = -dx * heightStrength, ny = dy * heightStrength, nz = 1.0f; // GL : vert = vers le haut de l'image
+						const float l = std::sqrt(nx * nx + ny * ny + nz * nz); nx /= l; ny /= l; nz /= l;
+						np[(size_t)y * w + x] = 0xFF000000 | ((uint32_t)((nx * 0.5f + 0.5f) * 255) << 16) | ((uint32_t)((ny * 0.5f + 0.5f) * 255) << 8) | (uint32_t)((nz * 0.5f + 0.5f) * 255);
+					}
+					mt->Normal.Set(std::move(np), w, h);
+					mt->NormalDX = false;
+				}
+			}
+			// regroupement normale + rugosite + AO dans une seule image (1 lecture par pixel au lieu de 3 ou 4)
+			{
+				const SnesHdMaterialMap* ref = mt->Normal.Valid() ? &mt->Normal : mt->Orm.Valid() ? &mt->Orm : mt->Rough.Valid() ? &mt->Rough : mt->Ao.Valid() ? &mt->Ao : nullptr;
+				if(ref) {
+					const uint32_t w = ref->W[0], h = ref->H[0];
+					std::vector<uint32_t> pk((size_t)w * h);
+					auto at = [&](const SnesHdMaterialMap& m, uint32_t x, uint32_t y) -> uint32_t {
+						return m.Mips[0][(size_t)std::min(m.H[0] - 1, y * m.H[0] / h) * m.W[0] + std::min(m.W[0] - 1, x * m.W[0] / w)];
+					};
+					const uint32_t rough0 = (uint32_t)(mt->RoughValue * 255.0f + 0.5f);
+					for(uint32_t y = 0; y < h; y++) for(uint32_t x = 0; x < w; x++) {
+						uint32_t nr = 128, ng = 128, ro = rough0, ao = 255;
+						if(mt->Normal.Valid()) { const uint32_t c = at(mt->Normal, x, y); nr = (c >> 16) & 0xFF; ng = (c >> 8) & 0xFF; }
+						if(mt->Orm.Valid()) { const uint32_t c = at(mt->Orm, x, y); ao = (c >> 16) & 0xFF; ro = (c >> 8) & 0xFF; }
+						if(mt->Ao.Valid()) ao = (at(mt->Ao, x, y) >> 16) & 0xFF;
+						if(mt->Rough.Valid()) { ro = (at(mt->Rough, x, y) >> 16) & 0xFF; if(mt->GlossInverted) ro = 255 - ro; }
+						pk[(size_t)y * w + x] = (ao << 24) | (nr << 16) | (ng << 8) | ro;
+					}
+					// metal d'une carte ORM : garde a part (rare)
+					if(mt->Orm.Valid() && !mt->Metal.Valid()) {
+						std::vector<uint32_t> mp((size_t)w * h);
+						for(uint32_t y = 0; y < h; y++) for(uint32_t x = 0; x < w; x++) { const uint32_t b = at(mt->Orm, x, y) & 0xFF; mp[(size_t)y * w + x] = 0xFF000000 | (b << 16) | (b << 8) | b; }
+						mt->Metal.Set(std::move(mp), w, h);
+					}
+					mt->HasNormal = mt->Normal.Valid();
+					mt->Packed.Set(std::move(pk), w, h);
+				}
+			}
+			if(!targetOk) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7material> : cible manquante (hash de tile <m7tiles>, ou img,map=HASH_CARTE).");
+			} else {
+				std::string got;
+				auto add = [&](const SnesHdMaterialMap& m, const char* n) { if(m.Valid()) { got += got.empty() ? "" : ", "; got += n; got += " " + std::to_string(m.W[0]) + "x" + std::to_string(m.H[0]); } };
+				add(mt->Albedo, "couleur"); add(mt->Normal, mt->NormalDX ? "normal(DX)" : "normal"); add(mt->Rough, mt->GlossInverted ? "gloss" : "rugosite");
+				add(mt->Metal, "metal"); add(mt->Ao, "AO"); add(mt->Orm, "ORM"); add(mt->Emissive, "emissive");
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <m7material> " + (mt->OnImg ? std::string("grosse texture") : "tile " + HexUtilities::ToHex32(mt->TileHash)) +
+					" : " + (got.empty() ? std::string("aucune carte (valeurs rough / metal seulement)") : got));
+				outData->M7Materials.push_back(std::move(mt));
+			}
+		}
+
 		/// PARSING <m7light> : lumiere sur la carte Mode 7
 		// [conditions]<m7light>HASH_CARTE|*,x,y[,height=8][,radius=64][,color=#FFC080][,intensity=1][,flicker=0][,speed=6][,mode=light|add]
 		// [conditions]<m7light>tile=HASH_TILE[,...]
@@ -1816,6 +2075,10 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 					try {
 						if(kv.first == "sky" || kv.first == "ciel") am->Sky = !(kv.second == "0" || StringUtilities::ToLower(kv.second) == "false");
 						else if(kv.first == "brightness" || kv.first == "luminosite") am->Brightness = std::stof(kv.second);
+						else if(kv.first == "sunaz" || kv.first == "azimut") { am->SunAz = std::stof(kv.second); am->SunSet = true; }
+						else if(kv.first == "sunel" || kv.first == "hauteursoleil") { am->SunEl = std::clamp(std::stof(kv.second), 1.0f, 89.0f); am->SunSet = true; }
+						else if(kv.first == "sun" || kv.first == "soleil") { am->SunIntensity = std::clamp(std::stof(kv.second), 0.0f, 3.0f); am->SunSet = true; }
+						else if(kv.first == "suncolor" || kv.first == "couleursoleil") { am->SunColor = parseColor(kv.second, am->SunColor); am->SunSet = true; }
 						else if(kv.first == "tint" || kv.first == "color") am->Tint = parseColor(kv.second, 0xFFFFFF);
 						else if(kv.first == "map") parseMap(kv.second, am->AnyMap, am->MapHash, am->MapHashes);
 					} catch(...) {}
@@ -2361,6 +2624,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				std::string optB = StringUtilities::Trim(tokens[4]);
 				if(optB == "anisotropic" || optB == "2") filterMode = Mode7FilterMode::Anisotropic;
 				else if(optB == "1" || optB == "true" || optB == "bilinear") filterMode = Mode7FilterMode::Bilinear;
+				else if(optB == "bilinearLight" || optB == "bilinearlight") filterMode = Mode7FilterMode::BilinearLight;
 			}
 
 			// RÉCUPÉRATION OU CRÉATION INSTANTANÉE (O(1)) VIA LE DICTIONNAIRE LOCAL

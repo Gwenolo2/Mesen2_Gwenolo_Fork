@@ -2,6 +2,7 @@
 #include <vector>
 #include <algorithm>
 #include <thread>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include "SNES/HdPacks/SnesHdVideoFilter.h"
@@ -19,7 +20,42 @@
 
 
 //-----------------------------------------------------------------------------------------
-SnesHdVideoFilter::SnesHdVideoFilter(Emulator* emu) : SnesDefaultVideoFilter(emu) {}
+// Ajoute la duree de vie du minuteur (en ms) a un compteur de passe
+// Duree totale de ApplyFilter et temps d'attente depuis la fin de l'image precedente (RAII : couvre les retours anticipes)
+struct SnesHdFrameTimer
+{
+	double& Total;
+	double& Idle;
+	std::chrono::steady_clock::time_point& LastEnd;
+	bool& HasLastEnd;
+	std::chrono::steady_clock::time_point T0;
+	SnesHdFrameTimer(double& total, double& idle, std::chrono::steady_clock::time_point& lastEnd, bool& hasLastEnd)
+		: Total(total), Idle(idle), LastEnd(lastEnd), HasLastEnd(hasLastEnd), T0(std::chrono::steady_clock::now())
+	{
+		if(HasLastEnd) Idle += std::chrono::duration<double, std::milli>(T0 - LastEnd).count();
+	}
+	~SnesHdFrameTimer()
+	{
+		const auto t1 = std::chrono::steady_clock::now();
+		Total += std::chrono::duration<double, std::milli>(t1 - T0).count();
+		LastEnd = t1;
+		HasLastEnd = true;
+	}
+};
+
+struct SnesHdPassTimer
+{
+	double& Acc;
+	std::chrono::steady_clock::time_point T0;
+	explicit SnesHdPassTimer(double& acc) : Acc(acc), T0(std::chrono::steady_clock::now()) {}
+	~SnesHdPassTimer() { Acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count(); }
+};
+
+SnesHdVideoFilter::SnesHdVideoFilter(Emulator* emu) : SnesDefaultVideoFilter(emu)
+{
+	// Threads crees une seule fois : coeurs - 2 (emulation + systeme), borne a [1, 8], appelant compris
+	_pool.Start(std::clamp((int)std::thread::hardware_concurrency() - 2, 1, 8));
+}
 
 
 //----------------------------------------------------------------------------------------
@@ -157,6 +193,11 @@ void BuildMode7TileMips(SnesHdMode7Image* img)
 void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 {
 	static bool filterLog = false;
+	SnesHdFrameTimer frameTm(_filterMs, _idleMs, _lastEnd, _hasLastEnd);
+	const auto tPrep0 = std::chrono::steady_clock::now();
+	auto msSince = [](std::chrono::steady_clock::time_point t) {
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+	};
 
 	// Structure pour mémoriser TOUTES les tuiles HD à "déplier"
 	struct ExpandedTile
@@ -740,15 +781,61 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 		gpuRx0 = std::max(gpuRx0, 0); gpuRy0 = std::max(gpuRy0, 0);
 		gpuRx1 = std::min(gpuRx1, (int)outWidth - 1); gpuRy1 = std::min(gpuRy1, (int)hdHeight - 1);
+		{ SnesHdPassTimer tmGpu(_gpuSubmitMs);
 		if(any && gpuRx0 <= gpuRx1 && gpuRy0 <= gpuRy1 &&
 			SnesHdGpu::Get().SubmitModels(gpuViews, outWidth, hdHeight, (float)scale, (float)dstX, (float)dstY,
 				gpuRx0, gpuRy0, gpuRx1, gpuRy1)) {
 			gpuModelsOn = true;
 			mdOn = true;
 		}
+		}
 	}
 	static std::vector<float> s_modelW; // 1/profondeur des pixels de modele (plus grand = plus proche)
 	if(mdOn) s_modelW.assign((size_t)outWidth * hdHeight, 0.0f);
+
+	// ====================================================================
+	// <m7material> : PREPARATION - materiau de chaque case (tiles <m7tiles>) et de chaque ligne (grosse texture)
+	// Tampons par pixel HD (ecrits par le rendu Mode 7, lus par la passe d'eclairage) :
+	// normale (2 x int8), rugosite / metal / brillance, Z du Mode 7 (0 = pas de materiau), emissive.
+	// ====================================================================
+	std::vector<const SnesHdM7MaterialInfo*> cellMat, lineMat(cropHeight, nullptr);
+	bool matOn = false, matEmisOn = false, matDebugLight = false;
+	static std::vector<uint16_t> s_matN;
+	static std::vector<uint32_t> s_matRM, s_matEm;
+	static std::vector<uint8_t> s_matZ, s_matRow;
+	{
+		auto& hdMats = SnesHdPackLoader::ActivePack->M7Materials;
+		if(!hdMats.empty()) {
+			std::unordered_map<uint32_t, const SnesHdM7MaterialInfo*> byTile;
+			std::vector<SnesHdM7MaterialInfo*> imgMats;
+			for(auto& um : hdMats) {
+				if(!um->MatchesCondition()) continue;
+				if(um->OnImg) imgMats.push_back(um.get());
+				else if(!byTile.count(um->TileHash)) byTile[um->TileHash] = um.get();
+				if(um->Emissive.Valid()) matEmisOn = true;
+				if(um->Debug == 2) matDebugLight = true;
+			}
+			if(!byTile.empty() && !m7CellHash.empty()) {
+				cellMat.assign(128 * 128, nullptr);
+				for(size_t c = 0; c < m7CellHash.size(); c++) {
+					auto it = byTile.find(m7CellHash[c]);
+					if(it != byTile.end()) { cellMat[c] = it->second; matOn = true; }
+				}
+			}
+			for(uint32_t yy = 0; yy < cropHeight; yy++) {
+				if(!m7Lines[yy].Img) continue;
+				for(auto* m : imgMats) {
+					if(!SnesHdMapMatch(m->AnyMap, m->MapHashes, m->MapHash, m7Lines[yy].Ref.M7MapHash)) continue;
+					lineMat[yy] = m; matOn = true; break;
+				}
+			}
+		}
+		if(matOn) {
+			const size_t n = (size_t)outWidth * hdHeight;
+			s_matZ.assign(n, 0); s_matN.resize(n); s_matRM.resize(n); s_matRow.assign(hdHeight, 0);
+			if(matEmisOn) s_matEm.assign(n, 0);
+		}
+	}
 
 	// ====================================================================
 	// <m7LiquidBackground> : PREPARATION (sequentielle) - liquide de chaque ligne Mode 7 + sa vue
@@ -756,6 +843,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	std::vector<const SnesHdM7LiquidInfo*> lineLiquid(cropHeight, nullptr);
 	std::vector<const SnesHdM7Zone*> lineZone(cropHeight, nullptr);
 	const float liqTime = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+	bool liqOn = false;                       // un liquide est actif sur au moins une ligne
+	static std::vector<uint16_t> s_liqCov;    // pixels HD de liquide visible : (Z du Mode 7 << 8) | couverture
 	{
 		auto& hdLiquids = SnesHdPackLoader::ActivePack->M7Liquids;
 		if(!hdLiquids.empty()) {
@@ -779,6 +868,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			}
 		}
 	}
+	for(uint32_t yy = 0; yy < cropHeight; yy++) if(lineLiquid[yy]) { liqOn = true; break; }
+	if(liqOn) s_liqCov.assign((size_t)outWidth * hdHeight, 0);
 	// Table de sinus (1024 points, interpolation lineaire) : ~10x plus rapide que std::sin/cos ici
 	static float s_sinTab[1025];
 	static bool s_sinTabInit = false;
@@ -963,6 +1054,49 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			}
 		};
 
+		// Chemin rapide de bilinearLight : un seul niveau, 4 lectures, poids entiers (fraction sur 8 bits).
+		// Meme resultat que addBilinear avec w = 1 (couleur = moyenne ponderee par l'alpha), sans virgule flottante par texel.
+		auto sampleLight = [&](int32_t sX, int32_t sY, int lv) -> uint32_t {
+			const uint32_t dim = mapDim >> lv;
+			const uint32_t mask = dim - 1;
+			const uint32_t* px = levelPx[lv];
+			const int32_t lX = (sX >> lv) - 128; // -128 : centre des texels
+			const int32_t lY = (sY >> lv) - 128;
+			const int32_t ix = lX >> 8, iy = lY >> 8;
+			const uint32_t fx = (uint32_t)(lX & 0xFF), fy = (uint32_t)(lY & 0xFF);
+			const uint32_t wx[2] = { 256 - fx, fx };
+			const uint32_t wy[2] = { 256 - fy, fy };
+			uint64_t sA = 0, sR = 0, sG = 0, sB = 0; // poids x alpha (somme des 4 poids = 65536)
+			for(int j = 0; j < 2; j++) {
+				const int32_t qy = iy + j;
+				for(int i = 0; i < 2; i++) {
+					const int32_t qx = ix + i;
+					const uint32_t w = wx[i] * wy[j];
+					if(w == 0) continue;
+					uint32_t c;
+					if(largeMap) {
+						if(qx < 0 || qy < 0 || qx >= (int32_t)dim || qy >= (int32_t)dim) continue;
+						c = px[(size_t)qy * dim + qx];
+					} else {
+						c = px[(size_t)(qy & (int32_t)mask) * dim + (qx & (int32_t)mask)];
+					}
+					const uint64_t a = (uint64_t)(c >> 24) * w;
+					if(a == 0) continue;
+					sA += a;
+					sR += (uint64_t)((c >> 16) & 0xFF) * a;
+					sG += (uint64_t)((c >> 8) & 0xFF) * a;
+					sB += (uint64_t)(c & 0xFF) * a;
+				}
+			}
+			if(sA <= 32768) return 0; // alpha moyenne <= 0.5 : pas de texel HD (comme addBilinear)
+			const uint32_t a8 = (uint32_t)std::min<uint64_t>((sA + 32768) >> 16, 255);
+			const double inv = 1.0 / (double)sA;
+			const uint32_t r = (uint32_t)std::min(sR * inv + 0.5, 255.0);
+			const uint32_t g = (uint32_t)std::min(sG * inv + 0.5, 255.0);
+			const uint32_t b = (uint32_t)std::min(sB * inv + 0.5, 255.0);
+			return (a8 << 24) | (r << 16) | (g << 8) | b;
+		};
+
 		// Parametres lisses a la position continue (ligne y, fraction tt dans [0,1[) :
 		// pas S (8.8 texels SNES / pixel SNES), origine P, et leurs derivees par ligne SNES.
 		auto evalSmooth = [&](double tt, double& Sx, double& Sy, double& Px, double& Py,
@@ -1096,10 +1230,17 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				float frac = lambda - (float)L0;
 				const double tileLambdaBase = (double)lambda; // niveau de detail pour les <m7tiles> (avant ajustements)
 				if(L0 >= numLevels - 1) { L0 = numLevels - 1; frac = 0.0f; }
-				// Melange de 2 niveaux seulement dans la zone de transition (economise ~40% des lectures)
-				if(frac < 0.25f) frac = 0.0f;
-				else if(frac > 0.75f) { L0++; frac = 0.0f; }
-				else frac = (frac - 0.25f) * 2.0f;
+				if(filterMode == Mode7FilterMode::BilinearLight) {
+					// bilinearLight : un seul niveau (le plus proche), jamais de melange de deux niveaux
+					L0 = (int)(lambda + 0.5f);
+					if(L0 >= numLevels) L0 = numLevels - 1;
+					frac = 0.0f;
+				} else {
+					// Melange de 2 niveaux seulement dans la zone de transition (economise ~40% des lectures)
+					if(frac < 0.25f) frac = 0.0f;
+					else if(frac > 0.75f) { L0++; frac = 0.0f; }
+					else frac = (frac - 0.25f) * 2.0f;
+				}
 
 				float majX, majY;
 				if(lenX >= lenY) { majX = (float)stepX; majY = (float)stepY; } else { majX = dyX; majY = dyY; }
@@ -1115,6 +1256,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						if(!(largeMap && (ix < 0 || iy < 0 || ix >= (int32_t)dim || iy >= (int32_t)dim))) {
 							hdColorFromPng = levelPx[L0][(size_t)(iy & (dim - 1)) * dim + (ix & (dim - 1))];
 						}
+					} else if(filterMode == Mode7FilterMode::BilinearLight) {
+						hdColorFromPng = sampleLight(exactX, exactY, L0);
 					} else {
 						float aR = 0, aG = 0, aB = 0, aA = 0;
 						for(int i = 0; i < taps; i++) {
@@ -1197,6 +1340,74 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						}
 					}
 
+					// <m7material> : cartes PBR au meme point de la carte (normale, rugosite, metal, AO, emissive, couleur)
+					if(matOn && (hdColorFromPng >> 24) > 0) {
+						const double mu = (double)posFX / ((double)imgScale * 65536.0), mv = (double)posFY / ((double)imgScale * 65536.0);
+						const SnesHdM7MaterialInfo* M = nullptr;
+						if(!cellMat.empty()) {
+							int cx = (int)std::floor(mu / 8.0), cy = (int)std::floor(mv / 8.0);
+							if(!largeMap) { cx &= 127; cy &= 127; }
+							if(cx >= 0 && cy >= 0 && cx < 128 && cy < 128) M = cellMat[(size_t)cy * 128 + cx];
+						}
+						if(!M) M = lineMat[y];
+						// au loin, une repetition du materiau ne couvre que quelques pixels HD : relief invisible.
+						// Fondu de 8 a 3 pixels par repetition, puis plus aucune lecture (sauf couleur / emission a garder)
+						float matK = 1.0f;
+						if(M) {
+							const float scl0 = M->Scale > 0 ? M->Scale : (M->OnImg ? 64.0f : 8.0f);
+							const float repPx = (float)imgScale * scl0 / std::max(1e-6f, pMax); // pixels HD par repetition
+							matK = std::clamp((repPx - 3.0f) * 0.2f, 0.0f, 1.0f);
+							if(matK <= 0.0f && !(M->ColorMode && M->Albedo.Valid()) && !M->Emissive.Valid()) M = nullptr;
+						}
+						if(M) {
+							const float scl = M->Scale > 0 ? M->Scale : (M->OnImg ? 64.0f : 8.0f);
+							const float fu = (float)(mu / scl), fv = (float)(mv / scl);
+							const float texPerHd = pMax / (float)imgScale / scl; // repetitions par pixel HD
+							float smp[4];
+							float cr = (float)((hdColorFromPng >> 16) & 0xFF), cg = (float)((hdColorFromPng >> 8) & 0xFF), cb = (float)(hdColorFromPng & 0xFF);
+							if(M->ColorMode && M->Albedo.Valid()) {
+								M->Albedo.Sample(fu, fv, texPerHd * M->Albedo.W[0], smp);
+								const float k = M->ColorMode == 1 ? 1.0f : M->Mix;
+								cr += (smp[1] * 255.0f - cr) * k; cg += (smp[2] * 255.0f - cg) * k; cb += (smp[3] * 255.0f - cb) * k;
+							}
+							// une seule lecture pour normale + rugosite + AO (image regroupee au chargement)
+							float ao = 1.0f, rough = M->RoughValue, metal = M->MetalValue, pnR = 0.5f, pnG = 0.5f;
+							if(M->Packed.Valid() && matK > 0.0f) { M->Packed.Sample(fu, fv, texPerHd * M->Packed.W[0], smp); ao = smp[0]; pnR = smp[1]; pnG = smp[2]; rough = smp[3]; }
+							if(M->Metal.Valid() && matK > 0.0f) { M->Metal.Sample(fu, fv, texPerHd * M->Metal.W[0], smp); metal = smp[1]; }
+							const float aoK = 1.0f - (1.0f - ao) * M->AoStrength * matK;
+							cr *= aoK; cg *= aoK; cb *= aoK;
+							hdColorFromPng = (hdColorFromPng & 0xFF000000) | ((uint32_t)std::clamp(cr + 0.5f, 0.0f, 255.0f) << 16) | ((uint32_t)std::clamp(cg + 0.5f, 0.0f, 255.0f) << 8) | (uint32_t)std::clamp(cb + 0.5f, 0.0f, 255.0f);
+							float nx = 0, ny = 0;
+							if(M->HasNormal) {
+								// espace de la texture -> carte : x -> +u, vert (haut de l'image en GL) -> -v ; z recalcule
+								nx = (pnR * 2.0f - 1.0f);
+								ny = (pnG * 2.0f - 1.0f) * (M->NormalDX ? 1.0f : -1.0f);
+								const float nz = std::sqrt(std::max(0.0025f, 1.0f - nx * nx - ny * ny));
+								nx *= M->Strength * matK; ny *= M->Strength * matK;
+								const float il = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+								nx *= il; ny *= il;
+							}
+							const size_t pi = outIdx + sx;
+							if(M->Debug == 1) { // debug=normal : normale en couleur (plat = bleu-violet 128,128,255)
+								const float nz = std::sqrt(std::max(0.0f, 1.0f - nx * nx - ny * ny));
+								hdColorFromPng = 0xFF000000 | ((uint32_t)((nx * 0.5f + 0.5f) * 255) << 16) | ((uint32_t)((-ny * 0.5f + 0.5f) * 255) << 8) | (uint32_t)((nz * 0.5f + 0.5f) * 255);
+							}
+							s_matN[pi] = (uint16_t)((uint8_t)(int8_t)std::lround(nx * 127.0f) | ((uint16_t)(uint8_t)(int8_t)std::lround(ny * 127.0f) << 8));
+							s_matRM[pi] = (uint32_t)(rough * 255.0f + 0.5f) | ((uint32_t)(metal * 255.0f + 0.5f) << 8) | ((uint32_t)std::min(255.0f, M->Specular * 64.0f * matK) << 16);
+							s_matZ[pi] = pixelZ;
+							s_matRow[pi / outWidth] = 1;
+							if(matEmisOn) {
+								uint32_t em = 0;
+								if(M->Emissive.Valid()) {
+									M->Emissive.Sample(fu, fv, texPerHd * M->Emissive.W[0], smp);
+									const float e = M->EmissiveStrength * 255.0f;
+									em = ((uint32_t)std::min(255.0f, smp[1] * e) << 16) | ((uint32_t)std::min(255.0f, smp[2] * e) << 8) | (uint32_t)std::min(255.0f, smp[3] * e);
+								}
+								s_matEm[pi] = em;
+							}
+						}
+					}
+
 					// <m7LiquidBackground> : liquide visible a travers les pixels (semi-)transparents de la texture
 					if(lineLiq && (hdColorFromPng >> 24) < 255) {
 						const double lu = (double)posFX / ((double)imgScale * 65536.0), lv = (double)posFY / ((double)imgScale * 65536.0);
@@ -1207,6 +1418,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						const uint32_t lg = (uint32_t)(((wc >> 8) & 0xFF) * ia + ((hdColorFromPng >> 8) & 0xFF) * ta + 0.5f);
 						const uint32_t lb = (uint32_t)((wc & 0xFF) * ia + (hdColorFromPng & 0xFF) * ta + 0.5f);
 						hdColorFromPng = 0xFF000000 | (std::min(lr, 255u) << 16) | (std::min(lg, 255u) << 8) | std::min(lb, 255u);
+						if(lineLiq->ObjReflect > 0) s_liqCov[outIdx + sx] = (uint16_t)(((uint32_t)pixelZ << 8) | (uint32_t)std::clamp(ia * 255.0f + 0.5f, 0.0f, 255.0f));
 					}
 
 					uint32_t finalColor;
@@ -1235,29 +1447,26 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	};
 
+	_prepBeforeMs += msSince(tPrep0);
 	if(anyMode7) {
+		SnesHdPassTimer tmPass(_passMs[0]);
 		// Lignes reparties sur plusieurs coeurs (entrelacees pour equilibrer la charge).
 		// On laisse 2 coeurs a l'emulation et au reste du systeme.
-		unsigned hc = std::thread::hardware_concurrency();
-		int nThreads = std::clamp((int)hc - 2, 1, 8);
+		int nThreads = _pool.Size();
 		if(nThreads <= 1 || cropHeight < 16) {
 			for(uint32_t y = 0; y < cropHeight; y++) {
 				if(m7Lines[y].Img) renderMode7Line(y);
 			}
 		} else {
-			std::vector<std::thread> workers;
-			workers.reserve(nThreads);
-			for(int t = 0; t < nThreads; t++) {
-				workers.emplace_back([&, t]() {
-					for(uint32_t y = (uint32_t)t; y < cropHeight; y += (uint32_t)nThreads) {
-						if(m7Lines[y].Img) renderMode7Line(y);
-					}
-				});
-			}
-			for(auto& w : workers) w.join();
+			_pool.Run(nThreads, [&](int t) {
+				for(uint32_t y = (uint32_t)t; y < cropHeight; y += (uint32_t)nThreads) {
+					if(m7Lines[y].Img) renderMode7Line(y);
+				}
+			});
 		}
 	}
 
+	const auto tPrep1 = std::chrono::steady_clock::now();
 	for(uint32_t y = 0; y < cropHeight; y++) {
 		uint32_t snesY = y + srcY;
 		uint32_t outY = y + dstY;
@@ -1428,7 +1637,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 									uint32_t avgB = sumB / sumA;
 									hdColorFromPng = (avgA << 24) | (avgR << 16) | (avgG << 8) | avgB;
 								}
-							} else if(m7Img->FilterMode == Mode7FilterMode::Bilinear) {
+							} else if(m7Img->FilterMode == Mode7FilterMode::Bilinear || m7Img->FilterMode == Mode7FilterMode::BilinearLight) {
 								hdColorFromPng = sampleTileBilinear(exactX, exactY);
 							} else {
 								hdColorFromPng = getTileTexel(exactX, exactY);
@@ -1532,6 +1741,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	} 
 
+	_prepLoopMs += msSince(tPrep1);
+	const auto tPrep2 = std::chrono::steady_clock::now();
 	// ====================================================================
 	// ÉTAPE 2 : INJECTION DES ADDITIONS HD
 	// ====================================================================
@@ -1613,6 +1824,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	}
 
+	_prepAddMs += msSince(tPrep2);
+	const auto tPrep3 = std::chrono::steady_clock::now();
 	// ====================================================================
 	// ÉTAPE 3 : PASSE DE RENDU UNIFIÉE ET TRIÉE PAR Z-INDEX ASCENDANT
 	// ====================================================================
@@ -2068,8 +2281,18 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// <m7light> / <m7ambient> : PREPARATION (sequentielle) - lumieres visibles de chaque vue
 	// ====================================================================
 	struct LightDraw { float U, V, H, R2, InvR2, Cr, Cg, Cb; bool Add; int X0, X1, Y0, Y1; int Group = -1; float Self = 1.0f; };
-	struct ViewLighting { float Ar = 1, Ag = 1, Ab = 1; bool Sky = true; bool AmbientOn = false; std::vector<LightDraw> Lights; };
+	struct ViewLighting {
+		float Ar = 1, Ag = 1, Ab = 1; bool Sky = true; bool AmbientOn = false; std::vector<LightDraw> Lights;
+		// soleil des materiaux 3D (direction vers le soleil dans le repere de la carte u, v, haut)
+		float Sx = 0, Sy = 0, Sz = 1, SunI = 0.5f, SunR = 255, SunG = 246, SunB = 232;
+		void SetSun(float azDeg, float elDeg, float inten, uint32_t col) {
+			const float az = azDeg * 0.01745329f, el = elDeg * 0.01745329f;
+			Sx = std::cos(el) * std::cos(az); Sy = std::cos(el) * std::sin(az); Sz = std::sin(el);
+			SunI = inten; SunR = (float)((col >> 16) & 0xFF); SunG = (float)((col >> 8) & 0xFF); SunB = (float)(col & 0xFF);
+		}
+	};
 	std::vector<ViewLighting> viewLights(m7Views.size());
+	for(ViewLighting& vl : viewLights) vl.SetSun(135.0f, 40.0f, 0.5f, 0xFFF6E8); // soleil par defaut (materiaux)
 	bool lightsOn = false;
 	auto& hdLights = SnesHdPackLoader::ActivePack->M7Lights;
 	auto& hdAmbients = SnesHdPackLoader::ActivePack->M7Ambients;
@@ -2087,6 +2310,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				VL.Ag = ((am.Tint >> 8) & 0xFF) / 255.0f * am.Brightness;
 				VL.Ab = (am.Tint & 0xFF) / 255.0f * am.Brightness;
 				VL.Sky = am.Sky;
+				if(am.SunSet) VL.SetSun(am.SunAz, am.SunEl, am.SunIntensity, am.SunColor);
 				VL.AmbientOn = std::abs(VL.Ar - 1.0f) > 0.002f || std::abs(VL.Ag - 1.0f) > 0.002f || std::abs(VL.Ab - 1.0f) > 0.002f;
 				break;
 			}
@@ -2173,6 +2397,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 		if(sprLightCand) lightsOn = true;
 	}
+	if(matOn && !m7Views.empty()) lightsOn = true; // materiaux 3D : la passe d'eclairage applique le soleil et le relief
 	// self < 1 : il faut savoir quel groupe de sprites a dessine chaque pixel (masque HD, groupe + 1)
 	bool slSelfOn = false;
 	if(sprLightCand) for(const SnesHdSpriteLightInfo* R : sprLightRules) if(R->SelfLight < 0.999f || R->Glow > 0 || R->Halo > 0) slSelfOn = true;
@@ -2279,6 +2504,20 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 		return false;
 	};
+	// <NoLiquidReflect> : tiles qui ne se refletent pas dans le liquide (Lakitu en l'air, piece qui s'envole...)
+	std::vector<const SnesHdNoLightRule*> noReflRules;
+	if(liqOn) for(auto& ur : SnesHdPackLoader::ActivePack->NoReflectRules) if(ur->MatchesCondition()) noReflRules.push_back(ur.get());
+	const bool noReflOn = !noReflRules.empty();
+	auto noReflTile = [&](const SnesHdPackTileInfo* t) -> bool {
+		if(!t) return false;
+		for(const SnesHdNoLightRule* r : noReflRules) {
+			if(t->MemoryHash != r->Hash) continue;
+			if(r->AnyPalette || t->PaletteHash == 0xFFFFFFFF || t->PaletteHash == r->Palette) return true;
+		}
+		return false;
+	};
+	static std::vector<uint8_t> s_noRefl;
+	if(noReflOn) s_noRefl.assign((size_t)outWidth * hdHeight, 0);
 	// Masque HD "pas d'eclairage" : pixels REELLEMENT dessines par un sprite hors du sol (HUD...) ou exclu
 	static std::vector<uint8_t> s_noLight;
 	if(maskOn) s_noLight.assign((size_t)outWidth * hdHeight, 0);
@@ -2369,7 +2608,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 
 	static std::vector<float> s_sprRow;
-	bool p3Occlusion = reliefOn || bbOn || mdOn || lightsOn || fxOn || fxPostOn; // carte des sprites utile aussi au relief, aux panneaux, aux modeles et aux lumieres
+	bool p3Occlusion = reliefOn || bbOn || mdOn || lightsOn || fxOn || fxPostOn || liqOn; // carte des sprites utile aussi au relief, aux panneaux, aux modeles et aux lumieres
 	for(auto& dl : p3Draws) { if(!dl.empty()) { p3Occlusion = true; break; } }
 	// Identifiant de sprite = numero OAM + 128 x bande d'ecran (vue Mode 7 qui contient la ligne).
 	// Super Mario Kart recharge l'OAM en milieu d'image : la meme entree sert a un sprite de la vue du haut
@@ -2968,8 +3207,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	};
 
 	// <m7model> GPU : recuperation de l'image dessinee pendant la phase Mode 7 / sprites
-	if(gpuModelsOn) gpuModelsOn = SnesHdGpu::Get().FetchModels(s_gpuColor, s_gpuGround);
+	if(gpuModelsOn) { SnesHdPassTimer tmGpuF(_gpuFetchMs); gpuModelsOn = SnesHdGpu::Get().FetchModels(s_gpuColor, s_gpuGround); }
 
+	_prepEffectsMs += msSince(tPrep3);
+	const auto tPrep4 = std::chrono::steady_clock::now();
 	std::vector<RenderTask> tasks;
 
 	for(size_t i = 0; i < hdOverlays.size(); i++) {
@@ -3203,6 +3444,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								const bool front = frontTile(item.Tile) || (isSpr && (frontAll || (frontHud && sprGroupRow[sid] < 0.0f))); // <FrontOf3D>
 								s_sprRow[pixelIndex] = front ? kFront : (isSpr ? sprGroupRow[sid] : -1.0f);
 								if(slSelfOn) s_slGroup[pixelIndex] = isSpr ? (uint16_t)(sid + 1) : 0;
+								if(noReflOn) s_noRefl[pixelIndex] = noReflTile(item.Tile) ? 1 : 0;
 							}
 							if(maskOn && alpha >= 128) s_noLight[pixelIndex] = (item.oamIndex < 128 && (sprGroupRow[itemSprId(item)] < 0.0f || noLightTile(item.Tile))) ? 1 : 0;
 							uint32_t finalColor = hdColorFromPng;
@@ -3236,22 +3478,137 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 	};
 
+	_prepAfterMs += msSince(tPrep1);
+	_prepSortMs += msSince(tPrep4);
 	{
-		unsigned hc = std::thread::hardware_concurrency();
-		int nThreads = std::clamp((int)hc - 2, 1, 8);
+		int nThreads = _pool.Size();
+		SnesHdPassTimer tmPass(_passMs[1]);
 		if(nThreads <= 1 || hdHeight < 64 || tasks.empty()) {
 			composeBand(0, hdHeight);
 		} else {
 			uint32_t bandH = (hdHeight + nThreads - 1) / nThreads;
-			std::vector<std::thread> workers;
-			workers.reserve(nThreads);
-			for(int t = 0; t < nThreads; t++) {
+			_pool.Run(nThreads, [&](int t) {
 				uint32_t b0 = (uint32_t)t * bandH;
 				uint32_t b1 = std::min(hdHeight, b0 + bandH);
-				if(b0 >= b1) break;
-				workers.emplace_back([&composeBand, b0, b1]() { composeBand(b0, b1); });
+				if(b0 < b1) composeBand(b0, b1);
+			});
+		}
+	}
+
+	// ====================================================================
+	// <m7LiquidBackground> : REFLETS des objets (karts, sprites poses, panneaux, modeles, relief) dans l'eau / la lave
+	// Camera stenope a axe horizontal : un point a la hauteur h au-dessus de son pied (ligne g) se reflete
+	// a la ligne 2g - y (symetrie exacte par rapport a la ligne des pieds). Passe 1 : chaque pixel d'objet
+	// est projete sous ses pieds ; s'il tombe sur du liquide visible (meme Z que le Mode 7, pas d'objet devant),
+	// le plus proche (pieds les plus bas) gagne. Passe 2 : melange avec ondulation horizontale et fondu.
+	// ====================================================================
+	if(liqOn && p3Occlusion && !m7Views.empty()) {
+		static std::vector<uint32_t> s_reflCol;
+		static std::vector<float> s_reflG;
+		const float sc = (float)scale;
+		// ligne HD -> vue Mode 7 qui la contient (seulement les vues qui ont du liquide) : un reflet reste dans SA vue
+		// (Mario Kart : le kart du haut ne se reflete plus dans l'eau de la carte du bas)
+		std::vector<int> rowView(hdHeight, -1);
+		for(size_t v = 0; v < m7Views.size(); v++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+			bool hasLiq = false;
+			// reflectviews= : vue 1 = haut de l'ecran, vue 2 = bas (carte d'ensemble de Mario Kart en 1 joueur)
+			for(int y = std::max(0, zn.Y0); y <= zn.Y1 && y < (int)cropHeight; y++) {
+				const SnesHdM7LiquidInfo* L = lineLiquid[y];
+				// haut / bas d'apres la position de la vue a l'ecran (pas son rang : une vue peut manquer une frame)
+				const int screenView = ((zn.AreaY0 + zn.AreaY1) / 2 < (int)cropHeight / 2) ? 0 : 1;
+				if(L && (L->ReflectViews == 0 || (L->ReflectViews & (1 << screenView)))) { hasLiq = true; break; }
 			}
-			for(auto& w : workers) w.join();
+			if(!hasLiq) continue;
+			const int y0 = std::max(0, (zn.AreaY0 + (int)dstY) * (int)scale), y1 = std::min((int)hdHeight - 1, (zn.AreaY1 + 1 + (int)dstY) * (int)scale - 1);
+			for(int y = y0; y <= y1; y++) rowView[y] = (int)v;
+		}
+		s_reflG.assign((size_t)outWidth * hdHeight, -1.0f);
+		s_reflCol.resize((size_t)outWidth * hdHeight);
+		// passe 1 par paquets de COLONNES (une source et sa cible sont dans la meme colonne : pas de conflit entre coeurs)
+		// lignes cibles touchees (une copie par coeur, fusionnees ensuite) : la passe 2 saute les autres
+		const int nThr = _pool.Size();
+		SnesHdPassTimer tmPass(_passMs[2]);
+		std::vector<std::vector<uint8_t>> rowHasT(nThr, std::vector<uint8_t>(hdHeight, 0));
+		// demi-cadence : une ligne source sur deux (les trous d'une ligne sont combles par la passe 2)
+		auto reflCols = [&](uint32_t x0, uint32_t x1, int ti) {
+			std::vector<uint8_t>& rowHas = rowHasT[ti];
+			for(uint32_t yy = 0; yy < hdHeight; yy += 2) {
+				const int rv = rowView[yy];
+				if(rv < 0) continue;
+				const float* sprY = &s_sprRow[(size_t)yy * outWidth];
+				const uint8_t* noR = noReflOn ? &s_noRefl[(size_t)yy * outWidth] : nullptr;
+				for(uint32_t xx = x0; xx < x1; xx++) {
+					const float g = sprY[xx];
+					if(g < 0.0f || g >= kFront) continue;
+					if(noR && noR[xx]) continue; // <NoLiquidReflect>
+					const float gH = (g + (float)dstY) * sc;
+					const int ty = (int)std::lround(2.0f * gH - (float)yy - 1.0f);
+					if(ty <= (int)yy || ty >= (int)hdHeight || rowView[ty] != rv) continue;
+					const size_t t = (size_t)ty * outWidth + xx;
+					const uint16_t cov = s_liqCov[t];
+					if(!(cov & 0xFF) || _zBuffer[t] != (uint8_t)(cov >> 8)) continue; // liquide recouvert (sprite, decor)
+					if(s_sprRow[t] >= 0.0f) continue;                                     // objet devant le liquide
+					if(g > s_reflG[t]) { s_reflG[t] = g; s_reflCol[t] = out[(size_t)yy * outWidth + xx]; rowHas[ty] = 1; }
+				}
+			}
+		};
+		std::vector<uint8_t> rowHas;
+		// passe 2 par bandes de LIGNES : melange avec ondulation et fondu
+		auto reflRows = [&](uint32_t b0, uint32_t b1) {
+			for(uint32_t yy = b0; yy < b1; yy++) {
+				if(rowView[yy] < 0) continue;
+				if(!rowHas[yy] && !(yy > 0 && rowHas[yy - 1]) && !(yy + 1 < hdHeight && rowHas[yy + 1])) continue;
+				const int ry = (int)(yy / scale) - (int)dstY;
+				if(ry < 0 || ry >= (int)cropHeight) continue;
+				const SnesHdM7LiquidInfo* L = lineLiquid[ry];
+				if(!L || L->ObjReflect <= 0) continue;
+				uint32_t* row = out + (size_t)yy * outWidth;
+				const uint16_t* covRow = &s_liqCov[(size_t)yy * outWidth];
+				const float* gRow = &s_reflG[(size_t)yy * outWidth];
+				const float fadeHD = std::max(1.0f, L->ReflectFade * sc);
+				const float amp = L->Ripple * sc;
+				const uint32_t lc = L->Color;
+				// ondulation : sin(phase + x * 0.011) par rotation incrementale (pas de sinus par pixel)
+				float sn, cs; fastSinCos(liqTime * 2.7f + (float)yy * 0.66f / sc, sn, cs);
+				float dS, dC; fastSinCos(0.011f, dS, dC);
+				for(uint32_t xx = 0; xx < outWidth; xx++) {
+					const float s0 = sn; sn = sn * dC + cs * dS; cs = cs * dC - s0 * dS;
+					const uint16_t cov = covRow[xx];
+					if(!(cov & 0xFF)) continue;
+					const int sx = std::clamp((int)xx + (int)std::lround(s0 * amp), 0, (int)outWidth - 1);
+					size_t src = (size_t)yy * outWidth + sx;
+					float g = gRow[sx];
+					if(g < 0.0f && yy > 0 && s_reflG[src - outWidth] >= 0.0f) { src -= outWidth; g = s_reflG[src]; }
+					else if(g < 0.0f && yy + 1 < hdHeight && s_reflG[src + outWidth] >= 0.0f) { src += outWidth; g = s_reflG[src]; }
+					if(g < 0.0f) continue;
+					const float dist = (float)yy - (g + (float)dstY) * sc;
+					const float k = L->ObjReflect * (float)(cov & 0xFF) / 255.0f * std::max(0.0f, 1.0f - dist / fadeHD);
+					if(k <= 0.004f) continue;
+					const uint32_t rc = s_reflCol[src], c = row[xx];
+					// reflet un peu assombri et teinte par le liquide
+					const float rr = ((rc >> 16) & 0xFF) * 0.8f + ((lc >> 16) & 0xFF) * 0.2f;
+					const float rg = ((rc >> 8) & 0xFF) * 0.8f + ((lc >> 8) & 0xFF) * 0.2f;
+					const float rb = (rc & 0xFF) * 0.8f + (lc & 0xFF) * 0.2f;
+					const float r = ((c >> 16) & 0xFF) + (rr - ((c >> 16) & 0xFF)) * k;
+					const float gg = ((c >> 8) & 0xFF) + (rg - ((c >> 8) & 0xFF)) * k;
+					const float b = (c & 0xFF) + (rb - (c & 0xFF)) * k;
+					row[xx] = (c & 0xFF000000) | ((uint32_t)(r + 0.5f) << 16) | ((uint32_t)(gg + 0.5f) << 8) | (uint32_t)(b + 0.5f);
+				}
+			}
+		};
+		const int nThreads = nThr;
+		if(nThreads <= 1) {
+			reflCols(0, outWidth, 0);
+			rowHas = rowHasT[0];
+			reflRows(0, hdHeight);
+		} else {
+			const uint32_t cw = (outWidth + nThreads - 1) / nThreads;
+			_pool.Run(nThreads, [&](int t) { uint32_t a = t * cw, b = std::min(outWidth, a + cw); if(a < b) reflCols(a, b, t); });
+			rowHas.assign(hdHeight, 0);
+			for(auto& rh : rowHasT) for(uint32_t y = 0; y < hdHeight; y++) rowHas[y] |= rh[y];
+			const uint32_t bh = (hdHeight + nThreads - 1) / nThreads;
+			_pool.Run(nThreads, [&](int t) { uint32_t a = t * bh, b = std::min(hdHeight, a + bh); if(a < b) reflRows(a, b); });
 		}
 	}
 
@@ -3267,9 +3624,31 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			std::vector<float> mr(outWidth), mg(outWidth), mb(outWidth), ar(outWidth), ag(outWidth), ab(outWidth), wu(outWidth), wv(outWidth);
 			std::vector<char> wok(outWidth);
 			std::vector<int> feetHD(outWidth); // -1 = sol ; sinon ligne HD des pieds de l'objet dessine a ce pixel
+			std::vector<float> spR(outWidth), spG(outWidth), spB(outWidth); // reflets brillants des materiaux (additifs)
+			// <m7material> : pixel de piste avec materiau, toujours visible (meme Z que le Mode 7) ?
+			auto matAt = [&](size_t idx, float& nx, float& ny, float& nz, float& rough, float& metal, float& spec) -> bool {
+				const uint8_t z = s_matZ[idx];
+				if(!z || z != _zBuffer[idx]) return false;
+				const uint16_t n = s_matN[idx];
+				nx = (float)(int8_t)(n & 0xFF) / 127.0f; ny = (float)(int8_t)(n >> 8) / 127.0f;
+				nz = std::sqrt(std::max(0.0025f, 1.0f - nx * nx - ny * ny));
+				const uint32_t rm = s_matRM[idx];
+				rough = (float)(rm & 0xFF) / 255.0f; metal = (float)((rm >> 8) & 0xFF) / 255.0f; spec = (float)((rm >> 16) & 0xFF) / 64.0f;
+				return true;
+			};
+			// reflet brillant (Blinn-Phong) : L et V normalises, renvoie la force (deja ponderee par la matiere)
+			auto specTerm = [](float nx, float ny, float nz, float lx, float ly, float lz, float vx, float vy, float vz, float rough, float metal, float spec) -> float {
+				float hx = lx + vx, hy = ly + vy, hz = lz + vz;
+				const float hl = std::sqrt(hx * hx + hy * hy + hz * hz); if(hl < 1e-5f) return 0.0f;
+				const float nh = (nx * hx + ny * hy + nz * hz) / hl; if(nh <= 0.0f) return 0.0f;
+				const float gl = 1.0f - rough;
+				const float shin = 4.0f + gl * gl * gl * 180.0f;
+				const float p = nh / (shin - shin * nh + nh); // approximation de Schlick de nh^shin (pas de pow par pixel)
+				return p * gl * gl * spec * (0.25f + 0.75f * metal) * 1.5f;
+			};
 			for(size_t v = 0; v < m7Views.size(); v++) {
 				const ViewLighting& VL = viewLights[v];
-				if(!VL.AmbientOn && VL.Lights.empty()) continue;
+				if(!VL.AmbientOn && VL.Lights.empty() && !matOn) continue;
 				const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
 				const int areaTop = (zn.AreaY0 + (int)dstY) * sc, zoneTop = (zn.Y0 + (int)dstY) * sc;
 				const int areaBot = std::min((int)hdHeight - 1, (zn.AreaY1 + 1 + (int)dstY) * sc - 1);
@@ -3285,10 +3664,18 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						if(!sky && yy >= d.Y0 && yy <= d.Y1) anyGround = true;
 						if((!sky && yy >= d.Y0 && yy <= d.Y1) || (sprY && yy <= d.Y1)) { anyLight = true; lx0 = std::min(lx0, d.X0); lx1 = std::max(lx1, d.X1); }
 					}
+					const bool matRow = matOn && !sky && s_matRow[yy];
 					if(sky && !VL.Sky && !sprY) continue;
-					if(!VL.AmbientOn && !anyLight) continue;
+					if(!VL.AmbientOn && !anyLight && !matRow) continue;
 					std::fill(mr.begin(), mr.end(), VL.Ar); std::fill(mg.begin(), mg.end(), VL.Ag); std::fill(mb.begin(), mb.end(), VL.Ab);
 					std::fill(ar.begin(), ar.end(), 0.0f); std::fill(ag.begin(), ag.end(), 0.0f); std::fill(ab.begin(), ab.end(), 0.0f);
+					// materiaux : point de la carte le long de la ligne (exact : une ligne d'ecran = une droite sur la carte)
+					double mUa = 0, mVa = 0, mUb = 0, mVb = 0; bool mOk = false;
+					if(matRow) {
+						std::fill(spR.begin(), spR.end(), 0.0f); std::fill(spG.begin(), spG.end(), 0.0f); std::fill(spB.begin(), spB.end(), 0.0f);
+						const double sy = std::clamp(((double)yy + 0.5) / sc - (double)dstY, (double)zn.Y0, (double)zn.Y1);
+						mOk = zn.Unproject(0.5 / sc - (double)dstX, sy, mUa, mVa) && zn.Unproject(((double)outWidth - 0.5) / sc - (double)dstX, sy, mUb, mVb);
+					}
 					if(anyLight) {
 						// point de la carte sous chaque pixel de la ligne (calcule une fois)
 						const double sy = ((double)yy + 0.5) / sc - (double)dstY;
@@ -3316,13 +3703,30 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								const float d2 = du * du + dv * dv + h2;
 								if(d2 >= d.R2) continue;
 								float a = 1.0f - d2 * d.InvR2; a *= a;
+								if(matRow && fr < 0) {
+									// materiau : orientation du pixel par rapport a la lumiere (rapport au sol plat) + reflet brillant
+									float nx, ny, nz, rgh, mtl, spc;
+									const size_t idx = (size_t)yy * outWidth + xx;
+									if(matAt(idx, nx, ny, nz, rgh, mtl, spc)) {
+										float lx = d.U - wu[xx], ly = d.V - wv[xx], lz = d.H;
+										const float il = 1.0f / std::sqrt(lx * lx + ly * ly + lz * lz + 1e-4f); lx *= il; ly *= il; lz *= il;
+										const float ratio = std::clamp((nx * lx + ny * ly + nz * lz) / std::max(0.05f, lz), 0.0f, 3.0f);
+										if(spc > 0 && d.Cr + d.Cg + d.Cb > 0) {
+											float vx = (float)zn.Cx - wu[xx], vy = (float)zn.Cy - wv[xx], vz = (float)zn.Height;
+											const float iv = 1.0f / std::sqrt(vx * vx + vy * vy + vz * vz + 1e-4f); vx *= iv; vy *= iv; vz *= iv;
+											const float st = specTerm(nx, ny, nz, lx, ly, lz, vx, vy, vz, rgh, mtl, spc) * a * 255.0f;
+											spR[xx] += d.Cr * st; spG[xx] += d.Cg * st; spB[xx] += d.Cb * st;
+										}
+										a *= ratio;
+									}
+								}
 								if(d.Group >= 0 && slSelfOn) { const uint16_t g = s_slGroup[(size_t)yy * outWidth + xx]; if(g && slRep[g - 1] == d.Group) a *= d.Self; } // le sprite qui porte la lumiere
 								if(d.Add) { ar[xx] += d.Cr * a * 255.0f; ag[xx] += d.Cg * a * 255.0f; ab[xx] += d.Cb * a * 255.0f; }
 								else { mr[xx] += d.Cr * a; mg[xx] += d.Cg * a; mb[xx] += d.Cb * a; }
 							}
 						}
 					}
-					const int ax0 = VL.AmbientOn ? 0 : lx0, ax1 = VL.AmbientOn ? (int)outWidth - 1 : lx1;
+					const int ax0 = (VL.AmbientOn || matRow) ? 0 : lx0, ax1 = (VL.AmbientOn || matRow) ? (int)outWidth - 1 : lx1;
 					uint32_t* row = out + (size_t)yy * outWidth;
 					const uint8_t* noL = &s_noLight[(size_t)yy * outWidth];
 					for(int xx = ax0; xx <= ax1; xx++) {
@@ -3334,27 +3738,58 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 							if(!VL.AmbientOn) continue;                 // ciel : pas de lumiere ponctuelle
 						}
 						const uint32_t c = row[xx];
-						const float r = std::clamp(((c >> 16) & 0xFF) * std::max(0.0f, mr[xx]) + ar[xx], 0.0f, 255.0f);
-						const float g = std::clamp(((c >> 8) & 0xFF) * std::max(0.0f, mg[xx]) + ag[xx], 0.0f, 255.0f);
-						const float b = std::clamp((c & 0xFF) * std::max(0.0f, mb[xx]) + ab[xx], 0.0f, 255.0f);
+						float kr = mr[xx], kg = mg[xx], kb = mb[xx], er = ar[xx], eg = ag[xx], eb = ab[xx];
+						float nx, ny, nz, rgh, mtl, spc;
+						if(matDebugLight && matRow) {
+							// debug=light : gris = eclairage du soleil (128 = sol plat), rouge = point de carte introuvable,
+							// bleu = materiau recouvert (Z different), pixel inchange = pas de materiau
+							const size_t di = (size_t)yy * outWidth + xx;
+							if(s_matZ[di]) {
+								if(!matAt(di, nx, ny, nz, rgh, mtl, spc)) row[xx] = 0xFF2040FF;
+								else if(!mOk) row[xx] = 0xFFFF2020;
+								else {
+									const float sd = std::max(0.0f, 1.0f + VL.SunI * ((nx * VL.Sx + ny * VL.Sy + nz * VL.Sz) - VL.Sz));
+									const uint32_t g8 = (uint32_t)std::clamp(sd * 128.0f, 0.0f, 255.0f);
+									row[xx] = 0xFF000000 | (g8 << 16) | (g8 << 8) | g8;
+								}
+							}
+							continue;
+						}
+						if(matRow && mOk && matAt((size_t)yy * outWidth + xx, nx, ny, nz, rgh, mtl, spc)) {
+							// soleil : le relief des materiaux s'eclaire / s'assombrit selon son orientation (sol plat inchange)
+							const float sunDiff = std::max(0.0f, 1.0f + VL.SunI * ((nx * VL.Sx + ny * VL.Sy + nz * VL.Sz) - VL.Sz));
+							kr = VL.Ar * sunDiff + (kr - VL.Ar); kg = VL.Ag * sunDiff + (kg - VL.Ag); kb = VL.Ab * sunDiff + (kb - VL.Ab);
+							if(spc > 0 && VL.SunI > 0) {
+								const float f = ((float)xx + 0.5f) / (float)outWidth;
+								const float pu = (float)(mUa + (mUb - mUa) * f), pv = (float)(mVa + (mVb - mVa) * f);
+								float vx = (float)zn.Cx - pu, vy = (float)zn.Cy - pv, vz = (float)zn.Height;
+								const float iv = 1.0f / std::sqrt(vx * vx + vy * vy + vz * vz + 1e-4f); vx *= iv; vy *= iv; vz *= iv;
+								const float st = specTerm(nx, ny, nz, VL.Sx, VL.Sy, VL.Sz, vx, vy, vz, rgh, mtl, spc) * VL.SunI * std::min(1.0f, VL.Ar + 0.2f);
+								spR[xx] += VL.SunR * st; spG[xx] += VL.SunG * st; spB[xx] += VL.SunB * st;
+							}
+							// metal : reflets teintes par la couleur de la surface
+							const float tr = 1.0f + (((c >> 16) & 0xFF) / 255.0f - 1.0f) * mtl, tg = 1.0f + (((c >> 8) & 0xFF) / 255.0f - 1.0f) * mtl, tb = 1.0f + ((c & 0xFF) / 255.0f - 1.0f) * mtl;
+							er += spR[xx] * tr; eg += spG[xx] * tg; eb += spB[xx] * tb;
+							if(matEmisOn) { const uint32_t em = s_matEm[(size_t)yy * outWidth + xx]; er += (float)((em >> 16) & 0xFF); eg += (float)((em >> 8) & 0xFF); eb += (float)(em & 0xFF); }
+						}
+						const float r = std::clamp(((c >> 16) & 0xFF) * std::max(0.0f, kr) + er, 0.0f, 255.0f);
+						const float g = std::clamp(((c >> 8) & 0xFF) * std::max(0.0f, kg) + eg, 0.0f, 255.0f);
+						const float b = std::clamp((c & 0xFF) * std::max(0.0f, kb) + eb, 0.0f, 255.0f);
 						row[xx] = (c & 0xFF000000) | ((uint32_t)(r + 0.5f) << 16) | ((uint32_t)(g + 0.5f) << 8) | (uint32_t)(b + 0.5f);
 					}
 				}
 			}
 		};
-		unsigned hc = std::thread::hardware_concurrency();
-		int nThreads = std::clamp((int)hc - 2, 1, 8);
+		int nThreads = _pool.Size();
+		SnesHdPassTimer tmPass(_passMs[3]);
 		if(nThreads <= 1 || hdHeight < 64) {
 			lightBand(0, hdHeight);
 		} else {
 			uint32_t bandH = (hdHeight + nThreads - 1) / nThreads;
-			std::vector<std::thread> workers;
-			for(int t = 0; t < nThreads; t++) {
+			_pool.Run(nThreads, [&](int t) {
 				uint32_t b0 = (uint32_t)t * bandH, b1 = std::min(hdHeight, b0 + bandH);
-				if(b0 >= b1) break;
-				workers.emplace_back([&lightBand, b0, b1]() { lightBand(b0, b1); });
-			}
-			for(auto& w : workers) w.join();
+				if(b0 < b1) lightBand(b0, b1);
+			});
 		}
 	}
 
@@ -3618,19 +4053,16 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				}
 			}
 		};
-		unsigned hc = std::thread::hardware_concurrency();
-		int nThreads = std::clamp((int)hc - 2, 1, 8);
+		int nThreads = _pool.Size();
+		SnesHdPassTimer tmPass(_passMs[4]);
 		if(nThreads <= 1 || hdHeight < 64) {
 			atmoBand(0, hdHeight);
 		} else {
 			uint32_t bandH = (hdHeight + nThreads - 1) / nThreads;
-			std::vector<std::thread> workers;
-			for(int t = 0; t < nThreads; t++) {
+			_pool.Run(nThreads, [&](int t) {
 				uint32_t b0 = (uint32_t)t * bandH, b1 = std::min(hdHeight, b0 + bandH);
-				if(b0 >= b1) break;
-				workers.emplace_back([&atmoBand, b0, b1]() { atmoBand(b0, b1); });
-			}
-			for(auto& w : workers) w.join();
+				if(b0 < b1) atmoBand(b0, b1);
+			});
 		}
 	}
 
@@ -3808,6 +4240,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 
 	// ====================================================================
+	SnesHdPassTimer tmTail(_tailMs);
 	// ÉTAPE 4 : GESTION DES VIDÉOS (pl_mpeg)
 	// ====================================================================
 	if(SnesHdPackLoader::ActivePack != nullptr && out != nullptr) {
@@ -4129,6 +4562,46 @@ if(video->IsPlaying && video->VideoPlayer != nullptr) {
 				out[y * outWidth + x] |= 0xFF000000;
 			}
 		}
+	}
+
+	// Chronometrage des passes : moyenne sur 300 frames
+	if(++_passFrames >= 300) {
+		const double total = _passMs[0] + _passMs[1] + _passMs[2] + _passMs[3] + _passMs[4];
+		char buf[224];
+		snprintf(buf, sizeof(buf), "[HD-PASS] ms/frame : m7 %.2f, compose %.2f, reflets %.2f, eclairage %.2f, atmosphere %.2f (total %.2f)",
+			_passMs[0] / _passFrames, _passMs[1] / _passFrames, _passMs[2] / _passFrames,
+			_passMs[3] / _passFrames, _passMs[4] / _passFrames, total / _passFrames);
+		MessageManager::Log(buf);
+		char buf2[200];
+		snprintf(buf2, sizeof(buf2), "[HD-PASS] filtre : total %.2f ms/frame, attente de l'emulation %.2f ms/frame",
+			_filterMs / _passFrames, _idleMs / _passFrames);
+		MessageManager::Log(buf2);
+		const double passesAvg = (_passMs[0] + _passMs[1] + _passMs[2] + _passMs[3] + _passMs[4]) / _passFrames;
+		const double gs = _gpuSubmitMs / _passFrames, gf = _gpuFetchMs / _passFrames, tl = _tailMs / _passFrames;
+		const double pb = _prepBeforeMs / _passFrames - gs;
+		const double pa = _prepAfterMs / _passFrames - gf;
+		const double reste = _filterMs / _passFrames - passesAvg - gs - gf - tl - pb - pa;
+		char buf3[280];
+		snprintf(buf3, sizeof(buf3), "[HD-PASS] autres : GPU envoi %.2f, GPU recuperation %.2f, fin %.2f, preparation avant m7 %.2f, tiles/sprites apres m7 %.2f, non mesure %.2f ms/frame",
+			gs, gf, tl, pb, pa, reste);
+		MessageManager::Log(buf3);
+		char buf4[260];
+		snprintf(buf4, sizeof(buf4), "[HD-PASS] tiles/sprites : boucle pixels %.2f, additions+sprites %.2f, effets (preparation) %.2f, taches et tri %.2f ms/frame",
+			_prepLoopMs / _passFrames, _prepAddMs / _passFrames, _prepEffectsMs / _passFrames - gf, _prepSortMs / _passFrames);
+		MessageManager::Log(buf4);
+		_prepLoopMs = 0;
+		_prepAddMs = 0;
+		_prepSortMs = 0;
+		_prepEffectsMs = 0;
+		_gpuSubmitMs = 0;
+		_gpuFetchMs = 0;
+		_tailMs = 0;
+		_prepBeforeMs = 0;
+		_prepAfterMs = 0;
+		_filterMs = 0;
+		_idleMs = 0;
+		for(double& ms : _passMs) ms = 0;
+		_passFrames = 0;
 	}
 }
 //------------------------------------------------------------------------------------------------------------/

@@ -500,7 +500,8 @@ enum class Mode7FilterMode
 {
 	Nearest,
 	Bilinear,
-	Anisotropic
+	Anisotropic,
+	BilinearLight // bilineaire sur un seul niveau de mip (moins de lectures, pas de melange de niveaux)
 };
 
 
@@ -515,7 +516,7 @@ struct SnesHdMode7Image
 	Mode7FilterMode FilterMode = Mode7FilterMode::Nearest;
 
 	// Rétrocompatibilité si d'anciennes fonctions lisent encore ce booléen
-	bool UseBilinearFilter() const { return FilterMode == Mode7FilterMode::Bilinear; }
+	bool UseBilinearFilter() const { return FilterMode == Mode7FilterMode::Bilinear || FilterMode == Mode7FilterMode::BilinearLight; }
 
 	std::vector<std::vector<uint32_t>> Mipmaps;
 	// <m7tiles> : mipmaps de la tile extraite de l'atlas (construits par le filtre HD)
@@ -1222,6 +1223,98 @@ struct SnesHdSpriteLightInfo
 	}
 };
 
+// ---------------------------------------------------------
+// <m7material> : MATERIAUX 3D des pistes (cartes PBR standard : normal, rugosite, metal, AO, emissive, couleur)
+// Une carte de materiau = image + chaine de mipmaps ; echantillonnage bilineaire en repetition.
+struct SnesHdMaterialMap
+{
+	std::vector<std::vector<uint32_t>> Mips; // niveau 0 = image d'origine (ARGB)
+	std::vector<uint32_t> W, H;
+	bool Valid() const { return !Mips.empty() && W[0] > 0 && H[0] > 0; }
+	void Set(std::vector<uint32_t>&& px, uint32_t w, uint32_t h)
+	{
+		Mips.clear(); W.clear(); H.clear();
+		if(w == 0 || h == 0 || px.size() < (size_t)w * h) return;
+		Mips.push_back(std::move(px)); W.push_back(w); H.push_back(h);
+		while((W.back() > 1 || H.back() > 1) && Mips.size() < 14) {
+			const uint32_t pw = W.back(), ph = H.back(), nw = std::max(1u, pw / 2), nh = std::max(1u, ph / 2);
+			std::vector<uint32_t> n((size_t)nw * nh);
+			const std::vector<uint32_t>& p = Mips.back();
+			for(uint32_t y = 0; y < nh; y++) for(uint32_t x = 0; x < nw; x++) {
+				uint32_t acc[4] = { 0, 0, 0, 0 };
+				for(int k = 0; k < 4; k++) {
+					const uint32_t c = p[(size_t)std::min(ph - 1, y * 2 + (k >> 1)) * pw + std::min(pw - 1, x * 2 + (k & 1))];
+					acc[0] += c >> 24; acc[1] += (c >> 16) & 0xFF; acc[2] += (c >> 8) & 0xFF; acc[3] += c & 0xFF;
+				}
+				n[(size_t)y * nw + x] = ((acc[0] / 4) << 24) | ((acc[1] / 4) << 16) | ((acc[2] / 4) << 8) | (acc[3] / 4);
+			}
+			Mips.push_back(std::move(n)); W.push_back(nw); H.push_back(nh);
+		}
+	}
+	// fu, fv : coordonnees en repetitions (1.0 = une image) ; foot = pixels de l'image par pixel HD
+	// Reduction (foot >= 1, cas courant sur la piste) : 1 lecture au bon niveau de mipmap ; agrandissement : bilineaire.
+	void Sample(float fu, float fv, float foot, float out[4]) const
+	{
+		int lv = 0;
+		if(foot > 1.0f) { int e; std::frexp(foot, &e); lv = e - 1; }
+		lv = std::min(lv, (int)Mips.size() - 1);
+		const uint32_t w = W[lv], h = H[lv];
+		const std::vector<uint32_t>& p = Mips[lv];
+		if(foot >= 1.0f) {
+			int ix = (int)std::floor(fu * (float)w), iy = (int)std::floor(fv * (float)h);
+			if((w & (w - 1)) == 0) ix &= (int)w - 1; else { ix %= (int)w; if(ix < 0) ix += w; }
+			if((h & (h - 1)) == 0) iy &= (int)h - 1; else { iy %= (int)h; if(iy < 0) iy += h; }
+			const uint32_t c = p[(size_t)iy * w + ix];
+			out[0] = (float)(c >> 24) * (1.0f / 255.0f); out[1] = (float)((c >> 16) & 0xFF) * (1.0f / 255.0f);
+			out[2] = (float)((c >> 8) & 0xFF) * (1.0f / 255.0f); out[3] = (float)(c & 0xFF) * (1.0f / 255.0f);
+			return;
+		}
+		float x = fu * (float)w - 0.5f, y = fv * (float)h - 0.5f;
+		const float fx0 = std::floor(x), fy0 = std::floor(y);
+		const float tx = x - fx0, ty = y - fy0;
+		int ix = (int)fx0 % (int)w, iy = (int)fy0 % (int)h;
+		if(ix < 0) ix += w;
+		if(iy < 0) iy += h;
+		const int ix1 = (ix + 1) % (int)w, iy1 = (iy + 1) % (int)h;
+		const uint32_t c00 = p[(size_t)iy * w + ix], c10 = p[(size_t)iy * w + ix1], c01 = p[(size_t)iy1 * w + ix], c11 = p[(size_t)iy1 * w + ix1];
+		for(int k = 0; k < 4; k++) {
+			const int sh = 24 - k * 8; // a, r, g, b
+			const float a = (float)((c00 >> sh) & 0xFF), b = (float)((c10 >> sh) & 0xFF), c = (float)((c01 >> sh) & 0xFF), d = (float)((c11 >> sh) & 0xFF);
+			out[k] = (a + (b - a) * tx + (c - a) * ty + (a - b - c + d) * tx * ty) * (1.0f / 255.0f);
+		}
+	}
+};
+
+struct SnesHdM7MaterialInfo
+{
+	bool OnImg = false;              // true : toute la grosse texture <m7img> de la carte ; false : une tile <m7tiles>
+	uint32_t TileHash = 0;
+	bool AnyMap = true;
+	uint32_t MapHash = 0;
+	std::vector<uint32_t> MapHashes;
+	SnesHdMaterialMap Albedo, Normal, Rough, Metal, Ao, Emissive, Orm; // Orm : R = AO, G = rugosite, B = metal
+	SnesHdMaterialMap Packed;        // regroupee au chargement : A = AO, R/G = normale (X, Y), B = rugosite -> 1 lecture par pixel
+	bool HasNormal = false;
+	bool GlossInverted = false;      // carte "glossiness" (inverse de la rugosite)
+	bool NormalDX = false;           // convention DirectX (vert inverse)
+	float Scale = 0;                 // texels de carte par repetition (0 = auto : la tile, ou 64 pour la grosse texture)
+	int ColorMode = 0;               // 0 = couleur de la tile / texture du pack, 1 = couleur du materiau, 2 = melange
+	float Mix = 0.5f;
+	float Strength = 1.0f;           // force du relief (normal map)
+	float AoStrength = 1.0f;
+	float Specular = 1.0f;           // force des reflets brillants
+	float EmissiveStrength = 1.0f;
+	float RoughValue = 0.75f;        // rugosite si pas de carte
+	float MetalValue = 0.0f;         // metal si pas de carte
+	int Debug = 0;                   // debug=normal (1) : couleurs des normales ; debug=light (2) : eclairage seul
+	std::vector<SnesHdPackCondition*> Conditions;
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+};
+
 struct SnesHdM7AmbientInfo
 {
 	bool AnyMap = true;
@@ -1230,6 +1323,9 @@ struct SnesHdM7AmbientInfo
 	float Brightness = 1.0f;      // 1 = normal, 0.4 = nuit
 	uint32_t Tint = 0xFFFFFF;
 	bool Sky = true;              // assombrir aussi le ciel au-dessus de la piste
+	bool SunSet = false;          // soleil des materiaux 3D regle par cette ambiance
+	float SunAz = 135, SunEl = 40, SunIntensity = 0.5f; // direction (degres, comme flare sunaz / sunel), force
+	uint32_t SunColor = 0xFFF6E8;
 	std::vector<SnesHdPackCondition*> Conditions;
 	bool MatchesCondition()
 	{
@@ -1257,6 +1353,10 @@ struct SnesHdM7LiquidInfo
 	float Specular = 0.8f;             // reflets du soleil (eau)
 	float Reflect = 0.65f;             // reflet du ciel maxi (eau, angle rasant)
 	float Foam = 0.6f;                 // ecume dans les zones semi-transparentes du rivage
+	float ObjReflect = 0.55f;          // reflet des objets (karts, panneaux, modeles, relief) ; lave : 0.15
+	float ReflectFade = 40.0f;         // longueur du reflet sous les pieds avant de disparaitre (pixels SNES)
+	float Ripple = 1.0f;               // ondulation horizontale du reflet (pixels SNES)
+	int ReflectViews = 0;              // vues avec reflets : 0 = toutes ; bit 0 = vue du haut (1), bit 1 = vue du bas (2)
 	SnesHdPackBitmapInfo* Texture = nullptr; // detail optionnel (PNG qui se repete)
 	float TexScale = 32.0f;            // taille d'une repetition de la texture (texels)
 	std::vector<SnesHdPackCondition*> Conditions;
@@ -1568,7 +1668,9 @@ public:
 	std::vector<std::unique_ptr<SnesHdM7AmbientInfo>> M7Ambients;
 	std::vector<std::unique_ptr<SnesHdNoLightRule>> NoLightRules; // <NoLightFXOnSprite>
 	std::vector<std::unique_ptr<SnesHdSpriteLightInfo>> SpriteLights; // <SpriteLight>
+	std::vector<std::unique_ptr<SnesHdNoLightRule>> NoReflectRules; // <NoLiquidReflect> : tiles sans reflet dans l'eau / la lave
 	std::vector<std::unique_ptr<SnesHdNoLightRule>> FrontOf3DRules; // <FrontOf3D> : devant relief / panneaux / modeles / effets
+	std::vector<std::unique_ptr<SnesHdM7MaterialInfo>> M7Materials; // <m7material>
 	std::vector<std::unique_ptr<SnesHdM7LiquidInfo>> M7Liquids;   // <m7LiquidBackground>
 	std::vector<std::unique_ptr<SnesHdM7EffectInfo>> M7Effects;   // <m7Effect>
 
