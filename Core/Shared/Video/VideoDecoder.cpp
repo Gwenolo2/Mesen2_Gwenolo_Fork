@@ -39,6 +39,8 @@ void VideoDecoder::Init()
 
 FrameInfo VideoDecoder::GetBaseFrameInfo(bool removeOverscan)
 {
+	// Format large : l'extension 16:9 (de chaque cote) fait partie de la taille affichee
+	uint32_t wsExtra = _videoFilter ? 2 * _videoFilter->GetWidescreenExtraWidth() * _frame.Scale : 0;
 	if(removeOverscan) {
 		OverscanDimensions overscan = _emu->GetSettings()->GetOverscan();
 		uint32_t hOverscan = overscan.Left + overscan.Right;
@@ -50,12 +52,12 @@ FrameInfo VideoDecoder::GetBaseFrameInfo(bool removeOverscan)
 		}
 
 		return {
-			(uint32_t)(_baseFrameSize.Width * _frame.Scale) - hOverscan,
+			(uint32_t)(_baseFrameSize.Width * _frame.Scale) - hOverscan + wsExtra,
 			(uint32_t)(_baseFrameSize.Height * _frame.Scale) - vOverscan
 		};
 	} else {
 		return {
-			(uint32_t)(_baseFrameSize.Width * _frame.Scale),
+			(uint32_t)(_baseFrameSize.Width * _frame.Scale) + wsExtra,
 			(uint32_t)(_baseFrameSize.Height * _frame.Scale)
 		};
 	}

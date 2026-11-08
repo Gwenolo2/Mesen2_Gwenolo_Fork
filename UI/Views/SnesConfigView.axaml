@@ -161,6 +161,10 @@
 					<c:OptionSection Header="{l:Translate lblMiscSettings}">
 						<CheckBox IsChecked="{Binding Config.BlendHighResolutionModes}" Content="{l:Translate chkBlendHighResolutionModes}" />
 						<c:CheckBoxWarning IsChecked="{Binding Config.ForceFixedResolution}" Text="{l:Translate chkForceFixedResolution}" />
+						<StackPanel Orientation="Horizontal" Margin="0 5">
+							<TextBlock Text="{l:Translate lblWidescreen}" Margin="5 0" VerticalAlignment="Center" />
+							<c:EnumComboBox SelectedItem="{Binding Config.Widescreen}" Width="200" />
+						</StackPanel>
 						<c:CheckBoxWarning IsChecked="{Binding Config.DisableFrameSkipping}" Text="{l:Translate chkDisableFrameSkipping}" />
 						<c:CheckBoxWarning IsChecked="{Binding Config.HideBgLayer1}" Text="{l:Translate chkHideBgLayer1}" />
 						<c:CheckBoxWarning IsChecked="{Binding Config.HideBgLayer2}" Text="{l:Translate chkHideBgLayer2}" />

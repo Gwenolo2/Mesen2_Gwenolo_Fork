@@ -2714,6 +2714,12 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 
 				bg->TileX = tileX;
+				if(tokens.size() > 14) {
+					std::string wsStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[14]));
+					if(wsStr == "on" || wsStr == "true" || wsStr == "1") bg->WsRule = 1;
+					else if(wsStr == "off" || wsStr == "false" || wsStr == "0") bg->WsRule = 2;
+					else bg->WsRule = 0;
+				}
 				bg->TileY = tileY;
 				bg->Conditions = currentConditions;
 				if(!ign2dBlockStack.empty()) { bg->Ignore2D = true; bg->Ignore2DConditions = ign2dBlockStack.back(); outData->HasIgnore2DResources = true; }
@@ -2882,6 +2888,15 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 		else if(lineContent == "<disableOriginalSprites>") {
 			outData->DisableOriginalSprites = true;
 			MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - [SnesHDPack] Option DisableOriginalSprites activated !");
+		}
+
+		/// PARSING <widescreen> TAG --------------------------------
+		else if(lineContent.substr(0, 12) == "<widescreen>") {
+			std::string opt = StringUtilities::ToLower(StringUtilities::Trim(lineContent.substr(12)));
+			if(opt == "mode7") outData->WidescreenMode = 1;
+			else if(opt == "all") outData->WidescreenMode = 2;
+			else outData->WidescreenMode = 0;
+			MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - Widescreen 16:9 : " + opt);
 		}
 
 		/// PARSING <OVERSCAN> TAG --------------------------------

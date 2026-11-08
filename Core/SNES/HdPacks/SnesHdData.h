@@ -482,6 +482,8 @@ struct SnesHdBackgroundInfo
 	// will the background be tileable?
 	bool TileX = false;
 	bool TileY = false;
+	// widescreen (token 14) : 0 auto (tiled = etendu, non tiled = zone SNES), 1 on (repete dans les bandes), 2 off (zone SNES)
+	uint8_t WsRule = 0;
 
 	// --- CHAMPS POUR L'ANIMATION ---
 	bool IsAnimated = false;
@@ -1614,6 +1616,8 @@ public:
 	bool HasOverscanConfig = false;
 	OverscanDimensions Overscan = { 0, 0, 0, 0 };
 	bool OverscanStretch = true; // true is défault (streched image)
+	// <widescreen> : 0 off, 1 mode7, 2 all (bandes 16:9 ; 2 traite comme 1 en v1)
+	uint8_t WidescreenMode = 0;
 
 	std::vector<std::unique_ptr<SnesHdPackBitmapInfo>> ImageFileData;
 	std::unordered_map<SnesHdTileKey, std::vector<SnesHdPackTileInfo*>> TileByKey;

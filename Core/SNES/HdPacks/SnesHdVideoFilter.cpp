@@ -12,6 +12,7 @@
 #include "SNES/SnesConsole.h"
 #include "SNES/SnesPpu.h"
 #include "Shared/Emulator.h"
+#include "Shared/EmuSettings.h"
 #include "Shared/MessageManager.h"
 
 #include "Shared/pl_mpeg.h"
@@ -60,6 +61,44 @@ SnesHdVideoFilter::SnesHdVideoFilter(Emulator* emu) : SnesDefaultVideoFilter(emu
 
 //----------------------------------------------------------------------------------------
 
+// ============================================================================
+// FORMAT LARGE 16:9 (v1 : Mode 7 seulement, largeur constante)
+// ============================================================================
+// Mode effectif : 0 = off, 1 = bandes 16:9 actives.
+static uint8_t GetEffectiveWidescreenMode(Emulator* emu)
+{
+	WidescreenSetting setting = emu->GetSettings()->GetSnesConfig().Widescreen;
+	if(setting == WidescreenSetting::Off) return 0;
+	if(setting == WidescreenSetting::Mode7) return 1;
+	if(SnesHdPackLoader::ActivePack) return SnesHdPackLoader::ActivePack->WidescreenMode ? 1 : 0;
+	return 0;
+}
+
+// Extension de chaque cote (en pixels SNES) pour atteindre 16:9.
+// Pixels SNES 8:7 : 256x224 = 4:3.
+static uint32_t GetWidescreenExt(uint32_t width, uint32_t height)
+{
+	double targetWidth = (double)height * (16.0 / 9.0) * (7.0 / 8.0);
+	double extra = (targetWidth - (double)width) / 2.0;
+	return extra > 0.0 ? (uint32_t)(extra + 0.5) : 0;
+}
+
+static uint32_t GetWidescreenExtForFrame(Emulator* emu, const FrameInfo& base, const OverscanDimensions& ov, bool stretch)
+{
+	if(GetEffectiveWidescreenMode(emu) == 0) return 0;
+	uint32_t w = stretch ? (base.Width - ov.Left - ov.Right) : base.Width;
+	uint32_t h = stretch ? (base.Height - ov.Top - ov.Bottom) : base.Height;
+	return GetWidescreenExt(w, h);
+}
+
+uint32_t SnesHdVideoFilter::GetWidescreenExtraWidth()
+{
+	if(!SnesHdPackLoader::ActivePack) return 0;
+	return GetWidescreenExtForFrame(_emu, _baseFrameInfo, GetOverscan(), SnesHdPackLoader::ActivePack->OverscanStretch);
+}
+
+//----------------------------------------------------------------------------------------
+
 FrameInfo SnesHdVideoFilter::GetFrameInfo()
 {
 	static bool frameLog = false;
@@ -85,6 +124,10 @@ FrameInfo SnesHdVideoFilter::GetFrameInfo()
 			info.Width *= scale;
 			info.Height *= scale;
 		}
+
+		// Bandes 16:9 de chaque cote
+		uint32_t wsExtInfo = GetWidescreenExtForFrame(_emu, _baseFrameInfo, GetOverscan(), stretch);
+		info.Width += 2 * wsExtInfo * scale;
 	}
 	return info;
 }
@@ -230,17 +273,18 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	uint32_t cropHeight = _baseFrameInfo.Height - overscan.Top - overscan.Bottom;
 
 	// Dimensions du tampon de sortie selon le mode Stretch
-	uint32_t outWidth = stretch ? (cropWidth * scale) : (_baseFrameInfo.Width * scale);
+	uint32_t wsExt = GetWidescreenExtForFrame(_emu, _baseFrameInfo, overscan, stretch);
+	uint32_t outWidth = ((stretch ? cropWidth : _baseFrameInfo.Width) + 2 * wsExt) * scale;
 	uint32_t hdHeight = stretch ? (cropHeight * scale) : (_baseFrameInfo.Height * scale);
 
 	// Décalages d'écriture (destination) et de lecture (source)
-	uint32_t dstX = stretch ? 0 : overscan.Left;
+	uint32_t dstX = (stretch ? 0 : overscan.Left) + wsExt;
 	uint32_t dstY = stretch ? 0 : overscan.Top;
 	uint32_t srcX = overscan.Left;
 	uint32_t srcY = overscan.Top;
 
 	// Décalage pour l'alignement des sprites et additions
-	int sprOffsetX = stretch ? -(int)overscan.Left : 0;
+	int sprOffsetX = (stretch ? -(int)overscan.Left : 0) + (int)wsExt;
 	int sprOffsetY = stretch ? -(int)overscan.Top : 0;
 
 	SnesConsole* console = (SnesConsole*)_emu->GetConsole().get();
@@ -291,6 +335,18 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 	memset(_zBuffer.data(), 0, _zBuffer.size()); // Remise à zéro du Z-Buffer
 	memset(out, 0, outWidth * hdHeight * sizeof(uint32_t)); // Remise à zéro du tampon de couleur HD
+	if(wsExt > 0) {
+		// Bandes 16:9 : noir opaque (le memset laisse l'alpha a 0)
+		uint32_t bandW = wsExt * scale;
+		uint32_t rightStart = outWidth - bandW;
+		for(uint32_t yy = 0; yy < hdHeight; yy++) {
+			uint32_t* rowOut = out + yy * outWidth;
+			for(uint32_t xx = 0; xx < bandW; xx++) {
+				rowOut[xx] = 0xFF000000;
+				rowOut[rightStart + xx] = 0xFF000000;
+			}
+		}
+	}
 
 	// ====================================================================
 	// STEP 1: PRE-PASS MODE 7 (OPTIMIZED BSNES-HD PERSPECTIVE & FAST PATH)
@@ -1000,8 +1056,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		uint32_t snesY = y + srcY;
 		uint32_t outY = y + dstY;
 
-		SdColorCache sdColorRow[256];
+		SdColorCache sdColorRow[512] = {}; // indice = colonne SNES + wsM7
 		uint32_t outScale = scale;
+		const int32_t wsM7 = (int32_t)std::min<uint32_t>(wsExt, 128u); // bande 16:9 en colonnes SNES
 		uint32_t imgScale = m7Img->Scale;
 		uint32_t mapDim = 1024 * imgScale;
 
@@ -1015,17 +1072,17 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			uint32_t sdColor = SnesHdPackLoader::ActivePack->IsColorMathDisabled
 				? baseSdColor
 				: _calculatedPalette[cwPixel(snesY, x + srcX, ppuOutputBuffer[currentOffset])];
-			sdColorRow[x].color = sdColor;
+			sdColorRow[x + wsM7].color = sdColor;
 			// Color math PAR PIXEL (couleur SD finale - couleur Mode 7 brute de ce pixel),
 			// seulement si le Mode 7 est au premier plan (pas sous un sprite).
 			const SnesHdPixelData& m7Px = hdBuffer[currentOffset];
 			if(applyColorMath && (m7Px.IsMode7 || m7Px.IsMode7Tile) && !SnesHdPackLoader::ActivePack->IsColorMathDisabled) {
 				uint32_t pxBase = _calculatedPalette[m7Px.BaseColor];
-				sdColorRow[x].diffR = ((sdColor >> 16) & 0xFF) - (int)((pxBase >> 16) & 0xFF);
-				sdColorRow[x].diffG = ((sdColor >> 8) & 0xFF) - (int)((pxBase >> 8) & 0xFF);
-				sdColorRow[x].diffB = (sdColor & 0xFF) - (int)(pxBase & 0xFF);
+				sdColorRow[x + wsM7].diffR = ((sdColor >> 16) & 0xFF) - (int)((pxBase >> 16) & 0xFF);
+				sdColorRow[x + wsM7].diffG = ((sdColor >> 8) & 0xFF) - (int)((pxBase >> 8) & 0xFF);
+				sdColorRow[x + wsM7].diffB = (sdColor & 0xFF) - (int)(pxBase & 0xFF);
 			} else {
-				sdColorRow[x].diffR = sdColorRow[x].diffG = sdColorRow[x].diffB = 0;
+				sdColorRow[x + wsM7].diffR = sdColorRow[x + wsM7].diffG = sdColorRow[x + wsM7].diffB = 0;
 			}
 		}
 
@@ -1221,9 +1278,15 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			exactX = (int32_t)(posFX >> 8);
 			exactY = (int32_t)(posFY >> 8);
 
-			for(uint32_t x = 0; x < cropWidth; x++) {
-				const SdColorCache& cache = sdColorRow[x];
-				uint32_t outIdx = hdRowIdx + ((x + dstX) * outScale);
+			// Colonnes hors SNES (bande 16:9) : extrapolation lineaire, on recule de wsM7 colonnes (pas par pixel HD)
+			posFX -= (int64_t)wsM7 * (int64_t)outScale * stepFX;
+			posFY -= (int64_t)wsM7 * (int64_t)outScale * stepFY;
+			exactX = (int32_t)(posFX >> 8);
+			exactY = (int32_t)(posFY >> 8);
+
+			for(int32_t x = -wsM7; x < (int32_t)cropWidth + wsM7; x++) {
+				const SdColorCache& cache = sdColorRow[x + wsM7];
+				uint32_t outIdx = hdRowIdx + ((uint32_t)((int32_t)x + (int32_t)dstX) * outScale);
 
 				// --- Niveau de detail : calcule UNE fois par pixel SNES (identique pour ses 'scale' pixels HD) ---
 				float xSd = (float)x + 0.5f;
@@ -1451,9 +1514,15 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						finalColor = 0x00000000;
 					}
 
-					out[outIdx + sx] = finalColor;
+					const bool wsBand = (x < 0 || x >= (int32_t)cropWidth); // colonne de bande 16:9 (hors SNES)
+					if(wsBand && (finalColor >> 24) == 0) {
+						out[outIdx + sx] = 0xFF000000; // bande hors carte : noir opaque, sans Z
+						_zBuffer[outIdx + sx] = 0;
+					} else {
+						out[outIdx + sx] = finalColor;
+						_zBuffer[outIdx + sx] = ((finalColor >> 24) == 0) ? 0 : pixelZ;
+					}
 					if(ign2dOn) s_ign2D[outIdx + sx] = m7LineIgn ? 1 : 0;
-					_zBuffer[outIdx + sx] = ((finalColor >> 24) == 0) ? 0 : pixelZ;
 
 					posFX += stepFX;
 					posFY += stepFY;
@@ -3275,6 +3344,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 
 	uint32_t hdWidth = outWidth;
+	// Bande 16:9 en pixels HD (0 si desactivee) : les fonds commencent apres cette bande
+	uint32_t wsBandPx = wsExt * scale;
 
 	// Preparation SEQUENTIELLE des backgrounds (image d'animation courante + PNG charge),
 	// avant de repartir la composition sur plusieurs coeurs.
@@ -3414,16 +3485,23 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					}
 				};
 
-				if(!bg->TileX) {
-					for(uint32_t hdX = 0; hdX < hdWidth; hdX++) {
-						int pngX = hdX + lineScrollX;
+				const bool wsExtend = (bg->WsRule == 1) || (bg->WsRule == 0 && bg->TileX);
+				if(!bg->TileX && !wsExtend) {
+					// Fond non repete : x=0 du PNG au bord de la zone SNES ; les bandes restent noires
+					for(uint32_t hdX = wsBandPx; hdX + wsBandPx < hdWidth; hdX++) {
+						int pngX = (int)hdX - (int)wsBandPx + lineScrollX;
 						if(pngX >= 0 && pngX < bgWidth) blendPixel(pngX, hdX);
 					}
 				} else {
-					int currentPngX = lineScrollX % bgWidth;
-					if(currentPngX < 0) currentPngX += bgWidth;
+					// Fond repete : phase calee sur le bord de la zone SNES ; la repetition s'etend dans les bandes
+					int currentPngX = ((lineScrollX - (int)wsBandPx) % bgWidth + bgWidth) % bgWidth;
 
 					for(uint32_t hdX = 0; hdX < hdWidth; hdX++) {
+						// widescreen off : pas de repetition dans les bandes
+						if(!wsExtend && (hdX < wsBandPx || hdX + wsBandPx >= hdWidth)) {
+							if(++currentPngX >= bgWidth) currentPngX = 0;
+							continue;
+						}
 						blendPixel(currentPngX, hdX);
 						if(++currentPngX >= bgWidth) currentPngX = 0;
 					}

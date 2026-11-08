@@ -42,6 +42,7 @@ private:
 
 protected:
 	FrameInfo GetFrameInfo() override;
+	uint32_t GetWidescreenExtraWidth() override;
 
 public:
 	SnesHdVideoFilter(Emulator* emu);

@@ -40,6 +40,9 @@ protected:
 	virtual FrameInfo GetFrameInfo();
 
 public:
+	// Extension 16:9 de chaque cote, en pixels SNES (0 hors format large ; surcharge dans le filtre HD)
+	virtual uint32_t GetWidescreenExtraWidth() { return 0; }
+
 	BaseVideoFilter(Emulator* emu);
 	virtual ~BaseVideoFilter();
 

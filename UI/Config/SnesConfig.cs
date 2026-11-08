@@ -41,6 +41,7 @@ namespace Mesen.Config
 		[Reactive] public bool HideSprites { get; set; } = false;
 		[Reactive] public bool DisableFrameSkipping { get; set; } = false;
 		[Reactive] public bool ForceFixedResolution { get; set; } = false;
+	[Reactive] public WidescreenSetting Widescreen { get; set; } = WidescreenSetting.PackDefault;
 
 		[Reactive] public OverscanConfig Overscan { get; set; } = new() { Top = 7, Bottom = 8 };
 
@@ -104,6 +105,7 @@ namespace Mesen.Config
 				
 				DisableFrameSkipping = DisableFrameSkipping,
 				ForceFixedResolution = ForceFixedResolution,
+				Widescreen = (byte)Widescreen,
 
 				Overscan = Overscan.ToInterop(),
 
@@ -162,6 +164,7 @@ namespace Mesen.Config
 		[MarshalAs(UnmanagedType.I1)] public bool HideSprites;
 		[MarshalAs(UnmanagedType.I1)] public bool DisableFrameSkipping;
 		[MarshalAs(UnmanagedType.I1)] public bool ForceFixedResolution;
+		public byte Widescreen;
 
 		public InteropOverscanDimensions Overscan;
 
@@ -193,5 +196,12 @@ namespace Mesen.Config
 		Cubic,
 		Sinc,
 		None
+	}
+
+	public enum WidescreenSetting
+	{
+		PackDefault = 0,
+		Off = 1,
+		Mode7 = 2
 	}
 }

@@ -538,6 +538,14 @@ enum class DspInterpolationType
 	None
 };
 
+// Format large 16:9 (ne pas changer les valeurs : lu par l'UI C# en uint8)
+enum class WidescreenSetting : uint8_t
+{
+	PackDefault = 0,
+	Off = 1,
+	Mode7 = 2
+};
+
 struct SnesConfig
 {
 	ControllerConfig Port1;
@@ -557,6 +565,7 @@ struct SnesConfig
 	bool HideSprites = false;
 	bool DisableFrameSkipping = false;
 	bool ForceFixedResolution = false;
+	WidescreenSetting Widescreen = WidescreenSetting::PackDefault;
 
 	OverscanDimensions Overscan = {};
 
