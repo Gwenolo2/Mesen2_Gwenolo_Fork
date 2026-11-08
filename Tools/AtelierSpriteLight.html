@@ -1,0 +1,624 @@
+<title>Atelier SpriteLight</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Silkscreen&display=swap">
+<style>
+/* Layout : apercu 3D collant a gauche (piste + bloc genere), dossier / tiles / reglages a droite ; une colonne sur telephone */
+:root {
+  --bg: #F3F1EE; --panel: #FFFFFF; --line: #DDD8D1; --fg: #221E1A; --muted: #6A625A;
+  --accent: #B4530F; --accent-soft: #F6E6D8; --field: #F9F7F4; --sel: #2F7D5B;
+  --f-display: "Silkscreen", "Courier New", monospace;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #17140F; --panel: #211D17; --line: #362F26; --fg: #EEE8DF; --muted: #A89D8F;
+  --accent: #F29A4A; --accent-soft: #3A2A1A; --field: #1A1712; --sel: #5CC795; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #17140F; --panel: #211D17; --line: #362F26; --fg: #EEE8DF; --muted: #A89D8F;
+  --accent: #F29A4A; --accent-soft: #3A2A1A; --field: #1A1712; --sel: #5CC795; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 14px; line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 40px }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; max-width: 1320px; margin: 0 auto 18px }
+h1 { font-family: var(--f-display); font-weight: 400; font-size: 26px; margin: 0; letter-spacing: .02em }
+h1 span { color: var(--accent) }
+header p { margin: 0; color: var(--muted); max-width: 70ch }
+.app { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 20px; max-width: 1320px; margin: 0 auto; align-items: start }
+@media (max-width: 960px) { .app { grid-template-columns: minmax(0, 1fr) } .left { position: static !important } }
+.left { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); display: flex; flex-direction: column; gap: 14px; min-width: 0 }
+.right { display: flex; flex-direction: column; gap: 14px; min-width: 0 }
+.screen { background: #000; border-radius: 6px; overflow: hidden; border: 1px solid var(--line) }
+canvas#view { display: block; width: 100%; height: auto; aspect-ratio: 512 / 320 }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0 }
+.card h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.hint { color: var(--muted); font-size: 12.5px; margin: 0 }
+.hint code, .mono { font-family: var(--f-mono); font-size: 12px }
+select, input[type=number], input[type=text], textarea {
+  font: inherit; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; min-width: 0 }
+input[type=text].grow { flex: 1 1 220px }
+textarea { font-family: var(--f-mono); font-size: 12px; width: 100%; resize: vertical; line-height: 1.5 }
+button, .filebtn { font: inherit; font-weight: 500; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 11px; cursor: pointer }
+button:hover, .filebtn:hover { border-color: var(--accent) }
+button.primary, .filebtn.primary { background: var(--accent); border-color: var(--accent); color: var(--panel) }
+.filebtn input { display: none }
+:focus-visible, .filebtn:focus-within { outline: 2px solid var(--accent); outline-offset: 2px }
+.status { font-family: var(--f-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums }
+.status b { color: var(--sel); font-weight: 500 }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px }
+@media (max-width: 520px) { .grid2 { grid-template-columns: minmax(0, 1fr) } }
+.ctl { display: flex; flex-direction: column; gap: 3px; min-width: 0 }
+.ctl > span { font-size: 12.5px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px }
+.ctl > span output { font-family: var(--f-mono); color: var(--fg); font-variant-numeric: tabular-nums }
+input[type=range] { width: 100%; accent-color: var(--accent) }
+input[type=color] { width: 44px; height: 30px; border: 1px solid var(--line); border-radius: 4px; background: var(--field); padding: 2px }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden }
+.seg button { border: 0; border-radius: 0; padding: 5px 10px; background: var(--field) }
+.seg button[aria-pressed=true] { background: var(--accent); color: var(--panel) }
+.imglist { max-height: 180px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--field) }
+.imglist button { display: flex; justify-content: space-between; gap: 10px; width: 100%; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; text-align: left; font-family: var(--f-mono); font-size: 12px; font-weight: 400 }
+.imglist button[aria-pressed=true] { background: var(--accent-soft) }
+.imglist button span:last-child { color: var(--muted) }
+.thumbs { display: flex; flex-wrap: wrap; gap: 4px; max-height: 230px; overflow: auto; padding: 4px; border: 1px solid var(--line); border-radius: 4px;
+  background: repeating-conic-gradient(var(--field) 0 25%, var(--panel) 0 50%) 0 0 / 12px 12px }
+.thumbs canvas { width: 40px; height: 40px; image-rendering: pixelated; border: 2px solid transparent; border-radius: 3px; cursor: pointer; background: rgba(0,0,0,.04) }
+.thumbs canvas.on { border-color: var(--sel) }
+.empty { color: var(--muted); font-size: 12.5px; padding: 8px }
+.out { min-height: 150px }
+.tag { font-family: var(--f-mono); font-size: 11px; padding: 1px 6px; border-radius: 10px; background: var(--accent-soft); color: var(--accent) }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto } }
+</style>
+
+<header>
+  <h1>Atelier <span>SpriteLight</span></h1>
+  <p>Choisis les tiles d'un sprite (explosion, carapace, tir), règle sa lumière 3D et regarde-la éclairer la piste. Copie ensuite le bloc dans <span class="mono">snes_hires.txt</span>.</p>
+</header>
+
+<div class="app">
+  <section class="left" aria-label="Aperçu">
+    <div class="screen"><canvas id="view" width="512" height="320"></canvas></div>
+    <div class="row">
+      <label class="row" style="gap:6px"><input type="checkbox" id="orbit" checked> Faire tourner la caméra</label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="animFrames" checked> Animer les images du sprite</label>
+      <label class="row" style="gap:6px"><input type="checkbox" id="inAir"> Sprite en l'air (comme Lakitu)</label>
+      <span class="status" id="frameInfo" style="margin-left:auto"></span>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2>Bloc à copier</h2>
+        <div class="row">
+          <span class="status" id="copyMsg"></span>
+          <button class="primary" id="copyBtn">Copier</button>
+        </div>
+      </div>
+      <textarea id="out" class="out" readonly spellcheck="false"></textarea>
+    </div>
+  </section>
+
+  <section class="right" aria-label="Réglages">
+    <div class="card">
+      <h2>Dossier du pack HD</h2>
+      <div class="row">
+        <input type="text" class="grow" id="packPath" placeholder="D:\Documents\Mesen2\HdPacks\Super Mario Kart (USA)" aria-label="Chemin du pack (mémo)">
+        <label class="filebtn primary">Choisir le dossier<input type="file" id="folder" webkitdirectory directory multiple></label>
+      </div>
+      <p class="hint">Le navigateur ne peut pas ouvrir un chemin tapé : le bouton ouvre le dossier (le chemin sert de mémo). Rien n'est envoyé : tout est lu dans ton navigateur. Les <span class="mono">&lt;include&gt;</span> sont suivis.</p>
+      <div class="status" id="packStatus">Aucun pack chargé : sprite d'exemple affiché.</div>
+    </div>
+
+    <div class="card">
+      <h2>Tiles du sprite</h2>
+      <div class="row">
+        <input type="text" class="grow" id="imgFilter" placeholder="Filtrer les images (ex. turtle)" aria-label="Filtrer les images">
+      </div>
+      <div class="imglist" id="imgList"><div class="empty">Charge un pack pour voir ses images de sprites.</div></div>
+      <div class="row" style="justify-content:space-between">
+        <span class="status" id="galInfo"></span>
+        <div class="row">
+          <button id="addAll">Tout ajouter</button>
+          <button id="removeAll">Tout retirer</button>
+        </div>
+      </div>
+      <div class="thumbs" id="gallery"><div class="empty">Clique une image pour afficher ses tiles, puis clique les tiles à ajouter.</div></div>
+      <label class="hint" for="tilesText" style="color:var(--fg)">Tiles de l'effet, une par ligne : <code>&lt;tile&gt;…</code> ou un hash</label>
+      <textarea id="tilesText" rows="6" spellcheck="false"></textarea>
+      <p class="hint">Les flips (<code>&lt;tile_hflip&gt;</code>…) ont le même hash : une seule ligne suffit.</p>
+    </div>
+
+    <div class="card">
+      <h2>Lumière</h2>
+      <div class="grid2">
+        <label class="ctl"><span>Couleur <output id="colorOut"></output></span><input type="color" id="color" value="#ffa040"></label>
+        <div class="ctl"><span>Mode</span>
+          <div class="seg" role="group" aria-label="Mode"><button id="modeLight" aria-pressed="true">éclaire</button><button id="modeAdd" aria-pressed="false">ajoute (lueur)</button><button id="modeShadow" aria-pressed="false">ombre</button></div></div>
+        <label class="ctl"><span>Rayon (texels) <output id="radiusOut"></output></span><input type="range" id="radius" min="8" max="200" value="48"></label>
+        <label class="ctl"><span>Intensité <output id="intensityOut"></output></span><input type="range" id="intensity" min="0" max="4" step="0.05" value="1.4"></label>
+        <label class="ctl"><span>Scintillement <output id="flickerOut"></output></span><input type="range" id="flicker" min="0" max="1" step="0.05" value="0"></label>
+        <label class="ctl"><span>Vitesse du scintillement <output id="speedOut"></output></span><input type="range" id="speed" min="1" max="30" step="0.5" value="9"></label>
+        <label class="ctl"><span>Hauteur <output id="heightOut"></output></span><input type="range" id="height" min="-1" max="64" step="1" value="-1"></label>
+        <label class="ctl"><span>Lumière sur le sprite lui-même <output id="selfOut"></output></span><input type="range" id="self" min="0" max="1" step="0.05" value="1"></label>
+        <label class="ctl"><span>Lueur propre du sprite (glow) <output id="glowOut"></output></span><input type="range" id="glow" min="0" max="2" step="0.05" value="0"></label>
+        <label class="ctl"><span>Halo autour du sprite (px SNES) <output id="haloOut"></output></span><input type="range" id="halo" min="0" max="48" step="1" value="0"></label>
+        <label class="ctl"><span>Distance si le sprite est en l'air <output id="airOut"></output></span><input type="range" id="air" min="0" max="256" step="4" value="64"></label>
+        <label class="ctl"><span>Palette</span>
+          <select id="palMode"><option value="tile">celle de chaque tile</option><option value="any">toutes (*)</option></select></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Scène d'aperçu</h2>
+      <div class="grid2">
+        <label class="ctl"><span>Piste</span><select id="ground"><option value="">Piste d'exemple</option></select></label>
+        <label class="ctl"><span>Ambiance de la piste <output id="ambOut"></output></span><input type="range" id="amb" min="0.15" max="1" step="0.05" value="0.55"></label>
+        <label class="ctl"><span>Position X <output id="pxOut"></output></span><input type="range" id="px" min="0" max="1023" value="512"></label>
+        <label class="ctl"><span>Position Y <output id="pyOut"></output></span><input type="range" id="py" min="0" max="1023" value="512"></label>
+        <label class="ctl"><span>Distance caméra <output id="distOut"></output></span><input type="range" id="dist" min="24" max="320" value="90"></label>
+        <label class="ctl"><span>Images par seconde <output id="fpsOut"></output></span><input type="range" id="fps" min="1" max="30" value="8"></label>
+      </div>
+      <p class="hint">L'ambiance ne fait pas partie du bloc : elle assombrit l'aperçu pour mieux voir la lumière (comme un <code>&lt;m7ambient&gt;</code>). En jeu, la lumière n'existe que si le sprite est posé sur la piste.</p>
+    </div>
+
+    <div class="card">
+      <h2>Format du bloc</h2>
+      <div class="grid2">
+        <label class="ctl"><span>Forme</span><select id="fmt"><option value="block">bloc { }</option><option value="lines">une ligne par tile</option></select></label>
+        <label class="ctl"><span>Lignes du bloc</span><select id="refs"><option value="ref">références (tiles déjà définies)</option><option value="full">lignes &lt;tile&gt; complètes</option></select></label>
+        <label class="ctl" style="grid-column:1/-1"><span>Conditions (facultatif, ex. <code>enCourse</code>)</span><input type="text" id="cond" placeholder="nomCondition&amp;autre"></label>
+      </div>
+      <p class="hint">Références : à utiliser quand les tiles sont déjà définies ailleurs (ton <code>.mesen</code>). Lignes complètes : le bloc remplace leur définition (retire-les alors de l'autre fichier).</p>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const EXAMPLE = '# Exemple : remplace par tes tiles (choisis le dossier du pack)\n<tile>0123456789ABCDEF,6\n<tile>FEDCBA9876543210,6';
+const view = $('view'), ctx = view.getContext('2d');
+const W = view.width, H = view.height;
+
+// ---------------------------------------------------------------- pack
+const pack = { files: new Map(), scale: 4, imgs: [], tiles: new Map(), byPng: new Map(), m7: [], loaded: false };
+const imgCache = new Map();
+const norm = p => p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+/g, '/').toLowerCase();
+
+function loadImage(path) {
+  const key = norm(path);
+  if (imgCache.has(key)) return imgCache.get(key);
+  const f = pack.files.get(key);
+  const pr = f ? new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = URL.createObjectURL(f); }) : Promise.resolve(null);
+  imgCache.set(key, pr);
+  return pr;
+}
+
+async function readText(path) { const f = pack.files.get(norm(path)); return f ? await f.text() : null; }
+
+async function parseFile(path, depth, seen) {
+  if (depth > 12 || seen.has(norm(path))) return;
+  seen.add(norm(path));
+  const txt = await readText(path);
+  if (txt == null) return;
+  const lines = txt.split(/\r?\n/);
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li];
+    let s = raw; const c = s.indexOf('#'); if (c >= 0) s = s.slice(0, c);
+    s = s.trim(); if (!s) continue;
+    let cond = '';
+    if (s[0] === '[') { const e = s.indexOf(']'); if (e > 0) { cond = s.slice(1, e); s = s.slice(e + 1).trim(); } }
+    const low = s.toLowerCase();
+    if (low.startsWith('<include>')) { await parseFile(s.slice(9).trim(), depth + 1, seen); continue; }
+    if (low.startsWith('<scale>')) { const v = parseInt(s.slice(7)); if (v > 0) pack.scale = v; continue; }
+    if (low.startsWith('<img>')) { pack.imgs.push(s.slice(5).trim()); continue; }
+    if (low.startsWith('<m7img>')) { const p = s.slice(7).split(',')[0].trim(); if (p && !pack.m7.includes(p)) pack.m7.push(p); continue; }
+    const m = /^<tile(_hflip|_vflip|_hvflip)?>(.*)$/i.exec(s);
+    if (m) {
+      const t = m[2].split(',').map(x => x.trim());
+      if (t.length < 5) continue;
+      let png = t[2];
+      if (!/\.png$/i.test(png)) { const i = parseInt(png); if (!isNaN(i) && pack.imgs[i]) png = pack.imgs[i]; else continue; }
+      if (/^(disable|blank)$/i.test(png)) continue;
+      const x = parseInt(t[3]), y = parseInt(t[4]);
+      if (isNaN(x) || isNaN(y)) continue;
+      const fl = (m[1] || '').toLowerCase();
+      const e = { hash: t[0].toUpperCase(), pal: t[1], png, x, y, hf: fl.includes('h'), vf: fl === '_vflip' || fl === '_hvflip', line: raw.trim(), src: path, cond };
+      if (!pack.tiles.has(e.hash)) pack.tiles.set(e.hash, []);
+      pack.tiles.get(e.hash).push(e);
+      const k = norm(png);
+      if (!pack.byPng.has(k)) pack.byPng.set(k, { name: png.replace(/\\/g, '/').replace(/\/+/g, '/'), list: [] });
+      pack.byPng.get(k).list.push(e);
+    }
+  }
+}
+
+$('folder').addEventListener('change', async ev => {
+  const list = [...ev.target.files];
+  if (!list.length) return;
+  pack.files.clear(); pack.imgs = []; pack.tiles.clear(); pack.byPng.clear(); pack.m7 = []; imgCache.clear();
+  // racine = dossier qui contient snes_hires.txt (le plus court)
+  let root = null;
+  for (const f of list) {
+    const rp = f.webkitRelativePath || f.name;
+    if (/(^|\/)snes_hires\.txt$/i.test(rp)) { const r = rp.slice(0, rp.length - 'snes_hires.txt'.length); if (root === null || r.length < root.length) root = r; }
+  }
+  if (root === null) { $('packStatus').textContent = 'Pas de snes_hires.txt dans ce dossier.'; return; }
+  for (const f of list) {
+    const rp = f.webkitRelativePath || f.name;
+    if (!rp.toLowerCase().startsWith(root.toLowerCase())) continue;
+    pack.files.set(norm(rp.slice(root.length)), f);
+  }
+  if (!$('packPath').value) $('packPath').value = root.replace(/\/$/, '');
+  $('packStatus').textContent = 'Lecture…';
+  await parseFile('snes_hires.txt', 0, new Set());
+  for (const k of pack.files.keys()) if (/^m7_[0-9a-f]+\.png$/i.test(k) && !pack.m7.some(p => norm(p) === k)) pack.m7.push(k);
+  pack.loaded = true;
+  $('packStatus').innerHTML = `<b>${pack.tiles.size}</b> tiles · <b>${pack.byPng.size}</b> images · échelle <b>${pack.scale}</b> · <b>${pack.m7.length}</b> pistes`;
+  const gs = $('ground'); gs.innerHTML = '<option value="">Piste d\'exemple</option>' + pack.m7.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p.replace(/\\/g, '/'))}</option>`).join('');
+  try { const g = localStorage.getItem('sl.ground'); if (g && pack.m7.includes(g)) { gs.value = g; setGround(g); } } catch (e) {}
+  if ($('tilesText').value === EXAMPLE) $('tilesText').value = '';
+  renderImgList();
+  syncFromText();
+});
+
+const escapeHtml = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// ---------------------------------------------------------------- selection
+let selection = []; // {hash, pal, entry|null}
+let currentPng = null;
+
+function parseTilesText() {
+  const out = [];
+  for (const raw of $('tilesText').value.split(/\r?\n/)) {
+    let s = raw; const c = s.indexOf('#'); if (c >= 0) s = s.slice(0, c);
+    s = s.trim(); if (!s) continue;
+    if (s[0] === '[') { const e = s.indexOf(']'); if (e > 0) s = s.slice(e + 1).trim(); }
+    const m = /^<tile(?:_hflip|_vflip|_hvflip)?>(.*)$/i.exec(s);
+    const t = (m ? m[1] : s).split(',').map(x => x.trim());
+    if (!/^[0-9a-f]{4,16}$/i.test(t[0])) continue;
+    const hash = t[0].toUpperCase(), pal = t[1] || '*';
+    if (out.some(o => o.hash === hash && o.pal === pal)) continue;
+    const ents = pack.tiles.get(hash) || [];
+    const entry = ents.find(e => pal === '*' || e.pal === pal) || ents[0] || null;
+    out.push({ hash, pal: entry && pal === '*' && t.length < 2 ? entry.pal : pal, entry, line: m && t.length >= 5 ? s : (entry ? entry.line : null) });
+  }
+  return out;
+}
+function syncFromText() { selection = parseTilesText(); buildFrames(); renderGallery(); updateOutput(); saveState(); }
+function selKey(e) { return e.hash + ',' + e.pal; }
+function isSelected(e) { return selection.some(s => s.hash === e.hash && (s.pal === e.pal || s.pal === '*')); }
+function setTextFromSelection() {
+  $('tilesText').value = selection.map(s => s.line || `<tile>${s.hash},${s.pal}`).join('\n');
+  buildFrames(); updateOutput(); saveState();
+}
+function toggleEntry(e) {
+  const i = selection.findIndex(s => s.hash === e.hash && s.pal === e.pal);
+  if (i >= 0) selection.splice(i, 1); else selection.push({ hash: e.hash, pal: e.pal, entry: e, line: e.line });
+  setTextFromSelection(); renderGallery();
+}
+$('tilesText').addEventListener('input', () => { clearTimeout(syncFromText.t); syncFromText.t = setTimeout(syncFromText, 250); });
+
+function renderImgList() {
+  const box = $('imgList');
+  if (!pack.loaded) return;
+  const f = $('imgFilter').value.trim().toLowerCase();
+  const items = [...pack.byPng.entries()].filter(([k]) => !f || k.includes(f)).sort((a, b) => a[0].localeCompare(b[0]));
+  if (!items.length) { box.innerHTML = '<div class="empty">Aucune image ne correspond.</div>'; return; }
+  box.innerHTML = '';
+  for (const [k, v] of items.slice(0, 400)) {
+    const b = document.createElement('button');
+    b.setAttribute('aria-pressed', k === currentPng ? 'true' : 'false');
+    const nSel = v.list.filter(isSelected).length;
+    b.innerHTML = `<span>${escapeHtml(v.name)}</span><span>${nSel ? nSel + ' / ' : ''}${v.list.length}</span>`;
+    b.onclick = () => { currentPng = k; renderImgList(); renderGallery(); };
+    box.appendChild(b);
+  }
+}
+$('imgFilter').addEventListener('input', renderImgList);
+
+async function renderGallery() {
+  const g = $('gallery');
+  if (!currentPng || !pack.byPng.has(currentPng)) {
+    $('galInfo').textContent = `${selection.length} tile(s) sélectionnée(s)`;
+    if (!pack.loaded) return;
+    g.innerHTML = '<div class="empty">Clique une image pour afficher ses tiles, puis clique les tiles à ajouter.</div>'; return;
+  }
+  const v = pack.byPng.get(currentPng);
+  const im = await loadImage(v.name);
+  const T = 8 * pack.scale;
+  g.innerHTML = '';
+  const seen = new Set();
+  const list = v.list.filter(e => { const k = selKey(e); if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((a, b) => a.y - b.y || a.x - b.x);
+  for (const e of list) {
+    const c = document.createElement('canvas'); c.width = T; c.height = T;
+    c.title = `${e.hash} · palette ${e.pal} · (${e.x}, ${e.y})`;
+    c.tabIndex = 0; c.setAttribute('role', 'button');
+    if (isSelected(e)) c.classList.add('on');
+    if (im) c.getContext('2d').drawImage(im, e.x, e.y, T, T, 0, 0, T, T);
+    c.onclick = () => toggleEntry(e);
+    c.onkeydown = k => { if (k.key === 'Enter' || k.key === ' ') { k.preventDefault(); toggleEntry(e); } };
+    g.appendChild(c);
+  }
+  $('galInfo').textContent = `${list.length} tiles dans l'image · ${selection.length} sélectionnée(s)`;
+  renderImgList.pending || (renderImgList.pending = requestAnimationFrame(() => { renderImgList.pending = 0; renderImgList(); }));
+}
+$('addAll').onclick = () => {
+  if (!currentPng) return;
+  for (const e of pack.byPng.get(currentPng).list) if (!selection.some(s => s.hash === e.hash && s.pal === e.pal)) selection.push({ hash: e.hash, pal: e.pal, entry: e, line: e.line });
+  setTextFromSelection(); renderGallery();
+};
+$('removeAll').onclick = () => {
+  if (currentPng) { const L = pack.byPng.get(currentPng).list; selection = selection.filter(s => !L.some(e => e.hash === s.hash && e.pal === s.pal)); }
+  else selection = [];
+  setTextFromSelection(); renderGallery();
+};
+
+// ---------------------------------------------------------------- images du sprite (frames)
+// Tiles voisines dans la meme image (grille de 8 x echelle) = une image du sprite
+let frames = [];
+async function buildFrames() {
+  const T = 8 * pack.scale;
+  const byImg = new Map();
+  for (const s of selection) { if (!s.entry) continue; const k = norm(s.entry.png); if (!byImg.has(k)) byImg.set(k, []); byImg.get(k).push(s.entry); }
+  const res = [];
+  for (const [k, list] of byImg) {
+    const im = await loadImage(list[0].png);
+    if (!im) continue;
+    const cells = new Map(list.map(e => [e.x + ',' + e.y, e]));
+    const done = new Set();
+    for (const e of list) {
+      const key0 = e.x + ',' + e.y; if (done.has(key0)) continue;
+      const stack = [e]; done.add(key0);
+      let x0 = e.x, y0 = e.y, x1 = e.x + T, y1 = e.y + T;
+      while (stack.length) {
+        const c = stack.pop();
+        x0 = Math.min(x0, c.x); y0 = Math.min(y0, c.y); x1 = Math.max(x1, c.x + T); y1 = Math.max(y1, c.y + T);
+        for (const [dx, dy] of [[T, 0], [-T, 0], [0, T], [0, -T]]) {
+          const nk = (c.x + dx) + ',' + (c.y + dy);
+          if (cells.has(nk) && !done.has(nk)) { done.add(nk); stack.push(cells.get(nk)); }
+        }
+      }
+      const cv = document.createElement('canvas'); cv.width = x1 - x0; cv.height = y1 - y0;
+      const cc = cv.getContext('2d');
+      for (const c of list) if (c.x >= x0 && c.x < x1 && c.y >= y0 && c.y < y1 && cells.get(c.x + ',' + c.y) === c) cc.drawImage(im, c.x, c.y, T, T, c.x - x0, c.y - y0, T, T);
+      res.push(spriteFrom(cv, pack.scale));
+    }
+  }
+  frames = res.length ? res : demoFrames;
+}
+function spriteFrom(cv, sc) {
+  const d = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
+  return { w: cv.width, h: cv.height, data: d.data, snesW: cv.width / sc, snesH: cv.height / sc };
+}
+// sprite d'exemple : carapace rouge stylisee, 4 angles
+const demoFrames = (() => {
+  const out = [];
+  for (let f = 0; f < 4; f++) {
+    const cv = document.createElement('canvas'); cv.width = 64; cv.height = 64;
+    const c = cv.getContext('2d');
+    c.fillStyle = '#f4f0e6'; c.beginPath(); c.ellipse(32, 46, 26, 12, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#d4221c'; c.beginPath(); c.ellipse(32, 36, 24, 20, 0, Math.PI, 0); c.lineTo(56, 44); c.lineTo(8, 44); c.fill();
+    c.strokeStyle = '#f4f0e6'; c.lineWidth = 3;
+    for (let i = 0; i < 3; i++) { const a = (f * 0.4 + i * 2.1) % 6.28; const x = 32 + Math.cos(a) * 14; c.beginPath(); c.ellipse(x, 32, 6, 8, 0, 0, Math.PI * 2); c.stroke(); }
+    c.fillStyle = '#7a1210'; c.fillRect(8, 42, 48, 3);
+    out.push(spriteFrom(cv, 4));
+  }
+  return out;
+})();
+frames = demoFrames;
+
+// ---------------------------------------------------------------- piste
+let groundTex = null; // {w,h,data} 1024 x 1024 texels
+async function setGround(p) {
+  groundTex = null;
+  if (!p) return;
+  const im = await loadImage(p);
+  if (!im) return;
+  const N = 1024, cv = document.createElement('canvas'); cv.width = N; cv.height = N;
+  const c = cv.getContext('2d'); c.imageSmoothingEnabled = true; c.drawImage(im, 0, 0, N, N);
+  groundTex = { w: N, data: c.getImageData(0, 0, N, N).data };
+}
+$('ground').addEventListener('change', e => { setGround(e.target.value); try { localStorage.setItem('sl.ground', e.target.value); } catch (x) {} });
+function demoGround(u, v, o) { // asphalte + bordures rouge / blanc + herbe
+  const lane = Math.abs(((v % 256) + 256) % 256 - 128);
+  const n = ((Math.sin(u * 12.9898 + v * 78.233) * 43758.5453) % 1 + 1) % 1;
+  if (lane < 44) { const g = 92 + n * 18; o[0] = g; o[1] = g; o[2] = g + 6; if (Math.abs(lane) < 1.2 && ((u >> 4) & 1)) { o[0] = o[1] = o[2] = 220; } }
+  else if (lane < 52) { const red = ((Math.floor(u / 8)) & 1) === 0; o[0] = red ? 200 : 235; o[1] = red ? 40 : 235; o[2] = red ? 36 : 235; }
+  else { o[0] = 60 + n * 20; o[1] = 132 + n * 26; o[2] = 52 + n * 14; }
+}
+
+// ---------------------------------------------------------------- reglages
+const ctl = id => $(id);
+const P = {};
+function readParams() {
+  P.color = parseInt(ctl('color').value.slice(1), 16);
+  P.add = ctl('modeAdd').getAttribute('aria-pressed') === 'true';
+  P.shadow = ctl('modeShadow').getAttribute('aria-pressed') === 'true';
+  P.radius = +ctl('radius').value; P.intensity = +ctl('intensity').value;
+  P.flicker = +ctl('flicker').value; P.speed = +ctl('speed').value;
+  P.height = +ctl('height').value; P.amb = +ctl('amb').value;
+  P.self = +ctl('self').value; P.air = +ctl('air').value; P.glow = +ctl('glow').value; P.halo = +ctl('halo').value;
+  $('glowOut').textContent = P.glow ? P.glow.toFixed(2) : 'aucune'; $('haloOut').textContent = P.halo ? P.halo : 'aucun';
+  $('selfOut').textContent = P.self.toFixed(2); $('airOut').textContent = P.air ? P.air : 'pas de lumière';
+  P.px = +ctl('px').value; P.py = +ctl('py').value; P.dist = +ctl('dist').value; P.fps = +ctl('fps').value;
+  $('colorOut').textContent = ctl('color').value.slice(1).toUpperCase();
+  $('radiusOut').textContent = P.radius; $('intensityOut').textContent = P.intensity.toFixed(2);
+  $('flickerOut').textContent = P.flicker.toFixed(2); $('speedOut').textContent = P.speed;
+  $('heightOut').textContent = P.height < 0 ? 'auto' : P.height; $('ambOut').textContent = P.amb.toFixed(2);
+  $('pxOut').textContent = P.px; $('pyOut').textContent = P.py; $('distOut').textContent = P.dist; $('fpsOut').textContent = P.fps;
+}
+for (const id of ['glow', 'halo', 'self', 'air', 'color', 'radius', 'intensity', 'flicker', 'speed', 'height', 'amb', 'px', 'py', 'dist', 'fps', 'palMode', 'fmt', 'refs', 'cond'])
+  $(id).addEventListener('input', () => { readParams(); updateOutput(); saveState(); });
+function setMode(m) {
+  for (const [id, v] of [['modeLight', 'light'], ['modeAdd', 'add'], ['modeShadow', 'shadow']]) $(id).setAttribute('aria-pressed', m === v ? 'true' : 'false');
+  readParams(); updateOutput(); saveState();
+}
+$('modeLight').onclick = () => setMode('light');
+$('modeAdd').onclick = () => setMode('add');
+$('modeShadow').onclick = () => setMode('shadow');
+
+// ---------------------------------------------------------------- bloc genere
+function hex6(n) { return n.toString(16).toUpperCase().padStart(6, '0'); }
+function updateOutput() {
+  readParams();
+  const keys = [`radius=${P.radius}`, `color=${hex6(P.color)}`, `intensity=${+P.intensity.toFixed(2)}`];
+  if (P.height >= 0) keys.push(`height=${P.height}`);
+  if (P.flicker > 0) keys.push(`flicker=${+P.flicker.toFixed(2)}`, `speed=${P.speed}`);
+  if (P.add) keys.push('mode=add');
+  if (P.shadow) keys.push('mode=shadow');
+  if (P.self < 0.999) keys.push(`self=${+P.self.toFixed(2)}`);
+  if (P.glow > 0) keys.push(`glow=${+P.glow.toFixed(2)}`);
+  if (P.halo > 0) keys.push(`halo=${P.halo}`);
+  if (P.air !== 64) keys.push(`distance=${P.air}`);
+  const cond = $('cond').value.trim();
+  const pre = cond ? `[${cond}]` : '';
+  const anyPal = $('palMode').value === 'any';
+  const lines = [];
+  const seen = new Set();
+  for (const s of selection) {
+    const pal = anyPal ? '*' : s.pal;
+    const k = s.hash + ',' + pal; if (seen.has(k)) continue; seen.add(k);
+    lines.push({ hash: s.hash, pal, full: s.line });
+  }
+  let txt;
+  if (!lines.length) txt = '# Ajoute des tiles (liste d\'images ou zone "Tiles de l\'effet") pour générer le bloc.';
+  else if ($('fmt').value === 'block') {
+    const body = lines.map(l => ($('refs').value === 'full' && l.full && !anyPal) ? l.full : `<tile>${l.hash}${l.pal === '*' ? '' : ',' + l.pal}`);
+    txt = `# Lumiere 3D du sprite (Atelier SpriteLight)\n${pre}<SpriteLight>${keys.join(',')}{\n${body.join('\n')}\n}`;
+  } else {
+    txt = `# Lumiere 3D du sprite (Atelier SpriteLight)\n` + lines.map(l => `${pre}<SpriteLight>${l.hash},${l.pal},${keys.join(',')}`).join('\n');
+  }
+  $('out').value = txt;
+}
+$('copyBtn').onclick = async () => {
+  const t = $('out');
+  try { await navigator.clipboard.writeText(t.value); $('copyMsg').textContent = 'Copié'; }
+  catch (e) { t.focus(); t.select(); $('copyMsg').textContent = 'Texte sélectionné : Ctrl+C'; }
+  clearTimeout(updateOutput.m); updateOutput.m = setTimeout(() => $('copyMsg').textContent = '', 2500);
+};
+
+// ---------------------------------------------------------------- etat local
+function saveState() {
+  try {
+    localStorage.setItem('sl.state', JSON.stringify({
+      color: $('color').value, add: P.add, shadow: P.shadow, radius: P.radius, intensity: P.intensity, flicker: P.flicker, speed: P.speed, height: P.height,
+      amb: P.amb, glow: P.glow, halo: P.halo, self: P.self, air: P.air, dist: P.dist, fps: P.fps, palMode: $('palMode').value, fmt: $('fmt').value, refs: $('refs').value, cond: $('cond').value,
+      tiles: $('tilesText').value, path: $('packPath').value }));
+  } catch (e) {}
+}
+function loadState() {
+  try {
+    const s = JSON.parse(localStorage.getItem('sl.state') || 'null'); if (!s) return;
+    $('color').value = s.color || '#ffa040';
+    for (const k of ['radius', 'intensity', 'flicker', 'speed', 'height', 'amb', 'glow', 'halo', 'self', 'air', 'dist', 'fps']) if (s[k] != null) $(k).value = s[k];
+    for (const k of ['palMode', 'fmt', 'refs', 'cond']) if (s[k] != null) $(k).value = s[k];
+    for (const [id, on] of [['modeLight', !s.add && !s.shadow], ['modeAdd', !!s.add], ['modeShadow', !!s.shadow]]) $(id).setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (s.tiles) $('tilesText').value = s.tiles;
+    if (s.path) $('packPath').value = s.path;
+  } catch (e) {}
+}
+$('packPath').addEventListener('input', saveState);
+
+// ---------------------------------------------------------------- rendu
+const img = ctx.createImageData(W, H), buf = img.data;
+const HZ = 92, CAMH = 34, FOC = 330, CX = W / 2; // horizon, hauteur camera (texels), focale (px)
+let heading = 0.6, last = performance.now(), tAcc = 0;
+const col = [0, 0, 0];
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.1, (now - last) / 1000)); last = now; tAcc += dt;
+  if ($('orbit').checked) heading += dt * 0.35;
+  readParams();
+  const Fx = Math.cos(heading), Fy = Math.sin(heading), Rx = -Fy, Ry = Fx;
+  const Pu = P.px, Pv = P.py;
+  const Cu = Pu - Fx * P.dist, Cv = Pv - Fy * P.dist;
+  // sprite courant
+  const fi = frames.length ? ($('animFrames').checked ? Math.floor(tAcc * P.fps) % frames.length : 0) : 0;
+  const spr = frames[fi];
+  $('frameInfo').textContent = frames === demoFrames ? 'sprite d\'exemple' : `image ${fi + 1} / ${frames.length}`;
+  const inAir = $('inAir').checked, lift = inAir ? 28 : 0; // en l'air : 28 texels au-dessus du sol (apercu)
+  const sh = P.height >= 0 ? P.height : spr.snesH / 2 + lift; // hauteur auto = centre du sprite au-dessus du sol
+  // lumiere
+  let flick = 1;
+  if (P.flicker > 0) { const n = 0.6 * Math.sin(tAcc * P.speed + 1.3) + 0.4 * Math.sin(tAcc * P.speed * 2.31 + 2.2); flick = 1 - P.flicker * (0.5 + 0.5 * n); }
+  const k = P.intensity * flick;
+  let cr = ((P.color >> 16) & 255) * k, cg = ((P.color >> 8) & 255) * k, cb = (P.color & 255) * k;
+  if (P.shadow) { cr = -(255 - ((P.color >> 16) & 255)) * k; cg = -(255 - ((P.color >> 8) & 255)) * k; cb = -(255 - (P.color & 255)) * k; } // comme le moteur
+  const R2 = P.radius * P.radius, h2 = sh * sh;
+  const amb = P.amb;
+  const light = (u, v, hh2, o) => { // o = couleur, modifiee sur place
+    const du = u - Pu, dv = v - Pv, d2 = du * du + dv * dv + hh2;
+    let a = 0; if (d2 < R2) { a = 1 - d2 / R2; a *= a; }
+    if (P.add) { o[0] = o[0] * amb + cr * a; o[1] = o[1] * amb + cg * a; o[2] = o[2] * amb + cb * a; }
+    else { o[0] *= Math.max(0, amb + cr / 255 * a); o[1] *= Math.max(0, amb + cg / 255 * a); o[2] *= Math.max(0, amb + cb / 255 * a); }
+  };
+  // ciel
+  for (let y = 0; y <= HZ; y++) {
+    const t = y / HZ, r = 120 + 70 * t, g = 170 + 50 * t, b = 230 + 15 * t;
+    for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; buf[i] = r * (0.6 + 0.4 * amb); buf[i + 1] = g * (0.6 + 0.4 * amb); buf[i + 2] = b * (0.6 + 0.4 * amb); buf[i + 3] = 255; }
+  }
+  // sol (camera stenope comme dans le moteur)
+  const T = groundTex;
+  for (let y = HZ + 1; y < H; y++) {
+    const D = CAMH * FOC / (y - HZ);
+    for (let x = 0; x < W; x++) {
+      const L = (x - CX) * D / FOC;
+      const u = Cu + Fx * D + Rx * L, v = Cv + Fy * D + Ry * L;
+      if (T) {
+        const tu = Math.floor(u) & 1023, tv = Math.floor(v) & 1023, j = (tv * 1024 + tu) * 4;
+        col[0] = T.data[j]; col[1] = T.data[j + 1]; col[2] = T.data[j + 2];
+      } else demoGround(u, v, col);
+      light(u, v, h2, col);
+      const fog = Math.min(1, D / 1400);
+      const i = (y * W + x) * 4;
+      buf[i] = col[0] + (150 - col[0]) * fog * 0.5; buf[i + 1] = col[1] + (180 - col[1]) * fog * 0.5; buf[i + 2] = col[2] + (220 - col[2]) * fog * 0.5; buf[i + 3] = 255;
+    }
+  }
+  // sprite pose au sol, eclaire depuis ses pieds (d^2 = hauteur^2)
+  const ppt = FOC / P.dist;
+  const feetY = HZ + (CAMH - lift) * ppt;
+  const dw = spr.snesW * ppt, dh = spr.snesH * ppt;
+  const x0 = Math.round(CX - dw / 2), y0 = Math.round(feetY - dh);
+  const sx = spr.w / dw, sy = spr.h / dh;
+  const lc = [0, 0, 0];
+  // lueur propre / halo (= passe glow du moteur : couleur x scintillement, sans l'intensite de la lumiere)
+  const gr = ((P.color >> 16) & 255) * flick, gg = ((P.color >> 8) & 255) * flick, gb = (P.color & 255) * flick;
+  if (P.halo > 0) {
+    const hp = P.halo * 2, kH = (P.glow > 0 ? P.glow : 1) * 0.55;
+    const hcx = x0 + dw / 2, hcy = y0 + dh / 2, hrx = dw / 2 + hp, hry = dh / 2 + hp;
+    for (let y = Math.max(0, Math.floor(hcy - hry)); y <= Math.min(H - 1, Math.ceil(hcy + hry)); y++)
+      for (let x = Math.max(0, Math.floor(hcx - hrx)); x <= Math.min(W - 1, Math.ceil(hcx + hrx)); x++) {
+        const ex = (x + 0.5 - hcx) / hrx, ey = (y + 0.5 - hcy) / hry, d = Math.sqrt(ex * ex + ey * ey); if (d >= 1) continue;
+        const kk = (1 - d) * (1 - d) * kH, i = (y * W + x) * 4;
+        buf[i] = Math.min(255, buf[i] + gr * kk); buf[i + 1] = Math.min(255, buf[i + 1] + gg * kk); buf[i + 2] = Math.min(255, buf[i + 2] + gb * kk);
+      }
+  }
+  for (let y = Math.max(0, y0); y < Math.min(H, Math.round(feetY)); y++) {
+    const ty = Math.min(spr.h - 1, Math.floor((y - y0 + 0.5) * sy));
+    for (let x = Math.max(0, x0); x < Math.min(W, Math.round(x0 + dw)); x++) {
+      const tx = Math.min(spr.w - 1, Math.floor((x - x0 + 0.5) * sx));
+      const j = (ty * spr.w + tx) * 4, a = spr.data[j + 3];
+      if (a < 8) continue;
+      lc[0] = spr.data[j]; lc[1] = spr.data[j + 1]; lc[2] = spr.data[j + 2];
+      // le sprite qui porte la lumiere n'en recoit qu'une part (self) ; en l'air (hors du sol) : aucune, comme en jeu
+      const keep = [lc[0], lc[1], lc[2]];
+      light(Pu, Pv, h2, lc);
+      const sf = inAir ? 0 : P.self;
+      for (let q = 0; q < 3; q++) lc[q] = keep[q] * (P.add ? amb : amb) + (lc[q] - keep[q] * amb) * sf;
+      if (inAir) for (let q = 0; q < 3; q++) lc[q] = keep[q];
+      if (P.glow > 0) { lc[0] += gr * P.glow * 0.8; lc[1] += gg * P.glow * 0.8; lc[2] += gb * P.glow * 0.8; }
+      const i = (y * W + x) * 4, al = a / 255;
+      buf[i] += (Math.min(255, lc[0]) - buf[i]) * al; buf[i + 1] += (Math.min(255, lc[1]) - buf[i + 1]) * al; buf[i + 2] += (Math.min(255, lc[2]) - buf[i + 2]) * al;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- depart
+loadState();
+readParams();
+if (!$('tilesText').value) $('tilesText').value = EXAMPLE;
+syncFromText();
+requestAnimationFrame(frame);
+})();
+</script>

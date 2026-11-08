@@ -587,6 +587,9 @@
     <ClInclude Include="SNES\DSP\DspVoice.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdData.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdMode7Camera.h" />
+    <ClInclude Include="SNES\HdPacks\SnesHdGpu.h" />
+    <ClInclude Include="SNES\HdPacks\SnesHdGl.h" />
+    <ClInclude Include="SNES\HdPacks\SnesHdGltf.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdPackBuilder.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdPackConditions.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdPackLoader.h" />
@@ -986,6 +989,11 @@
     <ClCompile Include="SNES\HdPacks\SnesHdPackBuilder.cpp" />
     <ClCompile Include="SNES\HdPacks\SnesHdPackLoader.cpp" />
     <ClCompile Include="SNES\HdPacks\SnesHdVideoFilter.cpp" />
+    <ClCompile Include="SNES\HdPacks\SnesHdGpu.cpp" />
+    <ClCompile Include="SNES\HdPacks\SnesHdGltf.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <DisableLanguageExtensions>false</DisableLanguageExtensions>
+    </ClCompile>
     <ClCompile Include="SNES\SnesConsole.cpp" />
     <ClCompile Include="Shared\EmulatorLock.cpp" />
     <ClCompile Include="SNES\SnesControlManager.cpp" />
@@ -1216,8 +1224,7 @@
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <CallingConvention>Cdecl</CallingConvention>
-      <AdditionalIncludeDirectories>
-      </AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)ThirdParty\SDL2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <StructMemberAlignment>Default</StructMemberAlignment>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <DisableLanguageExtensions>true</DisableLanguageExtensions>
@@ -1249,8 +1256,7 @@
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <OmitFramePointers>true</OmitFramePointers>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
-      <AdditionalIncludeDirectories>
-      </AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)ThirdParty\SDL2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <StructMemberAlignment>Default</StructMemberAlignment>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <DisableLanguageExtensions>true</DisableLanguageExtensions>
@@ -1283,8 +1289,7 @@
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <OmitFramePointers>true</OmitFramePointers>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
-      <AdditionalIncludeDirectories>
-      </AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)ThirdParty\SDL2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <StructMemberAlignment>Default</StructMemberAlignment>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <DisableLanguageExtensions>true</DisableLanguageExtensions>
@@ -1315,8 +1320,7 @@
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <OmitFramePointers>true</OmitFramePointers>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
-      <AdditionalIncludeDirectories>
-      </AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)ThirdParty\SDL2\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <StructMemberAlignment>Default</StructMemberAlignment>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <DisableLanguageExtensions>true</DisableLanguageExtensions>

@@ -7,6 +7,7 @@
 #include "SNES/HdPacks/SnesHdVideoFilter.h"
 #include "SNES/HdPacks/SnesHdPackLoader.h"
 #include "SNES/HdPacks/SnesHdMode7Camera.h"
+#include "SNES/HdPacks/SnesHdGpu.h"
 #include "SNES/SnesConsole.h"
 #include "SNES/SnesPpu.h"
 #include "Shared/Emulator.h"
@@ -515,12 +516,377 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 
 	// ====================================================================
+	// SOCLE 3D EN AVANCE : camera Mode 7 + envoi des modeles a la carte graphique des la fin de la phase 1,
+	// pour que la carte graphique travaille pendant que le processeur dessine la piste et les sprites.
+	// ====================================================================
+	// CAMERA MODE 7 RECONSTRUITE (socle 3D) + <3DParticles>
+	// Voir SnesHdMode7Camera.h et docs/claude/10_Mode7_Camera_3D.md
+	// ====================================================================
+	auto& hdParts3D = SnesHdPackLoader::ActivePack->Particles3D;
+	bool m7DebugOn = SnesHdPackLoader::ActivePack->M7CameraDebug;
+	for(auto* c : SnesHdPackLoader::ActivePack->M7CameraDebugConditions) {
+		if(!c->CheckCondition(0, 0, nullptr)) { m7DebugOn = false; break; }
+	}
+	std::vector<SnesHdM7Zone> m7Zones; // toutes les zones Mode 7 de l'ecran
+	std::vector<int> m7Views;          // zones en perspective avec camera valide (vue 0 = haut, 1 = bas)
+	// la camera sert a TOUS les effets 3D (relief, panneaux, modeles, lumieres, effets, liquide, lumieres de sprites)
+	const SnesHdPackData& pk3 = *SnesHdPackLoader::ActivePack;
+	const bool m7CamNeeded = m7DebugOn || !hdParts3D.empty() || !pk3.M7Reliefs.empty() || !pk3.M7Billboards.empty() || !pk3.M7Models.empty() ||
+		!pk3.M7Lights.empty() || !pk3.M7Ambients.empty() || !pk3.M7Liquids.empty() || !pk3.M7Effects.empty() || !pk3.SpriteLights.empty();
+	if(m7CamNeeded) {
+		const SnesHdM7LineCapture* cap = console->GetPpu()->GetMode7LineCapture();
+		std::vector<SnesHdM7CamLine> camLines(cropHeight);
+		for(uint32_t y = 0; y < cropHeight && cap; y++) {
+			uint32_t row = y + srcY;
+			if(row >= 240 || !cap[row].Valid) continue;
+			SnesHdM7CamLine& cl = camLines[y];
+			cl.Valid = true;
+			cl.LargeMap = cap[row].LargeMap != 0;
+			const M7Line& L = m7Lines[y];
+			if(L.UseFit && L.Inv > 1e-12) {
+				// memes parametres lisses que le rendu Mode 7 HD (origine a x = 0 de l'image recadree)
+				double scl = 1.0 / L.Inv;
+				cl.Sx = L.DirX * scl / 256.0; cl.Sy = L.DirY * scl / 256.0;
+				cl.Px = (L.U[0] + L.V[0] * scl) / 256.0; cl.Py = (L.U[1] + L.V[1] * scl) / 256.0;
+				cl.Smoothed = true;
+			} else {
+				cl.Sx = cap[row].A / 256.0; cl.Sy = cap[row].C / 256.0;
+				cl.Px = cap[row].StartX / 256.0 + cl.Sx * (double)srcX;
+				cl.Py = cap[row].StartY / 256.0 + cl.Sy * (double)srcX;
+			}
+		}
+		SnesHdBuildMode7Zones(camLines, (double)cropWidth * 0.5, m7Zones);
+		for(size_t z = 0; z < m7Zones.size() && m7Views.size() < 2; z++) {
+			if(m7Zones[z].Perspective && m7Zones[z].HasPinhole) m7Views.push_back((int)z);
+		}
+	}
+
+	// ====================================================================
+	// <m7model> : PREPARATION (sequentielle) - placement, mouvement et animation des modeles 3D par vue
+	// Repere : OBJ / glTF (x, y vers le haut, z) -> carte (u = x, hauteur = y, v = z), meme orientation.
+	// Placement = matrice 3x4 (echelle, origine, balancement, cap, position, hauteur) ; animation glTF =
+	// palette d'os calculee une fois par modele et par frame. Memes donnees pour le GPU et le processeur.
+	// ====================================================================
+	struct MVert { float X, Y, W, GR, U, V, L; }; // ecran HD, 1/profondeur, ligne du sol, texture, lumiere
+	struct MTriDraw { MVert P[3]; const SnesHdModelMaterial* M; float A; };
+	auto& hdModels = SnesHdPackLoader::ActivePack->M7Models;
+	std::vector<std::vector<MTriDraw>> mdDraws(m7Views.size());
+	bool mdOn = false;
+	// <m7model> sur la carte graphique (SnesHdGpu) si disponible et non desactive par <gpu3d>off
+	const bool mdUseGpu = !hdModels.empty() && !m7Views.empty() && SnesHdPackLoader::ActivePack->Gpu3D && SnesHdGpu::Get().Available();
+	std::vector<SnesHdGpuView> gpuViews;
+	static std::vector<uint32_t> s_gpuColor;
+	static std::vector<float> s_gpuGround;
+	bool gpuModelsOn = false;
+	int gpuRx0 = 1 << 30, gpuRy0 = 1 << 30, gpuRx1 = -1, gpuRy1 = -1; // rectangle utile (pixels HD)
+	if(mdUseGpu) gpuViews.resize(m7Views.size());
+	std::vector<std::vector<float>> mdPalettes(hdModels.size()); // os animes de chaque modele (cette frame)
+	if(!hdModels.empty() && !m7Views.empty()) {
+		const float mdTime = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+		const float kDeg = 0.01745329f;
+		// lumiere fixe dans le monde : du nord-ouest, en hauteur (u, v, h)
+		const float lx = -0.45f, lv = -0.35f, lh = 0.82f;
+		const float ln = std::sqrt(lx * lx + lv * lv + lh * lh);
+		std::vector<char> mdActive(hdModels.size(), 0);
+		for(size_t mi = 0; mi < hdModels.size(); mi++) {
+			SnesHdM7ModelInfo& md = *hdModels[mi];
+			if(!md.Mesh || !md.MatchesCondition()) continue;
+			mdActive[mi] = 1;
+			if(md.Mesh->Rig) md.Mesh->Rig->Evaluate(md.Anim, (mdTime + md.TimeOffset) * md.AnimSpeed, mdPalettes[mi]);
+		}
+		for(size_t vw = 0; vw < m7Views.size(); vw++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[vw]];
+			const uint32_t viewMap = m7Lines[zn.Y1].Img ? m7Lines[zn.Y1].Ref.M7MapHash : 0;
+			std::vector<MTriDraw>& dl = mdDraws[vw];
+			for(size_t mi = 0; mi < hdModels.size(); mi++) {
+				if(!mdActive[mi]) continue;
+				SnesHdM7ModelInfo& md = *hdModels[mi];
+				if(!SnesHdMapMatch(md.AnyMap, md.MapHashes, md.MapHash, viewMap)) continue;
+				const SnesHdModelMesh& mesh = *md.Mesh;
+				const std::vector<float>* pal = (mesh.Rig && !mdPalettes[mi].empty()) ? &mdPalettes[mi] : nullptr;
+				const float ox = md.KeepOrigin ? 0.0f : (mesh.MinX + mesh.MaxX) * 0.5f;
+				const float oy = md.KeepOrigin ? 0.0f : mesh.MinY;
+				const float oz = md.KeepOrigin ? 0.0f : (mesh.MinZ + mesh.MaxZ) * 0.5f;
+				const float t = mdTime + md.TimeOffset;
+				auto place = [&](double u0, double v0) {
+					// --- mouvement : trajet, cap, rotation continue, flottement, balancement ---
+					float pu = 0, pv = 0, ph = 0, du = 0, dv = 1;
+					const bool onPath = md.Path.size() >= 2 && md.PathLen > 0;
+					if(onPath) md.EvalPath(t, pu, pv, ph, du, dv);
+					double bu = onPath ? (md.OnTile ? u0 + pu : pu) : u0;
+					double bv = onPath ? (md.OnTile ? v0 + pv : pv) : v0;
+					float yawDeg = md.Rotation + md.Spin * t;
+					if(onPath && md.PathOrient && (du != 0 || dv != 0)) yawDeg += std::atan2(-du, dv) / kDeg; // avant du modele (+z) dans le sens de la marche
+					const float roll = md.SwayAmp != 0 ? md.SwayAmp * kDeg * std::sin(6.2831853f * md.SwayFreq * t) : 0.0f;
+					const float bob = md.BobAmp != 0 ? md.BobAmp * std::sin(6.2831853f * md.BobFreq * t) : 0.0f;
+					const double U0 = zn.LargeMap ? bu : bu + 1024.0 * std::round((zn.Cx - bu) / 1024.0);
+					const double V0 = zn.LargeMap ? bv : bv + 1024.0 * std::round((zn.Cy - bv) / 1024.0);
+					const float hBase = md.Elevation + ph + bob;
+					// matrice : (u, v, h) = M x (x, y, z, 1)
+					const float s = md.Scale, cy = std::cos(yawDeg * kDeg), sy = std::sin(yawDeg * kDeg), cro = std::cos(roll), sro = std::sin(roll);
+					float M[12] = {
+						s * cy * cro, -s * cy * sro, -s * sy, 0,
+						s * sy * cro, -s * sy * sro,  s * cy, 0,
+						s * sro,       s * cro,       0,      0 };
+					M[3] = (float)U0 - (M[0] * ox + M[1] * oy + M[2] * oz);
+					M[7] = (float)V0 - (M[4] * ox + M[5] * oy + M[6] * oz);
+					M[11] = hBase - (M[8] * ox + M[9] * oy + M[10] * oz);
+					auto xf = [&](const float* p, double& u, double& w, double& h) {
+						u = M[0] * p[0] + M[1] * p[1] + M[2] * p[2] + M[3];
+						w = M[4] * p[0] + M[5] * p[1] + M[6] * p[2] + M[7];
+						h = M[8] * p[0] + M[9] * p[1] + M[10] * p[2] + M[11];
+					};
+					// fondu pres de la ligne la plus lointaine (comme les panneaux)
+					double asx, asy, appt;
+					float fade = 1.0f;
+					if(zn.Project(U0, V0, 0.0, asx, asy, appt)) fade = std::clamp((float)(asy - zn.Y0) / 6.0f, 0.0f, 1.0f);
+					if(fade <= 0.003f) return;
+					if(mdUseGpu) {
+						// la carte graphique projette elle-meme les sommets (meme table que ce code)
+						SnesHdGpuInstance gi;
+						gi.Mesh = &mesh; gi.Ambient = md.Ambient; gi.Fade = fade; gi.Palette = pal;
+						memcpy(gi.Model, M, sizeof(M));
+						gi.Model[3] -= (float)zn.Cx; gi.Model[7] -= (float)zn.Cy; // relatif a la camera (precision)
+						// rectangle d'ecran occupe : coins de la boite englobante (elargie si animee) projetes
+						const float grow = mesh.Rig ? 0.25f : 0.0f;
+						const float ex = (mesh.MaxX - mesh.MinX) * grow, ey = (mesh.MaxY - mesh.MinY) * grow, ez = (mesh.MaxZ - mesh.MinZ) * grow;
+						bool anyCorner = false, partial = false;
+						float bx0 = 1e9f, by0 = 1e9f, bx1 = -1e9f, by1 = -1e9f;
+						for(int c = 0; c < 8; c++) {
+							float pc[3] = { (c & 1) ? mesh.MaxX + ex : mesh.MinX - ex, (c & 2) ? mesh.MaxY + ey : mesh.MinY - ey, (c & 4) ? mesh.MaxZ + ez : mesh.MinZ - ez };
+							double u, w, hh;
+							xf(pc, u, w, hh);
+							double sx, sy, ppt;
+							if(!zn.Project(u, w, hh, sx, sy, ppt) || zn.DepthOf(u, w) < 2.0) { partial = true; continue; }
+							float hx = (float)((sx + dstX) * scale), hy = (float)((sy + dstY) * scale);
+							bx0 = std::min(bx0, hx); bx1 = std::max(bx1, hx); by0 = std::min(by0, hy); by1 = std::max(by1, hy);
+							anyCorner = true;
+						}
+						const int areaTop = (zn.AreaY0 + (int)dstY) * (int)scale, areaBot = (zn.AreaY1 + 1 + (int)dstY) * (int)scale - 1;
+						if(partial) { bx0 = 0; bx1 = (float)outWidth - 1; by0 = (float)areaTop; if(!anyCorner) by1 = (float)areaBot; }
+						const float margin = 4.0f * (float)scale;
+						if(bx1 + margin < 0 || bx0 - margin > (float)outWidth || by1 + margin < (float)areaTop || by0 - margin > (float)areaBot) return; // hors ecran
+						gpuRx0 = std::min(gpuRx0, (int)std::floor(bx0 - margin)); gpuRx1 = std::max(gpuRx1, (int)std::ceil(bx1 + margin));
+						gpuRy0 = std::min(gpuRy0, std::max(areaTop, (int)std::floor(by0 - margin)));
+						gpuRy1 = std::max(gpuRy1, std::min(areaBot, (int)std::ceil(by1 + margin)));
+						gpuViews[vw].Instances.push_back(gi);
+						return;
+					}
+					// --- moteur processeur ---
+					for(const SnesHdModelTri& tr : mesh.Tris) {
+						const SnesHdModelMaterial& mat = mesh.Mats[std::clamp(tr.Mat, 0, (int)mesh.Mats.size() - 1)];
+						const float a = mat.Alpha * fade;
+						if(a <= 0.003f) continue;
+						MTriDraw d; d.M = &mat; d.A = a;
+						bool ok = true;
+						for(int k = 0; k < 3 && ok; k++) {
+							float p[3] = { tr.P[k][0], tr.P[k][1], tr.P[k][2] }, n[3] = { tr.N[k][0], tr.N[k][1], tr.N[k][2] };
+							if(pal) {
+								// os animes : somme ponderee des matrices
+								float q[3] = { 0, 0, 0 }, m3[3] = { 0, 0, 0 };
+								for(int j = 0; j < 4; j++) {
+									const float wgt = tr.Wt[k][j];
+									if(wgt <= 0) continue;
+									const float* B = &(*pal)[(size_t)tr.J[k][j] * 12];
+									for(int r = 0; r < 3; r++) {
+										q[r] += wgt * (B[r * 4] * p[0] + B[r * 4 + 1] * p[1] + B[r * 4 + 2] * p[2] + B[r * 4 + 3]);
+										m3[r] += wgt * (B[r * 4] * n[0] + B[r * 4 + 1] * n[1] + B[r * 4 + 2] * n[2]);
+									}
+								}
+								memcpy(p, q, sizeof(q)); memcpy(n, m3, sizeof(m3));
+							}
+							double u, w, h;
+							xf(p, u, w, h);
+							double sx, sy, ppt;
+							if(!zn.Project(u, w, h, sx, sy, ppt)) { ok = false; break; }
+							double D = zn.DepthOf(u, w);
+							if(D < 2.0) { ok = false; break; }
+							float nu = M[0] * n[0] + M[1] * n[1] + M[2] * n[2], nv = M[4] * n[0] + M[5] * n[1] + M[6] * n[2], nh = M[8] * n[0] + M[9] * n[1] + M[10] * n[2];
+							float nl = std::sqrt(nu * nu + nv * nv + nh * nh);
+							float dotL = nl > 1e-6f ? std::abs(nu * lx + nv * lv + nh * lh) / (nl * ln) : 1.0f; // deux faces
+							MVert& mv = d.P[k];
+							mv.X = (float)((sx + dstX) * scale); mv.Y = (float)((sy + dstY) * scale);
+							mv.W = (float)(1.0 / D);
+							mv.GR = (float)(sy + h * ppt);
+							mv.U = tr.UV[k][0]; mv.V = tr.UV[k][1];
+							mv.L = md.Ambient + (1.0f - md.Ambient) * dotL;
+						}
+						if(!ok) continue;
+						float minX = std::min({ d.P[0].X, d.P[1].X, d.P[2].X }), maxX = std::max({ d.P[0].X, d.P[1].X, d.P[2].X });
+						if(maxX < 0 || minX > (float)outWidth) continue;
+						dl.push_back(d);
+					}
+				};
+				if(md.OnTile) {
+					if(m7CellHash.empty()) continue;
+					for(size_t c = 0; c < m7CellHash.size(); c++) {
+						if(m7CellHash[c] == md.TileHash) place((double)((c % 128) * 8 + 4), (double)((c / 128) * 8 + 4));
+					}
+				} else {
+					place(md.X, md.Y);
+				}
+			}
+			if(!dl.empty()) mdOn = true;
+		}
+	}
+	if(mdUseGpu) {
+		bool any = false;
+		for(size_t vw = 0; vw < gpuViews.size(); vw++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[vw]];
+			gpuViews[vw].Zone = &zn;
+			gpuViews[vw].ClipY0 = std::max(0, (zn.AreaY0 + (int)dstY) * (int)scale);
+			gpuViews[vw].ClipY1 = std::min((int)hdHeight - 1, (zn.AreaY1 + 1 + (int)dstY) * (int)scale - 1);
+			if(!gpuViews[vw].Instances.empty()) any = true;
+		}
+		gpuRx0 = std::max(gpuRx0, 0); gpuRy0 = std::max(gpuRy0, 0);
+		gpuRx1 = std::min(gpuRx1, (int)outWidth - 1); gpuRy1 = std::min(gpuRy1, (int)hdHeight - 1);
+		if(any && gpuRx0 <= gpuRx1 && gpuRy0 <= gpuRy1 &&
+			SnesHdGpu::Get().SubmitModels(gpuViews, outWidth, hdHeight, (float)scale, (float)dstX, (float)dstY,
+				gpuRx0, gpuRy0, gpuRx1, gpuRy1)) {
+			gpuModelsOn = true;
+			mdOn = true;
+		}
+	}
+	static std::vector<float> s_modelW; // 1/profondeur des pixels de modele (plus grand = plus proche)
+	if(mdOn) s_modelW.assign((size_t)outWidth * hdHeight, 0.0f);
+
+	// ====================================================================
+	// <m7LiquidBackground> : PREPARATION (sequentielle) - liquide de chaque ligne Mode 7 + sa vue
+	// ====================================================================
+	std::vector<const SnesHdM7LiquidInfo*> lineLiquid(cropHeight, nullptr);
+	std::vector<const SnesHdM7Zone*> lineZone(cropHeight, nullptr);
+	const float liqTime = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+	{
+		auto& hdLiquids = SnesHdPackLoader::ActivePack->M7Liquids;
+		if(!hdLiquids.empty()) {
+			std::vector<char> liqOk(hdLiquids.size(), 0);
+			for(size_t i = 0; i < hdLiquids.size(); i++) {
+				liqOk[i] = hdLiquids[i]->MatchesCondition() ? 1 : 0;
+				if(liqOk[i]) hdLiquids[i]->Build();
+			}
+			for(const SnesHdM7Zone& zn : m7Zones) {
+				for(int yy = zn.Y0; yy <= zn.Y1; yy++) if(yy >= 0 && yy < (int)cropHeight) lineZone[yy] = &zn;
+			}
+			for(uint32_t yy = 0; yy < cropHeight; yy++) {
+				if(!m7Lines[yy].Img) continue;
+				const uint32_t mh = m7Lines[yy].Ref.M7MapHash;
+				for(size_t i = 0; i < hdLiquids.size(); i++) {
+					if(!liqOk[i]) continue;
+					if(!SnesHdMapMatch(hdLiquids[i]->AnyMap, hdLiquids[i]->MapHashes, hdLiquids[i]->MapHash, mh)) continue;
+					lineLiquid[yy] = hdLiquids[i].get();
+					break;
+				}
+			}
+		}
+	}
+	// Table de sinus (1024 points, interpolation lineaire) : ~10x plus rapide que std::sin/cos ici
+	static float s_sinTab[1025];
+	static bool s_sinTabInit = false;
+	if(!s_sinTabInit) { for(int i = 0; i <= 1024; i++) s_sinTab[i] = std::sin(6.2831853f * i / 1024.0f); s_sinTabInit = true; }
+	auto fastSinCos = [](float ph, float& s, float& c) {
+		float x = ph * (1024.0f / 6.2831853f);
+		x -= 1024.0f * std::floor(x / 1024.0f);
+		int i = (int)x; float f = x - (float)i; i &= 1023;
+		s = s_sinTab[i] + (s_sinTab[i + 1] - s_sinTab[i]) * f;
+		int j = (i + 256) & 1023; // cos = sin(x + pi/2)
+		c = s_sinTab[j] + (s_sinTab[j + 1] - s_sinTab[j]) * f;
+	};
+	// Couleur du liquide en un point de la carte (u, v texels), k = texels de carte par pixel HD (finesse)
+	auto liquidShade = [&](const SnesHdM7LiquidInfo& L, double u, double v, float k, const SnesHdM7Zone* zn, float texAlpha) -> uint32_t {
+		const float t = liqTime;
+		const float kTwoPi = 6.2831853f;
+		// vagues : 3 trains d'ondes dans le monde, attenues quand ils deviennent plus fins que ~3 pixels HD
+		static const float dirs[3][2] = { { 0.957f, 0.287f }, { -0.371f, 0.928f }, { 0.707f, -0.707f } };
+		const float lens[3] = { 1.0f, 0.63f, 0.41f }, amps[3] = { 1.0f, 0.6f, 0.4f }, spd[3] = { 1.0f, 0.8f, 1.3f };
+		float h = 0, du = 0, dv = 0, ampSum = 0;
+		for(int i = 0; i < 3; i++) {
+			const float lambda = L.Scale * lens[i];
+			const float fade = std::clamp((lambda / std::max(k, 1e-4f) - 3.0f) / 6.0f, 0.0f, 1.0f);
+			const float a = amps[i] * fade;
+			ampSum += amps[i];
+			if(a <= 0.0f) continue;
+			const float f = kTwoPi / lambda;
+			const float ph = (float)((u * dirs[i][0] + v * dirs[i][1]) * f) - t * L.Speed * spd[i] * f;
+			float s, c;
+			fastSinCos(ph, s, c);
+			h += a * s;
+			du += a * c * f * dirs[i][0]; dv += a * c * f * dirs[i][1];
+		}
+		h /= ampSum;
+		const float slope = L.Waves * L.Scale / kTwoPi / ampSum;
+		float nx = -du * slope, ny = -dv * slope, nz = 1.0f;
+		const float nl = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz); nx *= nl; ny *= nl; nz *= nl;
+
+		auto ch = [](uint32_t c, int sh) { return (float)((c >> sh) & 0xFF); };
+		const float m = 0.5f + 0.5f * h;
+		float r = ch(L.Deep, 16) + (ch(L.Color, 16) - ch(L.Deep, 16)) * m;
+		float g = ch(L.Deep, 8) + (ch(L.Color, 8) - ch(L.Deep, 8)) * m;
+		float b = ch(L.Deep, 0) + (ch(L.Color, 0) - ch(L.Deep, 0)) * m;
+
+		// detail optionnel : texture repetee, deux couches qui glissent en sens oppose (mip selon la finesse)
+		if(!L.Mips.empty()) {
+			auto sampleTex = [&](double su, double sv) {
+				const float texelsPerPx = k / L.TexScale * (float)L.MipW[0];
+				int lvl = texelsPerPx > 1.0f ? (int)std::floor(std::log2(texelsPerPx)) : 0;
+				lvl = std::clamp(lvl, 0, (int)L.Mips.size() - 1);
+				const int w = (int)L.MipW[lvl], hh = (int)L.MipH[lvl];
+				double fu = su / L.TexScale, fv = sv / L.TexScale;
+				fu -= std::floor(fu); fv -= std::floor(fv);
+				int ix = std::clamp((int)(fu * w), 0, w - 1), iy = std::clamp((int)(fv * hh), 0, hh - 1);
+				return L.Mips[lvl][(size_t)iy * w + ix];
+			};
+			const double off = (double)t * L.Speed * 0.5;
+			uint32_t c1 = sampleTex(u + off, v + off * 0.3), c2 = sampleTex(u - off * 0.7, v + off);
+			const float tr = (ch(c1, 16) + ch(c2, 16)) / 510.0f, tg = (ch(c1, 8) + ch(c2, 8)) / 510.0f, tb = (ch(c1, 0) + ch(c2, 0)) / 510.0f;
+			r *= 0.5f + tr; g *= 0.5f + tg; b *= 0.5f + tb;
+		}
+
+		if(L.Lava) {
+			// points chauds qui pulsent
+			float ps, pc;
+			fastSinCos(t * 2.1f + (float)(u * 0.05 + v * 0.031), ps, pc);
+			const float hot = std::clamp((h - 0.35f) * 2.5f, 0.0f, 1.0f) * (0.75f + 0.25f * ps);
+			r += (ch(L.Sky, 16) - r) * hot; g += (ch(L.Sky, 8) - g) * hot; b += (ch(L.Sky, 0) - b) * hot;
+		} else {
+			// direction de la camera (stenope de la vue) : reflet du ciel (angle rasant) et du soleil
+			float vx = 0, vy = 0, vz = 1;
+			if(zn && zn->HasPinhole) {
+				vx = (float)(zn->Cx - u); vy = (float)(zn->Cy - v); vz = (float)zn->Height;
+				const float vl = 1.0f / std::sqrt(vx * vx + vy * vy + vz * vz); vx *= vl; vy *= vl; vz *= vl;
+			}
+			const float ndv = std::max(0.0f, nx * vx + ny * vy + nz * vz);
+			const float om = 1.0f - ndv;
+			const float fres = L.Reflect * (0.04f + 0.96f * om * om * om);
+			r += (ch(L.Sky, 16) - r) * fres; g += (ch(L.Sky, 8) - g) * fres; b += (ch(L.Sky, 0) - b) * fres;
+			// soleil (devant, haut) : reflet = vue reflechie par la normale
+			const float rx = 2.0f * ndv * nx - vx, ry = 2.0f * ndv * ny - vy, rz = 2.0f * ndv * nz - vz;
+			const float sx = zn ? (float)zn->Fx * 0.55f : 0.0f, sy = zn ? (float)zn->Fy * 0.55f : -0.55f, sz = 0.83f;
+			const float sp = std::max(0.0f, rx * sx + ry * sy + rz * sz);
+			if(sp > 0.85f && L.Specular > 0.0f) { // sp^48 negligeable en dessous
+				float p = sp * sp * sp;               // ^3
+				p *= p; p *= p; p *= p; p *= p;       // ^48
+				const float spec = L.Specular * p * 255.0f;
+				r += spec; g += spec; b += spec;
+			}
+			// ecume : zones semi-transparentes de la texture (rivage)
+			if(L.Foam > 0.0f && texAlpha > 0.01f) {
+				const float band = std::clamp(texAlpha * 5.0f, 0.0f, 1.0f) * std::clamp((0.75f - texAlpha) * 3.0f, 0.0f, 1.0f);
+				const float fo = L.Foam * band * (0.55f + 0.45f * h);
+				r += (250.0f - r) * fo; g += (252.0f - g) * fo; b += (255.0f - b) * fo;
+			}
+		}
+		return 0xFF000000 | ((uint32_t)std::clamp(r, 0.0f, 255.0f) << 16) | ((uint32_t)std::clamp(g, 0.0f, 255.0f) << 8) | (uint32_t)std::clamp(b, 0.0f, 255.0f);
+	};
+
+	// ====================================================================
 	// MODE 7 HD - PHASE 2 (parallele) : rendu d'une ligne SNES (= 'scale' lignes HD)
 	// Filtrage : trilineaire ('bilinear') ou anisotrope ('anisotropic', jusqu'a 8 echantillons).
 	// Unites : positions et pas en 8.8, en texels du niveau 0.
 	// ====================================================================
 	auto renderMode7Line = [&](uint32_t y) {
 		const M7Line& L = m7Lines[y];
+		const SnesHdM7LiquidInfo* lineLiq = lineLiquid[y];
+		const SnesHdM7Zone* lineZn = lineZone[y];
 		const SnesHdPixelData& refM7Data = L.Ref;
 		const SnesHdPixelData& nextRefM7Data = L.Next;
 		SnesHdMode7Image* m7Img = L.Img;
@@ -829,6 +1195,18 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								}
 							}
 						}
+					}
+
+					// <m7LiquidBackground> : liquide visible a travers les pixels (semi-)transparents de la texture
+					if(lineLiq && (hdColorFromPng >> 24) < 255) {
+						const double lu = (double)posFX / ((double)imgScale * 65536.0), lv = (double)posFY / ((double)imgScale * 65536.0);
+						const float ta = (float)(hdColorFromPng >> 24) / 255.0f;
+						const uint32_t wc = liquidShade(*lineLiq, lu, lv, pMax / (float)imgScale, lineZn, ta);
+						const float ia = 1.0f - ta;
+						const uint32_t lr = (uint32_t)(((wc >> 16) & 0xFF) * ia + ((hdColorFromPng >> 16) & 0xFF) * ta + 0.5f);
+						const uint32_t lg = (uint32_t)(((wc >> 8) & 0xFF) * ia + ((hdColorFromPng >> 8) & 0xFF) * ta + 0.5f);
+						const uint32_t lb = (uint32_t)((wc & 0xFF) * ia + (hdColorFromPng & 0xFF) * ta + 0.5f);
+						hdColorFromPng = 0xFF000000 | (std::min(lr, 255u) << 16) | (std::min(lg, 255u) << 8) | std::min(lb, 255u);
 					}
 
 					uint32_t finalColor;
@@ -1241,7 +1619,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	struct RenderTask
 	{
 		int zIndex;
-		int type;     // 0 = Background, 1 = Tile/Sprite, 2 = <2DOverlay>, 3 = <3DParticles>, 4 = <m7relief>, 5 = <m7billboard>, 6 = <m7model>
+		int type;     // 0 = Background, 1 = Tile/Sprite, 2 = <2DOverlay>, 3 = <3DParticles>, 4 = <m7relief>, 5 = <m7billboard>, 6 = <m7model>, 7 = <m7model> GPU, 8 = <m7Effect>
 		int oamIndex; // Utilisé pour ordonner les sprites de même ZIndex
 		size_t index; // Index dans le vecteur source
 	};
@@ -1440,45 +1818,6 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	};
 
-	// ====================================================================
-	// CAMERA MODE 7 RECONSTRUITE (socle 3D) + <3DParticles>
-	// Voir SnesHdMode7Camera.h et docs/claude/10_Mode7_Camera_3D.md
-	// ====================================================================
-	auto& hdParts3D = SnesHdPackLoader::ActivePack->Particles3D;
-	bool m7DebugOn = SnesHdPackLoader::ActivePack->M7CameraDebug;
-	for(auto* c : SnesHdPackLoader::ActivePack->M7CameraDebugConditions) {
-		if(!c->CheckCondition(0, 0, nullptr)) { m7DebugOn = false; break; }
-	}
-	std::vector<SnesHdM7Zone> m7Zones; // toutes les zones Mode 7 de l'ecran
-	std::vector<int> m7Views;          // zones en perspective avec camera valide (vue 0 = haut, 1 = bas)
-	if(!hdParts3D.empty() || m7DebugOn) {
-		const SnesHdM7LineCapture* cap = console->GetPpu()->GetMode7LineCapture();
-		std::vector<SnesHdM7CamLine> camLines(cropHeight);
-		for(uint32_t y = 0; y < cropHeight && cap; y++) {
-			uint32_t row = y + srcY;
-			if(row >= 240 || !cap[row].Valid) continue;
-			SnesHdM7CamLine& cl = camLines[y];
-			cl.Valid = true;
-			cl.LargeMap = cap[row].LargeMap != 0;
-			const M7Line& L = m7Lines[y];
-			if(L.UseFit && L.Inv > 1e-12) {
-				// memes parametres lisses que le rendu Mode 7 HD (origine a x = 0 de l'image recadree)
-				double scl = 1.0 / L.Inv;
-				cl.Sx = L.DirX * scl / 256.0; cl.Sy = L.DirY * scl / 256.0;
-				cl.Px = (L.U[0] + L.V[0] * scl) / 256.0; cl.Py = (L.U[1] + L.V[1] * scl) / 256.0;
-				cl.Smoothed = true;
-			} else {
-				cl.Sx = cap[row].A / 256.0; cl.Sy = cap[row].C / 256.0;
-				cl.Px = cap[row].StartX / 256.0 + cl.Sx * (double)srcX;
-				cl.Py = cap[row].StartY / 256.0 + cl.Sy * (double)srcX;
-			}
-		}
-		SnesHdBuildMode7Zones(camLines, (double)cropWidth * 0.5, m7Zones);
-		for(size_t z = 0; z < m7Zones.size() && m7Views.size() < 2; z++) {
-			if(m7Zones[z].Perspective && m7Zones[z].HasPinhole) m7Views.push_back((int)z);
-		}
-	}
-
 	// Particule prete a dessiner (pixels HD), triee du plus loin au plus proche
 	struct P3Draw { float Cx, Cy, HalfW, HalfH, A, R, G, B, Depth, GroundRow; };
 	std::vector<std::vector<P3Draw>> p3Draws(hdParts3D.size() * 2);
@@ -1665,7 +2004,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			std::vector<BBDraw>& dl = bbDraws[v];
 			for(auto& ub : hdBillboards) {
 				SnesHdM7BillboardInfo& bb = *ub;
-				if(!bb.AnyMap && bb.MapHash != viewMap) continue;
+				if(!SnesHdMapMatch(bb.AnyMap, bb.MapHashes, bb.MapHash, viewMap)) continue;
 				if(!bb.MatchesCondition()) continue;
 				bb.Build();
 				if(bb.Mips.empty()) continue;
@@ -1709,98 +2048,354 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	}
 
+
+	// Position courante d'un <m7Effect> (trajet, flottement) ; base = (x, y) ou centre de la case (tile=)
+	auto fxPos = [&](const SnesHdM7EffectInfo& fx, double baseU, double baseV, double& u, double& v, double& h) {
+		u = baseU; v = baseV; h = fx.Elevation;
+		if(!fx.HasMotion) return;
+		const SnesHdM7ModelInfo& m = fx.Motion;
+		const float t = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f + m.TimeOffset;
+		if(m.Path.size() >= 2 && m.PathLen > 0) {
+			float pu, pv, ph, du, dv;
+			m.EvalPath(t, pu, pv, ph, du, dv);
+			if(fx.OnTile) { u = baseU + pu; v = baseV + pv; } else { u = pu; v = pv; }
+			h += ph;
+		}
+		if(m.BobAmp != 0) h += m.BobAmp * std::sin(6.2831853f * m.BobFreq * t);
+	};
+
 	// ====================================================================
-	// <m7model> : PREPARATION (sequentielle) - sommets des modeles 3D projetes par vue
-	// Repere : OBJ (x, y vers le haut, z) -> carte (u = x, hauteur = y, v = z), meme orientation.
+	// <m7light> / <m7ambient> : PREPARATION (sequentielle) - lumieres visibles de chaque vue
 	// ====================================================================
-	struct MVert { float X, Y, W, GR, U, V, L; }; // ecran HD, 1/profondeur, ligne du sol, texture, lumiere
-	struct MTriDraw { MVert P[3]; const SnesHdModelMaterial* M; float A; };
-	auto& hdModels = SnesHdPackLoader::ActivePack->M7Models;
-	std::vector<std::vector<MTriDraw>> mdDraws(m7Views.size());
-	bool mdOn = false;
-	if(!hdModels.empty()) {
-		// lumiere fixe dans le monde : du nord-ouest, en hauteur (u, v, h)
-		const float lx = -0.45f, lv = -0.35f, lh = 0.82f;
-		const float ln = std::sqrt(lx * lx + lv * lv + lh * lh);
-		for(size_t vw = 0; vw < m7Views.size(); vw++) {
-			const SnesHdM7Zone& zn = m7Zones[m7Views[vw]];
+	struct LightDraw { float U, V, H, R2, InvR2, Cr, Cg, Cb; bool Add; int X0, X1, Y0, Y1; int Group = -1; float Self = 1.0f; };
+	struct ViewLighting { float Ar = 1, Ag = 1, Ab = 1; bool Sky = true; bool AmbientOn = false; std::vector<LightDraw> Lights; };
+	std::vector<ViewLighting> viewLights(m7Views.size());
+	bool lightsOn = false;
+	auto& hdLights = SnesHdPackLoader::ActivePack->M7Lights;
+	auto& hdAmbients = SnesHdPackLoader::ActivePack->M7Ambients;
+	if((!hdLights.empty() || !hdAmbients.empty()) && !m7Views.empty()) {
+		const float tSec = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+		for(size_t v = 0; v < m7Views.size(); v++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
 			const uint32_t viewMap = m7Lines[zn.Y1].Img ? m7Lines[zn.Y1].Ref.M7MapHash : 0;
-			std::vector<MTriDraw>& dl = mdDraws[vw];
-			for(auto& um : hdModels) {
-				SnesHdM7ModelInfo& md = *um;
-				if(!md.Mesh || (!md.AnyMap && md.MapHash != viewMap)) continue;
-				if(!md.MatchesCondition()) continue;
-				const SnesHdModelMesh& mesh = *md.Mesh;
-				const float ox = md.KeepOrigin ? 0.0f : (mesh.MinX + mesh.MaxX) * 0.5f;
-				const float oy = md.KeepOrigin ? 0.0f : mesh.MinY;
-				const float oz = md.KeepOrigin ? 0.0f : (mesh.MinZ + mesh.MaxZ) * 0.5f;
-				const float cr = std::cos(md.Rotation * 0.01745329f), sr = std::sin(md.Rotation * 0.01745329f);
-				auto place = [&](double u0, double v0) {
-					double U0 = zn.LargeMap ? u0 : u0 + 1024.0 * std::round((zn.Cx - u0) / 1024.0);
-					double V0 = zn.LargeMap ? v0 : v0 + 1024.0 * std::round((zn.Cy - v0) / 1024.0);
-					// fondu pres de la ligne la plus lointaine (comme les panneaux)
-					double asx, asy, appt;
-					float fade = 1.0f;
-					if(zn.Project(U0, V0, 0.0, asx, asy, appt)) fade = std::clamp((float)(asy - zn.Y0) / 6.0f, 0.0f, 1.0f);
-					for(const SnesHdModelTri& t : mesh.Tris) {
-						const SnesHdModelMaterial& mat = mesh.Mats[std::clamp(t.Mat, 0, (int)mesh.Mats.size() - 1)];
-						const float a = mat.Alpha * fade;
-						if(a <= 0.003f) continue;
-						MTriDraw d; d.M = &mat; d.A = a;
-						bool ok = true;
-						for(int k = 0; k < 3 && ok; k++) {
-							float x = (t.P[k][0] - ox) * md.Scale, y = (t.P[k][1] - oy) * md.Scale, z = (t.P[k][2] - oz) * md.Scale;
-							double u = U0 + x * cr - z * sr, w = V0 + x * sr + z * cr, h = md.Elevation + y;
+			ViewLighting& VL = viewLights[v];
+			for(auto& ua : hdAmbients) {
+				SnesHdM7AmbientInfo& am = *ua;
+				if(!SnesHdMapMatch(am.AnyMap, am.MapHashes, am.MapHash, viewMap)) continue;
+				if(!am.MatchesCondition()) continue;
+				VL.Ar = ((am.Tint >> 16) & 0xFF) / 255.0f * am.Brightness;
+				VL.Ag = ((am.Tint >> 8) & 0xFF) / 255.0f * am.Brightness;
+				VL.Ab = (am.Tint & 0xFF) / 255.0f * am.Brightness;
+				VL.Sky = am.Sky;
+				VL.AmbientOn = std::abs(VL.Ar - 1.0f) > 0.002f || std::abs(VL.Ag - 1.0f) > 0.002f || std::abs(VL.Ab - 1.0f) > 0.002f;
+				break;
+			}
+			const int sc = (int)scale;
+			const int zoneTopHD = (zn.Y0 + (int)dstY) * sc;
+			const int areaTopHD = (zn.AreaY0 + (int)dstY) * sc, areaBotHD = (zn.AreaY1 + 1 + (int)dstY) * sc - 1;
+			for(auto& ul : hdLights) {
+				SnesHdM7LightInfo& lt = *ul;
+				if(!SnesHdMapMatch(lt.AnyMap, lt.MapHashes, lt.MapHash, viewMap)) continue;
+				if(!lt.MatchesCondition()) continue;
+				auto addLight = [&](double u0, double v0, float seed) {
+					float hL = lt.Height;
+					if(lt.Follow && lt.Follow->HasMotion) {
+						// lumiere automatique d'une flamme en mouvement : meme trajet, meme flottement
+						double fu, fv, fh;
+						fxPos(*lt.Follow, u0, v0, fu, fv, fh);
+						u0 = fu; v0 = fv; hL = (float)fh + lt.Follow->SizeStart * 1.5f;
+					}
+					double u = zn.LargeMap ? u0 : u0 + 1024.0 * std::round((zn.Cx - u0) / 1024.0);
+					double w = zn.LargeMap ? v0 : v0 + 1024.0 * std::round((zn.Cy - v0) / 1024.0);
+					const double r = lt.Radius;
+					// portee au sol vue par la camera : centre, point le plus proche / le plus loin, cotes
+					const double px[5] = { u, u - zn.Fx * r, u + zn.Fx * r, u - zn.Rx * r, u + zn.Rx * r };
+					const double py[5] = { w, w - zn.Fy * r, w + zn.Fy * r, w - zn.Ry * r, w + zn.Ry * r };
+					bool okP[5]; int nOk = 0;
+					float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f, pptMax = 0;
+					for(int k = 0; k < 5; k++) {
+						double sx, sy, ppt;
+						okP[k] = zn.Project(px[k], py[k], 0.0, sx, sy, ppt) && zn.DepthOf(px[k], py[k]) > 1.0;
+						if(!okP[k]) continue;
+						nOk++;
+						float hx = (float)((sx + dstX) * scale), hy = (float)((sy + dstY) * scale);
+						x0 = std::min(x0, hx); x1 = std::max(x1, hx); y0 = std::min(y0, hy); y1 = std::max(y1, hy);
+						pptMax = std::max(pptMax, (float)ppt);
+					}
+					if(nOk == 0) return; // entierement au-dela de l'horizon ou derriere la camera
+					if(!okP[1]) { x0 = 0; x1 = (float)outWidth - 1; y1 = (float)areaBotHD; } // le bord proche sort de la vue
+					if(!okP[2]) y0 = (float)zoneTopHD;                                         // le bord lointain passe l'horizon
+					const float m = (float)(r * pptMax * scale);
+					LightDraw d;
+					d.X0 = std::max(0, (int)std::floor(x0 - m)); d.X1 = std::min((int)outWidth - 1, (int)std::ceil(x1 + m));
+					d.Y0 = std::max(zoneTopHD, (int)std::floor(y0 - 2)); d.Y1 = std::min(areaBotHD, (int)std::ceil(y1 + 2));
+					if(d.X0 > d.X1 || d.Y0 > d.Y1) return;
+					float flick = 1.0f;
+					if(lt.Flicker > 0) {
+						float n = 0.6f * std::sin(tSec * lt.FlickerSpeed + seed) + 0.4f * std::sin(tSec * lt.FlickerSpeed * 2.31f + seed * 1.7f);
+						flick = 1.0f - lt.Flicker * (0.5f + 0.5f * n);
+					}
+					const float k = lt.Intensity * flick / 255.0f;
+					d.U = (float)u; d.V = (float)w; d.H = hL;
+					d.R2 = (float)(r * r); d.InvR2 = 1.0f / d.R2;
+					d.Cr = ((lt.Color >> 16) & 0xFF) * k; d.Cg = ((lt.Color >> 8) & 0xFF) * k; d.Cb = (lt.Color & 0xFF) * k;
+					if(lt.Shadow) { // ombre : retire (1 - couleur) ; noir = ombre neutre, bleu = ombre teintee de bleu
+						d.Cr = -(255 - ((lt.Color >> 16) & 0xFF)) * k; d.Cg = -(255 - ((lt.Color >> 8) & 0xFF)) * k; d.Cb = -(255 - (lt.Color & 0xFF)) * k;
+					}
+					d.Add = lt.Additive;
+					VL.Lights.push_back(d);
+				};
+				if(lt.OnTile) {
+					if(m7CellHash.empty()) continue;
+					for(size_t c = 0; c < m7CellHash.size(); c++) {
+						if(m7CellHash[c] == lt.TileHash) addLight((double)((c % 128) * 8 + 4) + lt.Dx, (double)((c / 128) * 8 + 4) + lt.Dy, (float)c * 0.37f);
+					}
+				} else {
+					addLight(lt.X, lt.Y, lt.X * 0.13f + lt.Y * 0.07f);
+				}
+			}
+			(void)areaTopHD;
+			if(VL.AmbientOn || !VL.Lights.empty()) lightsOn = true;
+		}
+	}
+	// ====================================================================
+	// <SpriteLight> : lumiere 3D attachee a une tile de sprite (explosion, impact, tir laser...)
+	// Ici : y a-t-il une tile concernee a l'ecran ? (la position 3D est calculee apres la carte des sprites)
+	// ====================================================================
+	std::vector<const SnesHdSpriteLightInfo*> sprLightRules;
+	bool sprLightCand = false;
+	if(!SnesHdPackLoader::ActivePack->SpriteLights.empty() && !m7Views.empty()) {
+		for(auto& ur : SnesHdPackLoader::ActivePack->SpriteLights) { if(ur->MatchesCondition()) sprLightRules.push_back(ur.get()); }
+		for(const auto& item : tilesToExpand) {
+			if(sprLightCand) break;
+			if(item.oamIndex >= 128 || !item.Tile) continue;
+			for(const SnesHdSpriteLightInfo* R : sprLightRules) { if(R->Matches(item.Tile)) { sprLightCand = true; break; } }
+		}
+		if(sprLightCand) lightsOn = true;
+	}
+	// self < 1 : il faut savoir quel groupe de sprites a dessine chaque pixel (masque HD, groupe + 1)
+	bool slSelfOn = false;
+	if(sprLightCand) for(const SnesHdSpriteLightInfo* R : sprLightRules) if(R->SelfLight < 0.999f || R->Glow > 0 || R->Halo > 0) slSelfOn = true;
+	static std::vector<uint16_t> s_slGroup; // groupe de sprites + 1 (0 = aucun)
+	if(slSelfOn) s_slGroup.assign((size_t)outWidth * hdHeight, 0);
+	// ====================================================================
+	// <m7Effect> fog / magicfog / clouds / flare : PREPARATION par vue (passes sur l'image finale)
+	// ====================================================================
+	struct AtmoFx { const SnesHdM7EffectInfo* Fx; double Cu, Cv; };
+	struct FlareFx { SnesHdM7EffectInfo* Fx; int Key; float Sx, Sy, GroundRow; bool Visible; };
+	auto& hdEffectsA = SnesHdPackLoader::ActivePack->M7Effects;
+	std::vector<std::vector<AtmoFx>> atmoLists(m7Views.size());
+	std::vector<std::vector<FlareFx>> flareLists(m7Views.size());
+	bool atmoOn = false, flareOn = false;
+	if(!hdEffectsA.empty() && !m7Views.empty()) {
+		for(size_t v = 0; v < m7Views.size(); v++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+			const uint32_t viewMap = m7Lines[zn.Y1].Img ? m7Lines[zn.Y1].Ref.M7MapHash : 0;
+			for(auto& ufx : hdEffectsA) {
+				SnesHdM7EffectInfo& fx = *ufx;
+				if(fx.Type < 2) continue;
+				if(!SnesHdMapMatch(fx.AnyMap, fx.MapHashes, fx.MapHash, viewMap)) continue;
+				if(!fx.MatchesCondition()) continue;
+				auto addAt = [&](int key, double bu, double bv) {
+					double u, w, h;
+					fxPos(fx, bu, bv, u, w, h);
+					u = zn.LargeMap ? u : u + 1024.0 * std::round((zn.Cx - u) / 1024.0);
+					w = zn.LargeMap ? w : w + 1024.0 * std::round((zn.Cy - w) / 1024.0);
+					if(fx.Type == 4) {
+						FlareFx fl; fl.Fx = &fx; fl.Key = key; fl.Visible = false; fl.GroundRow = -1;
+						if(fx.Sun) {
+							// soleil a l'infini : projection directe avec le stenope de la vue
+							const double az = fx.SunAz * 0.01745329, el = fx.SunEl * 0.01745329;
+							const double dx = std::cos(az), dy = std::sin(az);
+							const double dF = dx * zn.Fx + dy * zn.Fy;
+							if(dF > 0.05) {
+								const double sx = zn.AxisX + (dx * zn.Rx + dy * zn.Ry) / dF * zn.Focal;
+								const double sy = zn.Horizon - std::tan(el) / dF * zn.Focal;
+								fl.Sx = (float)((sx + dstX) * scale); fl.Sy = (float)((sy + dstY) * scale);
+								fl.Visible = true;
+							}
+						} else {
 							double sx, sy, ppt;
-							if(!zn.Project(u, w, h, sx, sy, ppt)) { ok = false; break; }
-							double D = zn.DepthOf(u, w);
-							if(D < 2.0) { ok = false; break; }
-							float nu = t.N[k][0] * cr - t.N[k][2] * sr, nv = t.N[k][0] * sr + t.N[k][2] * cr, nh = t.N[k][1];
-							float nl = std::sqrt(nu * nu + nv * nv + nh * nh);
-							float dotL = nl > 1e-6f ? std::abs(nu * lx + nv * lv + nh * lh) / (nl * ln) : 1.0f; // deux faces
-							MVert& mv = d.P[k];
-							mv.X = (float)((sx + dstX) * scale); mv.Y = (float)((sy + dstY) * scale);
-							mv.W = (float)(1.0 / D);
-							mv.GR = (float)(sy + h * ppt);
-							mv.U = t.UV[k][0]; mv.V = t.UV[k][1];
-							mv.L = md.Ambient + (1.0f - md.Ambient) * dotL;
+							if(zn.Project(u, w, h, sx, sy, ppt) && zn.DepthOf(u, w) > 2.0) {
+								fl.Sx = (float)((sx + dstX) * scale); fl.Sy = (float)((sy + dstY) * scale);
+								fl.GroundRow = (float)(sy + h * ppt);
+								fl.Visible = true;
+							}
 						}
-						if(!ok) continue;
-						float minX = std::min({ d.P[0].X, d.P[1].X, d.P[2].X }), maxX = std::max({ d.P[0].X, d.P[1].X, d.P[2].X });
-						if(maxX < 0 || minX > (float)outWidth) continue;
+						flareLists[v].push_back(fl); // meme invisible : sa visibilite lissee redescend
+						flareOn = true;
+					} else {
+						atmoLists[v].push_back({ &fx, u, w });
+						atmoOn = true;
+					}
+				};
+				if(fx.OnTile) {
+					if(m7CellHash.empty()) continue;
+					for(size_t c = 0; c < m7CellHash.size(); c++) {
+						if(m7CellHash[c] == fx.TileHash) addAt((int)c, (double)((c % 128) * 8 + 4) + fx.Dx, (double)((c / 128) * 8 + 4) + fx.Dy);
+					}
+				} else {
+					addAt(-1, fx.X, fx.Y);
+				}
+			}
+		}
+	}
+	const bool fxPostOn = atmoOn || flareOn;
+
+	// masque HD "pas d'eclairage / pas d'effet d'ecran" (HUD, sprites hors du sol, <NoLightFXOnSprite>)
+	const bool maskOn = lightsOn || fxPostOn;
+	// <NoLightFXOnSprite> : regles actives cette frame (utilisees pendant la composition)
+	bool noLightAll = false;
+	std::vector<const SnesHdNoLightRule*> noLight;
+	if(maskOn) {
+		for(auto& ur : SnesHdPackLoader::ActivePack->NoLightRules) {
+			if(!ur->MatchesCondition()) continue;
+			if(ur->AllSprites) noLightAll = true; else noLight.push_back(ur.get());
+		}
+	}
+	auto noLightTile = [&](const SnesHdPackTileInfo* t) -> bool {
+		if(noLightAll) return true;
+		if(noLight.empty() || !t) return false;
+		for(const SnesHdNoLightRule* r : noLight) {
+			if(t->MemoryHash != r->Hash) continue;
+			if(r->AnyPalette || t->PaletteHash == 0xFFFFFFFF || t->PaletteHash == r->Palette) return true;
+		}
+		return false;
+	};
+	// <FrontOf3D> : tiles / sprites gardes devant le relief, les panneaux, les modeles et les effets.
+	// On leur donne une "ligne des pieds" tres basse (kFront) : tout objet 3D les considere plus proches.
+	const float kFront = 1.0e7f;
+	bool frontAll = false, frontHud = false;
+	std::vector<const SnesHdNoLightRule*> frontRules;
+	for(auto& ur : SnesHdPackLoader::ActivePack->FrontOf3DRules) {
+		if(!ur->MatchesCondition()) continue;
+		if(ur->AllSprites) frontAll = true; else if(ur->OffGround) frontHud = true; else frontRules.push_back(ur.get());
+	}
+	auto frontTile = [&](const SnesHdPackTileInfo* t) -> bool {
+		if(frontRules.empty() || !t) return false;
+		for(const SnesHdNoLightRule* r : frontRules) {
+			if(t->MemoryHash != r->Hash) continue;
+			if(r->AnyPalette || t->PaletteHash == 0xFFFFFFFF || t->PaletteHash == r->Palette) return true;
+		}
+		return false;
+	};
+	// Masque HD "pas d'eclairage" : pixels REELLEMENT dessines par un sprite hors du sol (HUD...) ou exclu
+	static std::vector<uint8_t> s_noLight;
+	if(maskOn) s_noLight.assign((size_t)outWidth * hdHeight, 0);
+
+	// ====================================================================
+	// <m7Effect> (flame, smoke) : SIMULATION + PROJECTION (sequentielle)
+	// Emetteurs ponctuels ; chaque emetteur (ou chaque case pour tile=) garde ses particules,
+	// en coordonnees relatives a lui. Un emetteur visible dans 2 vues n'avance qu'une fois par frame.
+	// ====================================================================
+	struct FxDraw { float Cx, Cy, HalfW, HalfH, A, R, G, B, Depth, GroundRow; bool Add; const SnesHdPackBitmapInfo* Tex; };
+	auto& hdEffects = SnesHdPackLoader::ActivePack->M7Effects;
+	std::vector<std::vector<FxDraw>> fxDraws(m7Views.size());
+	bool fxOn = false;
+	if(!hdEffects.empty() && !m7Views.empty()) {
+		const uint32_t frameNo = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
+		const float dt = 1.0f / 60.0f;
+		for(size_t v = 0; v < m7Views.size(); v++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+			const uint32_t viewMap = m7Lines[zn.Y1].Img ? m7Lines[zn.Y1].Ref.M7MapHash : 0;
+			std::vector<FxDraw>& dl = fxDraws[v];
+			for(auto& ufx : hdEffects) {
+				SnesHdM7EffectInfo& fx = *ufx;
+				if(fx.Type >= 2) continue; // fog, magicfog, flare, clouds : passes d'ecran plus bas
+				if(!SnesHdMapMatch(fx.AnyMap, fx.MapHashes, fx.MapHash, viewMap)) continue;
+				if(!fx.MatchesCondition()) continue;
+				const SnesHdPackBitmapInfo* tex = (fx.Texture && !fx.Texture->PixelData.empty() && fx.Texture->Width > 0) ? fx.Texture : nullptr;
+				const float texAspect = tex ? (float)tex->Height / (float)tex->Width : 1.0f;
+				auto emit = [&](int key, double u0, double v0) {
+					// reference R (case, ou debut du trajet si x/y non utilises) ; les particules restent
+					// dans le monde, relatives a R : l'emetteur se deplace, la trainee reste derriere lui
+					if(!fx.OnTile && fx.HasMotion && fx.Motion.Path.size() >= 2) { u0 = fx.Motion.Path[0][0]; v0 = fx.Motion.Path[0][1]; }
+					double pu, pv, ph;
+					fxPos(fx, fx.OnTile ? u0 : fx.X, fx.OnTile ? v0 : fx.Y, pu, pv, ph);
+					const float offU = (float)(pu - u0), offV = (float)(pv - v0), offH = (float)(ph - fx.Elevation);
+					const double U0 = zn.LargeMap ? u0 : u0 + 1024.0 * std::round((zn.Cx - u0) / 1024.0);
+					const double V0 = zn.LargeMap ? v0 : v0 + 1024.0 * std::round((zn.Cy - v0) / 1024.0);
+					// emetteur hors de vue (au-dela de l'horizon / derriere la camera) : ni simule ni dessine
+					double sx0, sy0, ppt0;
+					if(!zn.Project(U0 + offU, V0 + offV, ph, sx0, sy0, ppt0) && !zn.Project(U0 + offU, V0 + offV, ph + 32.0, sx0, sy0, ppt0)) return;
+					SnesHdM7EffectInfo::Emitter& e = fx.Emitters[key];
+					if(!e.Initialized) {
+						e.Initialized = true;
+						e.Rng ^= (uint32_t)(key + 7) * 2654435761u;
+						int steps = (int)std::min(fx.LifeMax * 60.0f, 600.0f); // deja allume
+						for(int s = 0; s < steps; s++) fx.Step(e, dt, offU, offV, offH);
+						e.LastFrame = frameNo;
+					}
+					if(e.LastFrame != frameNo) { fx.Step(e, dt, offU, offV, offH); e.LastFrame = frameNo; }
+					for(const SnesHdFxParticle& p : e.Parts) {
+						const double u = U0 + p.Du, w = V0 + p.Dv, h = fx.Elevation + p.H;
+						double sx, sy, ppt;
+						if(!zn.Project(u, w, h, sx, sy, ppt)) continue;
+						const double D = zn.DepthOf(u, w);
+						if(D < 2.0) continue;
+						const float t = p.Age / p.Life;
+						float a = fx.AlphaStart + (fx.AlphaEnd - fx.AlphaStart) * t;
+						if(fx.FadeIn > 0 && t < fx.FadeIn) a *= t / fx.FadeIn;
+						if(fx.NearFade > 0 && D < fx.NearFade) a *= (float)(D / fx.NearFade);
+						float sizePx = p.Size * (fx.SizeStart + (fx.SizeEnd - fx.SizeStart) * t) * (float)ppt * (float)scale;
+						if(sizePx <= 0) continue;
+						if(sizePx < fx.MinPixelSize) { a *= sizePx / fx.MinPixelSize; sizePx = fx.MinPixelSize; }
+						if(a <= 0.003f) continue;
+						// couleur sur 3 etapes : debut -> milieu -> fin de vie
+						const uint32_t ca = t < 0.5f ? fx.Color0 : fx.Color1, cb = t < 0.5f ? fx.Color1 : fx.Color2;
+						const float f = t < 0.5f ? t * 2.0f : (t - 0.5f) * 2.0f;
+						auto lc = [&](int sh) { float x0 = (float)((ca >> sh) & 0xFF), x1 = (float)((cb >> sh) & 0xFF); return (x0 + (x1 - x0) * f) / 255.0f; };
+						FxDraw d;
+						d.Cx = (float)((sx + dstX) * scale); d.Cy = (float)((sy + dstY) * scale);
+						d.HalfW = sizePx * 0.5f; d.HalfH = d.HalfW * texAspect;
+						d.A = std::min(a, 1.0f); d.R = lc(16); d.G = lc(8); d.B = lc(0);
+						d.Depth = (float)D; d.GroundRow = (float)(sy + h * ppt);
+						d.Add = fx.Additive; d.Tex = tex;
 						dl.push_back(d);
 					}
 				};
-				if(md.OnTile) {
+				if(fx.OnTile) {
 					if(m7CellHash.empty()) continue;
 					for(size_t c = 0; c < m7CellHash.size(); c++) {
-						if(m7CellHash[c] == md.TileHash) place((double)((c % 128) * 8 + 4), (double)((c / 128) * 8 + 4));
+						if(m7CellHash[c] == fx.TileHash) emit((int)c, (double)((c % 128) * 8 + 4) + fx.Dx, (double)((c / 128) * 8 + 4) + fx.Dy);
 					}
 				} else {
-					place(md.X, md.Y);
+					emit(-1, fx.X, fx.Y);
 				}
 			}
-			if(!dl.empty()) mdOn = true;
+			std::sort(dl.begin(), dl.end(), [](const FxDraw& a, const FxDraw& b) { return a.Depth > b.Depth; });
+			if(!dl.empty()) fxOn = true;
 		}
 	}
-	static std::vector<float> s_modelW; // 1/profondeur des pixels de modele (plus grand = plus proche)
-	if(mdOn) s_modelW.assign((size_t)outWidth * hdHeight, 0.0f);
 
 	static std::vector<float> s_sprRow;
-	bool p3Occlusion = reliefOn || bbOn || mdOn; // carte des sprites utile aussi au relief, aux panneaux et aux modeles
+	bool p3Occlusion = reliefOn || bbOn || mdOn || lightsOn || fxOn || fxPostOn; // carte des sprites utile aussi au relief, aux panneaux, aux modeles et aux lumieres
 	for(auto& dl : p3Draws) { if(!dl.empty()) { p3Occlusion = true; break; } }
-	float sprGroupRow[128];
-	for(float& r : sprGroupRow) r = -1.0f;
+	// Identifiant de sprite = numero OAM + 128 x bande d'ecran (vue Mode 7 qui contient la ligne).
+	// Super Mario Kart recharge l'OAM en milieu d'image : la meme entree sert a un sprite de la vue du haut
+	// ET a un sprite de la carte du bas. Sans la bande, les deux etaient fusionnes (pieds pris dans l'autre vue).
+	const int sprBands = (int)m7Views.size() + 1;
+	const int sprIds = 128 * sprBands;
+	std::vector<int> sprRowBand(cropHeight, sprBands - 1);
+	for(size_t v = 0; v < m7Views.size(); v++) {
+		const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+		for(int y = std::max(0, zn.AreaY0); y <= zn.AreaY1 && y < (int)cropHeight; y++) sprRowBand[y] = (int)v;
+	}
+	auto sprId = [&](int oam, int y) -> int { return sprRowBand[std::clamp(y, 0, (int)cropHeight - 1)] * 128 + oam; };
+	// tile HD de sprite : bande de sa ligne centrale (startY est en coordonnees de sortie)
+	auto itemSprId = [&](const ExpandedTile& it) -> int { return sprId(it.oamIndex, it.startY - (int)dstY + (it.Tile ? (int)it.Tile->Height / 2 : 4)); };
+	std::vector<float> sprGroupRow(sprIds, -1.0f);
+	std::vector<int> sprGroupRoot(sprIds); // groupe (sprites qui se touchent) de chaque sprite
+	for(int i = 0; i < sprIds; i++) sprGroupRoot[i] = i;
 	if(p3Occlusion) {
-		int parent[128];
-		for(int i = 0; i < 128; i++) parent[i] = i;
+		std::vector<int> parent(sprIds);
+		for(int i = 0; i < sprIds; i++) parent[i] = i;
 		auto findRoot = [&](int a) { while(parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
-		int bottom[128];
-		for(int& b : bottom) b = -1;
+		std::vector<int> bottom(sprIds, -1);
 		const uint32_t fw = _baseFrameInfo.Width;
 		auto opaqueOam = [&](uint32_t x, uint32_t y) -> int {
 			const SnesHdPixelData& px = hdBuffer[(y + srcY) * fw + x + srcX];
-			return (px.IsSprite && px.OamIndex < 128 && px.BaseColor != 0) ? (int)px.OamIndex : -1;
+			return (px.IsSprite && px.OamIndex < 128 && px.BaseColor != 0) ? sprId((int)px.OamIndex, (int)y) : -1;
 		};
 		for(uint32_t y = 0; y < cropHeight; y++) {
 			for(uint32_t x = 0; x < cropWidth; x++) {
@@ -1811,14 +2406,14 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				if(y + 1 < cropHeight) { int o2 = opaqueOam(x, y + 1); if(o2 >= 0 && o2 != o) parent[findRoot(o2)] = findRoot(o); }
 			}
 		}
-		int groupBottom[128];
-		for(int& b : groupBottom) b = -1;
-		for(int i = 0; i < 128; i++) {
+		std::vector<int> groupBottom(sprIds, -1);
+		for(int i = 0; i < sprIds; i++) {
 			if(bottom[i] >= 0) { int r = findRoot(i); groupBottom[r] = std::max(groupBottom[r], bottom[i]); }
 		}
-		for(int i = 0; i < 128; i++) {
+		for(int i = 0; i < sprIds; i++) {
 			if(bottom[i] < 0) continue;
 			int feet = groupBottom[findRoot(i)];
+			sprGroupRoot[i] = findRoot(i);
 			// seuls les sprites dont les pieds sont sur le sol d'une vue cachent quelque chose
 			for(int v : m7Views) {
 				const SnesHdM7Zone& zn = m7Zones[v];
@@ -1830,7 +2425,29 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			for(uint32_t x = 0; x < cropWidth; x++) {
 				const SnesHdPixelData& px = hdBuffer[(y + srcY) * fw + x + srcX];
 				if(!px.IsSprite || px.OamIndex >= 128 || px.Tile != nullptr || px.BaseColor == 0) continue;
-				float r = sprGroupRow[px.OamIndex];
+				const int sid = sprId((int)px.OamIndex, (int)y);
+				float r = sprGroupRow[sid];
+				if(maskOn && (r < 0 || noLightAll)) {
+					for(uint32_t sy2 = 0; sy2 < scale; sy2++) {
+						uint32_t hy = (y + dstY) * scale + sy2;
+						if(hy >= hdHeight) break;
+						for(uint32_t sx2 = 0; sx2 < scale; sx2++) {
+							uint32_t hx = (x + dstX) * scale + sx2;
+							if(hx < outWidth) s_noLight[(size_t)hy * outWidth + hx] = 1;
+						}
+					}
+				}
+				if(slSelfOn) {
+					for(uint32_t sy2 = 0; sy2 < scale; sy2++) {
+						uint32_t hy = (y + dstY) * scale + sy2;
+						if(hy >= hdHeight) break;
+						for(uint32_t sx2 = 0; sx2 < scale; sx2++) {
+							uint32_t hx = (x + dstX) * scale + sx2;
+							if(hx < outWidth) s_slGroup[(size_t)hy * outWidth + hx] = (uint16_t)(sid + 1);
+						}
+					}
+				}
+				if(frontAll || (frontHud && r < 0)) r = kFront; // <FrontOf3D>
 				if(r < 0) continue;
 				for(uint32_t sy2 = 0; sy2 < scale; sy2++) {
 					uint32_t hy = (y + dstY) * scale + sy2;
@@ -1840,6 +2457,150 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						if(hx < outWidth) s_sprRow[(size_t)hy * outWidth + hx] = r;
 					}
 				}
+			}
+		}
+	}
+
+	// ====================================================================
+	// <SpriteLight> : POSITION 3D des lumieres de sprites (un point par groupe de sprites et par regle)
+	// x = centre des tiles concernees, sol = ligne des pieds du groupe (point de la carte sous lui),
+	// hauteur = hauteur du centre des tiles au-dessus du sol (auto) ou height=.
+	// ====================================================================
+	// <m7CameraDebug> : cadres autour des tiles reconnues + repere de chaque lumiere de sprite
+	struct SlDebugBox { int X0, Y0, X1, Y1, Key; };
+	struct SlDebugLight { int View; float U, V, H; uint32_t Color; };
+	std::vector<SlDebugBox> slDbgBoxes;
+	std::vector<SlDebugLight> slDbgLights;
+	std::unordered_set<int> slLitKeys;
+	std::vector<int> slRep(sprIds, -1); // self < 1 / glow : groupe de lumiere de chaque sprite (pixels du porteur)
+	struct SlGlow { int Group; int X0, Y0, X1, Y1; float R, G, B, Glow, HaloPx; }; // rectangle en pixels HD
+	std::vector<SlGlow> slGlows;
+	if(sprLightCand) {
+		const float tSec = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+		// Groupes PROPRES aux tiles reconnues : seules les tiles de la regle comptent (un champignon qui touche
+		// Lakitu ou un kart n'est plus fusionne avec eux). Tiles du meme sprite, ou qui se touchent = une lumiere.
+		// Pieds = bas des tiles reconnues (et non du groupe de sprites, qui peut contenir d'autres objets).
+		struct SlTile { int Ri, Id, X0, Y0, X1, Y1; }; // rectangle en pixels SNES de la vue (inclus)
+		std::vector<SlTile> slTiles;
+		for(const auto& item : tilesToExpand) {
+			if(item.oamIndex >= 128 || !item.Tile) continue;
+			for(size_t ri = 0; ri < sprLightRules.size(); ri++) {
+				if(!sprLightRules[ri]->Matches(item.Tile)) continue;
+				const int x0 = item.startX - (int)dstX, y0 = item.startY - (int)dstY;
+				slTiles.push_back({ (int)ri, itemSprId(item), x0, y0, x0 + (int)item.Tile->Width - 1, y0 + (int)item.Tile->Height - 1 });
+			}
+		}
+		std::vector<int> slPar(slTiles.size());
+		for(size_t i = 0; i < slTiles.size(); i++) slPar[i] = (int)i;
+		auto slFind = [&](int a) { while(slPar[a] != a) { slPar[a] = slPar[slPar[a]]; a = slPar[a]; } return a; };
+		for(size_t i = 0; i < slTiles.size(); i++) {
+			for(size_t j = i + 1; j < slTiles.size(); j++) {
+				const SlTile& A = slTiles[i]; const SlTile& Bt = slTiles[j];
+				// meme regle, ou meme bloc <SpriteLight>{ } (chaque <tile> du bloc est une regle : les moities
+				// d'un meme champignon ont des hashs differents)
+				const int bA = sprLightRules[A.Ri]->BlockId, bB = sprLightRules[Bt.Ri]->BlockId;
+				if(!(A.Ri == Bt.Ri || (bA >= 0 && bA == bB)) || A.Id / 128 != Bt.Id / 128) continue;
+				// meme sprite, ou a moins d'une tile (8 px) : SMK dessine parfois un objet en morceaux un peu ecartes
+				const int G = 8;
+				const bool touch = A.Id == Bt.Id || (A.X0 <= Bt.X1 + G && Bt.X0 <= A.X1 + G && A.Y0 <= Bt.Y1 + G && Bt.Y0 <= A.Y1 + G);
+				if(touch) slPar[slFind((int)j)] = slFind((int)i);
+			}
+		}
+		struct SlAcc { double Sx = 0, Sy = 0; int N = 0; int Band = 0; int Feet = -1; int X0 = 1 << 30, Y0 = 1 << 30, X1 = -(1 << 30), Y1 = -(1 << 30); };
+		std::unordered_map<int, SlAcc> acc; // (tile representative + 1) x 1024 + regle
+		for(size_t i = 0; i < slTiles.size(); i++) {
+			const SlTile& t = slTiles[i];
+			const int root = slFind((int)i);
+			const int key = (root + 1) * 1024 + slTiles[root].Ri; // regle du representant (memes reglages dans un bloc)
+			SlAcc& a = acc[key];
+			a.Sx += (t.X0 + t.X1 + 1) * 0.5; a.Sy += (t.Y0 + t.Y1 + 1) * 0.5;
+			a.N++; a.Band = t.Id / 128; a.Feet = std::max(a.Feet, t.Y1 + 1);
+			a.X0 = std::min(a.X0, t.X0); a.Y0 = std::min(a.Y0, t.Y0); a.X1 = std::max(a.X1, t.X1); a.Y1 = std::max(a.Y1, t.Y1);
+			if(slSelfOn) slRep[t.Id] = key / 1024;
+			if(m7DebugOn) slDbgBoxes.push_back({ t.X0 + (int)dstX, t.Y0 + (int)dstY, t.X1 + (int)dstX, t.Y1 + (int)dstY, key });
+		}
+		for(auto& kv : acc) {
+			const SnesHdSpriteLightInfo& R = *sprLightRules[kv.first % 1024];
+			const SlAcc& a = kv.second;
+			const double cx = a.Sx / a.N, cy = a.Sy / a.N;
+			const double feet = a.Feet;
+			const int band = a.Band; // vue qui contient le sprite
+			if(R.Glow > 0 || R.Halo > 0) {
+				// lueur propre : independante de la position 3D (marche aussi pour Lakitu en l'air)
+				float flick = 1.0f;
+				if(R.Flicker > 0) {
+					const float seed = (float)(kv.first / 1024) * 1.37f + (float)(kv.first % 1024) * 0.71f;
+					float n = 0.6f * std::sin(tSec * R.FlickerSpeed + seed) + 0.4f * std::sin(tSec * R.FlickerSpeed * 2.31f + seed * 1.7f);
+					flick = 1.0f - R.Flicker * (0.5f + 0.5f * n);
+				}
+				const int sc = (int)scale;
+				slGlows.push_back({ kv.first / 1024, (a.X0 + (int)dstX) * sc, (a.Y0 + (int)dstY) * sc, (a.X1 + 1 + (int)dstX) * sc - 1, (a.Y1 + 1 + (int)dstY) * sc - 1,
+					(float)((R.Color >> 16) & 0xFF) * flick, (float)((R.Color >> 8) & 0xFF) * flick, (float)(R.Color & 0xFF) * flick, R.Glow, R.Halo * (float)sc });
+			}
+			for(size_t v = 0; v < m7Views.size(); v++) {
+				if((int)v != band) continue; // la lumiere nait dans la vue du sprite (elle se voit ensuite partout)
+				const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+				if(!zn.Perspective && !R.PlaneViews) continue; // plane=0 : pas sur la carte vue de dessus
+				double u, w; float h;
+				if(feet > zn.Y0 + 1 && feet <= zn.Y1 + 1) {
+					// pose au sol : point de la carte sous ses pieds, hauteur = centre des tiles au-dessus du sol
+					if(feet <= zn.Y0 + 1 || feet > zn.Y1 + 1) continue;
+					if(!zn.Unproject(cx, std::clamp(feet - 0.5, (double)zn.Y0, (double)zn.Y1), u, w)) continue;
+					double gsx, gsy, gppt;
+					if(!zn.Project(u, w, 0.0, gsx, gsy, gppt) || gppt <= 0) continue;
+					// auto : centre des tiles au-dessus du sol, limite a la moitie du rayon (les sprites lointains
+					// de SMK sont plus grands que la perspective du sol : sans limite, la lumiere passerait au-dessus)
+					h = R.Height >= 0 ? R.Height : (float)std::min(0.5 * R.Radius, std::max(0.0, (feet - cy) / gppt));
+				} else {
+					// hors du sol (Lakitu, objet en l'air) : point "en l'air" a distance=N devant la camera,
+					// dans la direction du centre du sprite (meme stenope que la vue)
+					if(R.AirDistance <= 0 || !zn.HasPinhole) continue;
+					if(cy < zn.AreaY0 || cy > zn.AreaY1 + 1) continue;
+					const double D = R.AirDistance, ppt = zn.Focal / D;
+					const double L = (cx - zn.AxisX) / ppt;
+					u = zn.Cx + zn.Fx * D + zn.Rx * L; w = zn.Cy + zn.Fy * D + zn.Ry * L;
+					h = R.Height >= 0 ? R.Height : (float)std::max(0.0, zn.Height - (cy - zn.Horizon) / ppt);
+				}
+				const double r = R.Radius;
+				const int sc = (int)scale;
+				const int zoneTopHD = (zn.Y0 + (int)dstY) * sc, areaBotHD = (zn.AreaY1 + 1 + (int)dstY) * sc - 1;
+				const double px[5] = { u, u - zn.Fx * r, u + zn.Fx * r, u - zn.Rx * r, u + zn.Rx * r };
+				const double py[5] = { w, w - zn.Fy * r, w + zn.Fy * r, w - zn.Ry * r, w + zn.Ry * r };
+				bool okP[5]; int nOk = 0;
+				float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f, pptMax = 0;
+				for(int k = 0; k < 5; k++) {
+					double sx, sy, ppt;
+					okP[k] = zn.Project(px[k], py[k], 0.0, sx, sy, ppt) && zn.DepthOf(px[k], py[k]) > 1.0;
+					if(!okP[k]) continue;
+					nOk++;
+					float hx = (float)((sx + dstX) * scale), hy = (float)((sy + dstY) * scale);
+					x0 = std::min(x0, hx); x1 = std::max(x1, hx); y0 = std::min(y0, hy); y1 = std::max(y1, hy);
+					pptMax = std::max(pptMax, (float)ppt);
+				}
+				if(nOk == 0) continue;
+				if(!okP[1]) { x0 = 0; x1 = (float)outWidth - 1; y1 = (float)areaBotHD; }
+				if(!okP[2]) y0 = (float)zoneTopHD;
+				const float m = (float)(r * pptMax * scale);
+				LightDraw d;
+				d.X0 = std::max(0, (int)std::floor(x0 - m)); d.X1 = std::min((int)outWidth - 1, (int)std::ceil(x1 + m));
+				d.Y0 = std::max(zoneTopHD, (int)std::floor(y0 - 2)); d.Y1 = std::min(areaBotHD, (int)std::ceil(y1 + 2));
+				if(d.X0 > d.X1 || d.Y0 > d.Y1) continue;
+				float flick = 1.0f;
+				if(R.Flicker > 0) {
+					const float seed = (float)(kv.first / 1024) * 1.37f + (float)(kv.first % 1024) * 0.71f;
+					float n = 0.6f * std::sin(tSec * R.FlickerSpeed + seed) + 0.4f * std::sin(tSec * R.FlickerSpeed * 2.31f + seed * 1.7f);
+					flick = 1.0f - R.Flicker * (0.5f + 0.5f * n);
+				}
+				const float k = R.Intensity * flick / 255.0f;
+				d.U = (float)u; d.V = (float)w; d.H = h;
+				d.R2 = (float)(r * r); d.InvR2 = 1.0f / d.R2;
+				d.Cr = ((R.Color >> 16) & 0xFF) * k; d.Cg = ((R.Color >> 8) & 0xFF) * k; d.Cb = (R.Color & 0xFF) * k;
+				if(R.Shadow) { d.Cr = -(255 - ((R.Color >> 16) & 0xFF)) * k; d.Cg = -(255 - ((R.Color >> 8) & 0xFF)) * k; d.Cb = -(255 - (R.Color & 0xFF)) * k; }
+				d.Add = R.Additive;
+				d.Group = kv.first / 1024; d.Self = R.SelfLight;
+				viewLights[v].Lights.push_back(d);
+				slLitKeys.insert(kv.first);
+				if(m7DebugOn) slDbgLights.push_back({ (int)v, (float)u, (float)w, h, R.Color });
 			}
 		}
 	}
@@ -2058,6 +2819,91 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	};
 
+	// ====================================================================
+	// <m7model> GPU : fusion de l'image de la carte graphique sur une bande (appele par composeBand)
+	// couleur premultipliee + ligne du sol par pixel ; memes regles de profondeur que le moteur processeur
+	// ====================================================================
+	auto renderGpuModelBand = [&](uint32_t bandY0, uint32_t bandY1) {
+		// seulement le rectangle relu depuis la carte graphique
+		const int y0 = std::max((int)bandY0, gpuRy0), y1 = std::min((int)std::min(bandY1, hdHeight) - 1, gpuRy1);
+		const int rw = gpuRx1 - gpuRx0 + 1;
+		for(int yy = y0; yy <= y1; yy++) {
+			const uint32_t* srcC = &s_gpuColor[(size_t)(yy - gpuRy0) * rw];
+			const float* srcG = &s_gpuGround[(size_t)(yy - gpuRy0) * rw];
+			for(int xx = gpuRx0; xx <= gpuRx1; xx++) {
+				const uint32_t idx = (uint32_t)yy * outWidth + (uint32_t)xx;
+				const uint32_t c = srcC[xx - gpuRx0];
+				const uint32_t a8 = c >> 24;
+				if(a8 == 0) continue;
+				if(kReliefZ < _zBuffer[idx]) continue;
+				const float gr = srcG[xx - gpuRx0];
+				if(p3Occlusion) {
+					const float sr2 = s_sprRow[idx];
+					if(sr2 >= 0.0f && (gr < 0.0f || gr < sr2)) continue; // sprite / relief / panneau plus proche
+				}
+				const float a = a8 / 255.0f, ia = 1.0f - a;
+				const uint32_t d = out[idx];
+				const uint32_t r = std::min(255u, (uint32_t)(((d >> 16) & 0xFF) * ia + ((c >> 16) & 0xFF) + 0.5f));
+				const uint32_t g = std::min(255u, (uint32_t)(((d >> 8) & 0xFF) * ia + ((c >> 8) & 0xFF) + 0.5f));
+				const uint32_t b = std::min(255u, (uint32_t)((d & 0xFF) * ia + (c & 0xFF) + 0.5f));
+				out[idx] = 0xFF000000 | (r << 16) | (g << 8) | b;
+				if(a8 >= 128) {
+					_zBuffer[idx] = kReliefZ;
+					if(p3Occlusion && gr >= 0.0f) s_sprRow[idx] = gr;
+				}
+			}
+		}
+	};
+
+	// ====================================================================
+	// <m7Effect> : dessin des particules d'une vue sur une bande (appele par composeBand)
+	// ====================================================================
+	const uint8_t kFxZ = 95;
+	auto renderFxBand = [&](size_t viewIndex, uint32_t bandY0, uint32_t bandY1) {
+		const SnesHdM7Zone& zn = m7Zones[m7Views[viewIndex]];
+		const int clipY0 = std::max((int)bandY0, (zn.AreaY0 + (int)dstY) * (int)scale);
+		const int clipY1 = std::min((int)bandY1, (zn.AreaY1 + 1 + (int)dstY) * (int)scale) - 1;
+		if(clipY0 > clipY1) return;
+		for(const FxDraw& d : fxDraws[viewIndex]) {
+			int x0 = std::max(0, (int)std::floor(d.Cx - d.HalfW)), x1 = std::min((int)outWidth - 1, (int)std::ceil(d.Cx + d.HalfW));
+			int y0 = std::max(clipY0, (int)std::floor(d.Cy - d.HalfH)), y1 = std::min(clipY1, (int)std::ceil(d.Cy + d.HalfH));
+			if(x0 > x1 || y0 > y1) continue;
+			const SnesHdPackBitmapInfo* tex = d.Tex;
+			const int texW = tex ? (int)tex->Width : 0, texH = tex ? (int)tex->Height : 0;
+			for(int yy = y0; yy <= y1; yy++) {
+				const float dy = (float)yy + 0.5f - d.Cy;
+				for(int xx = x0; xx <= x1; xx++) {
+					const float dx = (float)xx + 0.5f - d.Cx;
+					float sa, sr, sg, sb;
+					if(tex) {
+						int iu = (int)((dx / d.HalfW * 0.5f + 0.5f) * texW), iv = (int)((dy / d.HalfH * 0.5f + 0.5f) * texH);
+						if(iu < 0 || iv < 0 || iu >= texW || iv >= texH) continue;
+						uint32_t c = tex->PixelData[(size_t)iv * texW + iu];
+						sa = (float)(c >> 24) / 255.0f; if(sa <= 0.002f) continue;
+						sr = (float)((c >> 16) & 0xFF); sg = (float)((c >> 8) & 0xFF); sb = (float)(c & 0xFF);
+					} else {
+						float dd = std::sqrt(dx * dx + dy * dy) / d.HalfW;
+						if(dd >= 1.0f) continue;
+						float s = 1.0f - dd * dd;
+						sa = s * s; sr = sg = sb = 255.0f;
+					}
+					const float aa = sa * d.A;
+					if(aa < 0.004f) continue;
+					const uint32_t idx = (uint32_t)yy * outWidth + (uint32_t)xx;
+					if(kFxZ < _zBuffer[idx]) continue;
+					if(p3Occlusion) { const float sr2 = s_sprRow[idx]; if(sr2 >= 0.0f && d.GroundRow < sr2) continue; } // derriere un objet
+					const uint32_t dstC = out[idx];
+					const float dr = (float)((dstC >> 16) & 0xFF), dg = (float)((dstC >> 8) & 0xFF), db = (float)(dstC & 0xFF);
+					const float cr = sr * d.R, cg = sg * d.G, cb = sb * d.B;
+					float nr, ng, nb;
+					if(d.Add) { nr = std::min(255.0f, dr + cr * aa); ng = std::min(255.0f, dg + cg * aa); nb = std::min(255.0f, db + cb * aa); }
+					else { nr = dr + (cr - dr) * aa; ng = dg + (cg - dg) * aa; nb = db + (cb - db) * aa; }
+					out[idx] = 0xFF000000 | ((uint32_t)(nr + 0.5f) << 16) | ((uint32_t)(ng + 0.5f) << 8) | (uint32_t)(nb + 0.5f);
+				}
+			}
+		}
+	};
+
 	auto render3DBand = [&](size_t drawIndex, uint32_t bandY0, uint32_t bandY1) {
 		const SnesHdParticles3DInfo& pi = *hdParts3D[drawIndex / 2];
 		const int v = (int)(drawIndex % 2);
@@ -2121,6 +2967,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	};
 
+	// <m7model> GPU : recuperation de l'image dessinee pendant la phase Mode 7 / sprites
+	if(gpuModelsOn) gpuModelsOn = SnesHdGpu::Get().FetchModels(s_gpuColor, s_gpuGround);
+
 	std::vector<RenderTask> tasks;
 
 	for(size_t i = 0; i < hdOverlays.size(); i++) {
@@ -2137,6 +2986,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 	for(size_t v = 0; v < mdDraws.size(); v++) {
 		if(!mdDraws[v].empty()) tasks.push_back({ (int)kReliefZ, 6, 0, v }); // modeles 3D (meme Z, type 6)
+	}
+	if(gpuModelsOn) tasks.push_back({ (int)kReliefZ, 7, 0, 0 }); // modeles 3D dessines par la carte graphique
+	for(size_t v = 0; v < fxDraws.size(); v++) {
+		if(!fxDraws[v].empty()) tasks.push_back({ (int)kFxZ, 8, 0, v }); // <m7Effect> (flammes, fumee)
 	}
 
 	for(size_t i = 0; i < SnesHdPackLoader::ActivePack->Backgrounds.size(); i++) {
@@ -2203,6 +3056,14 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 		if(task.type == 6) {
 			renderModelBand(task.index, bandY0, bandY1);
+			continue;
+		}
+		if(task.type == 7) {
+			renderGpuModelBand(bandY0, bandY1);
+			continue;
+		}
+		if(task.type == 8) {
+			renderFxBand(task.index, bandY0, bandY1);
 			continue;
 		}
 		if(task.type == 0) {
@@ -2336,7 +3197,14 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 						if(item.zIndex >= _zBuffer[pixelIndex]) {
 							// <3DParticles> : ligne des pieds du sprite (ou rien si une tile de decor le recouvre)
-							if(p3Occlusion && alpha >= 128) s_sprRow[pixelIndex] = (item.oamIndex < 128) ? sprGroupRow[item.oamIndex] : -1.0f;
+							if(p3Occlusion && alpha >= 128) {
+								const bool isSpr = item.oamIndex < 128;
+								const int sid = isSpr ? itemSprId(item) : 0;
+								const bool front = frontTile(item.Tile) || (isSpr && (frontAll || (frontHud && sprGroupRow[sid] < 0.0f))); // <FrontOf3D>
+								s_sprRow[pixelIndex] = front ? kFront : (isSpr ? sprGroupRow[sid] : -1.0f);
+								if(slSelfOn) s_slGroup[pixelIndex] = isSpr ? (uint16_t)(sid + 1) : 0;
+							}
+							if(maskOn && alpha >= 128) s_noLight[pixelIndex] = (item.oamIndex < 128 && (sprGroupRow[itemSprId(item)] < 0.0f || noLightTile(item.Tile))) ? 1 : 0;
 							uint32_t finalColor = hdColorFromPng;
 
 							if(alpha == 255) {
@@ -2388,6 +3256,478 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 
 	// ====================================================================
+	// <m7light> / <m7ambient> : ECLAIRAGE de l'image finale (parallele, par bandes)
+	// Pixel du sol -> point de la carte (Unproject) ; pixel d'objet pose au sol (sprite, relief,
+	// panneau, modele) -> point de sol sous ses pieds (s_sprRow). Couleur x (ambiance + lumieres)
+	// + lumieres additives. Le ciel au-dessus de la piste ne recoit que l'ambiance (si sky=1).
+	// ====================================================================
+	if(lightsOn) {
+		auto lightBand = [&](uint32_t b0, uint32_t b1) {
+			const int sc = (int)scale;
+			std::vector<float> mr(outWidth), mg(outWidth), mb(outWidth), ar(outWidth), ag(outWidth), ab(outWidth), wu(outWidth), wv(outWidth);
+			std::vector<char> wok(outWidth);
+			std::vector<int> feetHD(outWidth); // -1 = sol ; sinon ligne HD des pieds de l'objet dessine a ce pixel
+			for(size_t v = 0; v < m7Views.size(); v++) {
+				const ViewLighting& VL = viewLights[v];
+				if(!VL.AmbientOn && VL.Lights.empty()) continue;
+				const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+				const int areaTop = (zn.AreaY0 + (int)dstY) * sc, zoneTop = (zn.Y0 + (int)dstY) * sc;
+				const int areaBot = std::min((int)hdHeight - 1, (zn.AreaY1 + 1 + (int)dstY) * sc - 1);
+				const int y0 = std::max((int)b0, areaTop), y1 = std::min((int)b1 - 1, areaBot);
+				for(int yy = y0; yy <= y1; yy++) {
+					const bool sky = yy < zoneTop;
+					// un objet pose au sol (modele, panneau, sprite...) est eclaire depuis le point sous ses pieds :
+					// il peut depasser AU-DESSUS de la zone d'une lumiere, et meme de l'horizon
+					const float* sprY = p3Occlusion ? &s_sprRow[(size_t)yy * outWidth] : nullptr;
+					bool anyLight = false, anyGround = false;
+					int lx0 = (int)outWidth, lx1 = -1;
+					for(const LightDraw& d : VL.Lights) {
+						if(!sky && yy >= d.Y0 && yy <= d.Y1) anyGround = true;
+						if((!sky && yy >= d.Y0 && yy <= d.Y1) || (sprY && yy <= d.Y1)) { anyLight = true; lx0 = std::min(lx0, d.X0); lx1 = std::max(lx1, d.X1); }
+					}
+					if(sky && !VL.Sky && !sprY) continue;
+					if(!VL.AmbientOn && !anyLight) continue;
+					std::fill(mr.begin(), mr.end(), VL.Ar); std::fill(mg.begin(), mg.end(), VL.Ag); std::fill(mb.begin(), mb.end(), VL.Ab);
+					std::fill(ar.begin(), ar.end(), 0.0f); std::fill(ag.begin(), ag.end(), 0.0f); std::fill(ab.begin(), ab.end(), 0.0f);
+					if(anyLight) {
+						// point de la carte sous chaque pixel de la ligne (calcule une fois)
+						const double sy = ((double)yy + 0.5) / sc - (double)dstY;
+						for(int xx = lx0; xx <= lx1; xx++) {
+							const double sx = ((double)xx + 0.5) / sc - (double)dstX;
+							double gRow = sy;
+							feetHD[xx] = -1;
+							if(sprY && sprY[xx] >= 0.0f && sprY[xx] < kFront) { gRow = sprY[xx] - 0.5 / sc; feetHD[xx] = (int)((sprY[xx] + (float)dstY) * sc) - 1; }
+							else if(!anyGround) { wok[xx] = 0; continue; } // ligne hors de toute lumiere : seuls les objets comptent
+							gRow = std::clamp(gRow, (double)zn.Y0, (double)zn.Y1);
+							double u, w;
+							wok[xx] = zn.Unproject(sx, gRow, u, w) ? 1 : 0;
+							wu[xx] = (float)u; wv[xx] = (float)w;
+						}
+						for(const LightDraw& d : VL.Lights) {
+							if(yy > d.Y1) continue;
+							const bool groundRow = !sky && yy >= d.Y0;
+							if(!groundRow && !sprY) continue;
+							const float h2 = d.H * d.H;
+							for(int xx = d.X0; xx <= d.X1; xx++) {
+								if(!wok[xx]) continue;
+								const int fr = feetHD[xx];
+								if(fr < 0 ? !groundRow : (fr < d.Y0 || fr > d.Y1 + 2)) continue;
+								const float du = wu[xx] - d.U, dv = wv[xx] - d.V;
+								const float d2 = du * du + dv * dv + h2;
+								if(d2 >= d.R2) continue;
+								float a = 1.0f - d2 * d.InvR2; a *= a;
+								if(d.Group >= 0 && slSelfOn) { const uint16_t g = s_slGroup[(size_t)yy * outWidth + xx]; if(g && slRep[g - 1] == d.Group) a *= d.Self; } // le sprite qui porte la lumiere
+								if(d.Add) { ar[xx] += d.Cr * a * 255.0f; ag[xx] += d.Cg * a * 255.0f; ab[xx] += d.Cb * a * 255.0f; }
+								else { mr[xx] += d.Cr * a; mg[xx] += d.Cg * a; mb[xx] += d.Cb * a; }
+							}
+						}
+					}
+					const int ax0 = VL.AmbientOn ? 0 : lx0, ax1 = VL.AmbientOn ? (int)outWidth - 1 : lx1;
+					uint32_t* row = out + (size_t)yy * outWidth;
+					const uint8_t* noL = &s_noLight[(size_t)yy * outWidth];
+					for(int xx = ax0; xx <= ax1; xx++) {
+						// sprites hors du sol (HUD, objets dans le ciel) et <NoLightFXOnSprite> : ni ambiance ni lumiere
+						// (masque HD : seulement les pixels reellement dessines, pas tout le rectangle de la tile SNES)
+						if(noL[xx]) continue;
+						if(sky && !(sprY && sprY[xx] >= 0.0f && sprY[xx] < kFront)) {
+							if(!VL.Sky) continue;                       // ciel sans ambiance
+							if(!VL.AmbientOn) continue;                 // ciel : pas de lumiere ponctuelle
+						}
+						const uint32_t c = row[xx];
+						const float r = std::clamp(((c >> 16) & 0xFF) * std::max(0.0f, mr[xx]) + ar[xx], 0.0f, 255.0f);
+						const float g = std::clamp(((c >> 8) & 0xFF) * std::max(0.0f, mg[xx]) + ag[xx], 0.0f, 255.0f);
+						const float b = std::clamp((c & 0xFF) * std::max(0.0f, mb[xx]) + ab[xx], 0.0f, 255.0f);
+						row[xx] = (c & 0xFF000000) | ((uint32_t)(r + 0.5f) << 16) | ((uint32_t)(g + 0.5f) << 8) | (uint32_t)(b + 0.5f);
+					}
+				}
+			}
+		};
+		unsigned hc = std::thread::hardware_concurrency();
+		int nThreads = std::clamp((int)hc - 2, 1, 8);
+		if(nThreads <= 1 || hdHeight < 64) {
+			lightBand(0, hdHeight);
+		} else {
+			uint32_t bandH = (hdHeight + nThreads - 1) / nThreads;
+			std::vector<std::thread> workers;
+			for(int t = 0; t < nThreads; t++) {
+				uint32_t b0 = (uint32_t)t * bandH, b1 = std::min(hdHeight, b0 + bandH);
+				if(b0 >= b1) break;
+				workers.emplace_back([&lightBand, b0, b1]() { lightBand(b0, b1); });
+			}
+			for(auto& w : workers) w.join();
+		}
+	}
+
+	// ====================================================================
+	// <SpriteLight> glow / halo : LUEUR PROPRE des sprites (apres l'eclairage, avant le brouillard)
+	// Pixels du porteur (s_slGroup -> slRep) : + couleur x glow, meme s'ils sont exclus de l'eclairage
+	// (HUD / en l'air : Lakitu). Halo : degrade additif autour du rectangle des tiles, sauf sur le HUD (<FrontOf3D>).
+	// ====================================================================
+	if(!slGlows.empty() && slSelfOn) {
+		for(const SlGlow& gw : slGlows) {
+			const int hp = (int)std::ceil(gw.HaloPx);
+			const int x0 = std::max(0, gw.X0 - hp), x1 = std::min((int)outWidth - 1, gw.X1 + hp);
+			const int y0 = std::max(0, gw.Y0 - hp), y1 = std::min((int)hdHeight - 1, gw.Y1 + hp);
+			const float kOwn = gw.Glow * 0.8f, kHalo = (gw.Glow > 0 ? gw.Glow : 1.0f) * 0.55f;
+			const float hcx = (gw.X0 + gw.X1 + 1) * 0.5f, hcy = (gw.Y0 + gw.Y1 + 1) * 0.5f;
+			const float hrx = (gw.X1 - gw.X0 + 1) * 0.5f + gw.HaloPx, hry = (gw.Y1 - gw.Y0 + 1) * 0.5f + gw.HaloPx;
+			for(int yy = y0; yy <= y1; yy++) {
+				uint32_t* row = out + (size_t)yy * outWidth;
+				const uint16_t* grp = &s_slGroup[(size_t)yy * outWidth];
+				const float* spr = p3Occlusion ? &s_sprRow[(size_t)yy * outWidth] : nullptr;
+				for(int xx = x0; xx <= x1; xx++) {
+					float k;
+					const uint16_t g = grp[xx];
+					if(g && slRep[g - 1] == gw.Group) {
+						if(kOwn <= 0) continue;
+						k = kOwn;
+					} else {
+						if(hp <= 0) continue;
+						if(spr && spr[xx] >= kFront) continue; // HUD garde devant
+						// degrade radial (ellipse : demi-taille du sprite + halo), pas de bloc rectangulaire
+						const float dx = ((float)xx + 0.5f - hcx) / hrx, dy = ((float)yy + 0.5f - hcy) / hry;
+						const float d = std::sqrt(dx * dx + dy * dy);
+						if(d >= 1.0f) continue;
+						k = (1.0f - d) * (1.0f - d) * kHalo;
+					}
+					const uint32_t c = row[xx];
+					const float r = std::min(255.0f, ((c >> 16) & 0xFF) + gw.R * k), gg = std::min(255.0f, ((c >> 8) & 0xFF) + gw.G * k), b = std::min(255.0f, (c & 0xFF) + gw.B * k);
+					row[xx] = (c & 0xFF000000) | ((uint32_t)r << 16) | ((uint32_t)gg << 8) | (uint32_t)b;
+				}
+			}
+		}
+	}
+
+	// ====================================================================
+	// <m7Effect> fog / magicfog / clouds : passe ATMOSPHERE (parallele, par bandes)
+	// Pixel du sol -> point de la carte + distance ; objets poses au sol -> point sous leurs pieds.
+	// Bruit de valeur (table 256 x 256) : nappes de brouillard, lueur magique, nuages et leurs ombres.
+	// ====================================================================
+	static float s_noiseTab[256 * 256];
+	static bool s_noiseInit = false;
+	if(!s_noiseInit) {
+		uint32_t r = 0x6A09E667;
+		for(float& n : s_noiseTab) { r ^= r << 13; r ^= r >> 17; r ^= r << 5; n = (float)(r & 0xFFFF) / 65535.0f; }
+		s_noiseInit = true;
+	}
+	// bruit periodique en x (periode px cases) : le ciel fait le tour complet sans couture
+	auto vnoise = [](float x, float y, int px) -> float {
+		const float fxl = std::floor(x), fyl = std::floor(y);
+		const float tx = x - fxl, ty = y - fyl;
+		const float sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+		int ix = (int)fxl, iy = (int)fyl;
+		int x0 = px > 0 ? ((ix % px) + px) % px : (ix & 255), x1 = px > 0 ? (x0 + 1) % px : ((ix + 1) & 255);
+		x0 &= 255; x1 &= 255;
+		const int y0 = iy & 255, y1 = (iy + 1) & 255;
+		const float a = s_noiseTab[y0 * 256 + x0], b = s_noiseTab[y0 * 256 + x1], c = s_noiseTab[y1 * 256 + x0], d = s_noiseTab[y1 * 256 + x1];
+		return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+	};
+	auto fbm = [&](float x, float y, int px) -> float {
+		return 0.62f * vnoise(x, y, px) + 0.38f * vnoise(x * 2.0f + 17.3f, y * 2.0f + 5.1f, px > 0 ? px * 2 : 0);
+	};
+	auto smooth01 = [](float e0, float e1, float x) { float t = std::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f); return t * t * (3 - 2 * t); };
+	if(atmoOn) {
+		const float tA = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+		// Chaque effet = transformation affine de la couleur (c' = c x M + A) : on combine tous les effets
+		// d'un point en un seul (M, A) par canal. Calcul sur une GRILLE de kS x kS pixels HD puis
+		// interpolation (le brouillard varie lentement) ; les objets poses au sol sont calcules au pixel.
+		struct AtmoMA { float M[3], A[3]; };
+		auto evalPoint = [&](const std::vector<AtmoFx>& list, const SnesHdM7Zone& zn, bool sky, float skyRel, double colAng, double skyRows,
+			float u, float v, float D, AtmoMA& o) {
+			o.M[0] = o.M[1] = o.M[2] = 1.0f; o.A[0] = o.A[1] = o.A[2] = 0.0f;
+			auto lerpTo = [&](float k, float cr, float cg, float cb) { // c' = c (1-k) + col k
+				const float col[3] = { cr, cg, cb };
+				for(int i = 0; i < 3; i++) { o.M[i] *= 1.0f - k; o.A[i] = o.A[i] * (1.0f - k) + col[i] * k; }
+			};
+			auto ch = [](uint32_t cc, int sh) { return (float)((cc >> sh) & 0xFF); };
+			for(const AtmoFx& Af : list) {
+				const SnesHdM7EffectInfo& fx = *Af.Fx;
+				float regionW = 1.0f;
+				if(!sky && fx.Region > 0) {
+					const float du = u - (float)Af.Cu, dv = v - (float)Af.Cv;
+					const float d2 = du * du + dv * dv;
+					if(d2 >= fx.Region * fx.Region) continue;
+					regionW = std::clamp((fx.Region - std::sqrt(d2)) / (fx.Region * 0.3f), 0.0f, 1.0f);
+				}
+				if(fx.Type == 2) { // brouillard
+					float f;
+					if(sky) {
+						if(fx.Region > 0) continue;
+						f = fx.Density * fx.SkyAmount * (1.0f - 0.5f * skyRel);
+					} else {
+						const float fd = std::clamp((D - fx.FogStart) / std::max(1.0f, fx.FogEnd - fx.FogStart), 0.0f, 1.0f) * fx.Density;
+						float fn = 0;
+						if(fx.Patches > 0) {
+							const float n = fbm((u + tA * fx.WindX) / fx.NoiseScale, (v + tA * fx.WindY) / fx.NoiseScale, 0);
+							fn = fx.Patches * smooth01(0.35f, 0.85f, n);
+						}
+						f = std::clamp(fd + (1.0f - fd) * fn * 0.75f, 0.0f, 1.0f) * regionW;
+					}
+					if(f > 0.001f) lerpTo(f, ch(fx.Color0, 16), ch(fx.Color0, 8), ch(fx.Color0, 0));
+				} else if(fx.Type == 3) { // brume magique lumineuse (additive)
+					if(sky) continue;
+					const float n = fbm((u + tA * fx.WindX) / fx.NoiseScale, (v + tA * fx.WindY) / fx.NoiseScale, 0);
+					const float pulse = 0.75f + 0.25f * std::sin(6.2831853f * fx.Pulse * tA + n * 4.0f);
+					const float gl = fx.Intensity * fx.Patches * smooth01(0.3f, 0.85f, n) * regionW * pulse;
+					if(gl <= 0.001f) continue;
+					const float m = 0.5f + 0.5f * std::sin(tA * 0.7f + n * 6.0f);
+					o.A[0] += (ch(fx.Color0, 16) + (ch(fx.Color1, 16) - ch(fx.Color0, 16)) * m) * gl;
+					o.A[1] += (ch(fx.Color0, 8) + (ch(fx.Color1, 8) - ch(fx.Color0, 8)) * m) * gl;
+					o.A[2] += (ch(fx.Color0, 0) + (ch(fx.Color1, 0) - ch(fx.Color0, 0)) * m) * gl;
+				} else if(fx.Type == 5) { // nuages
+					if(sky) {
+						if(fx.SkyAmount <= 0 || skyRel > fx.SkyHeight) continue;
+						// direction du regard de la colonne (angle sur la carte) : les nuages sont "a l'infini",
+						// ils ne dependent que de cet angle -> stables quand la camera avance, tournent avec elle
+						const int nc = std::clamp((int)std::lround(5000.0 / fx.NoiseScale), 4, 128); // cellules de bruit sur un tour
+						const float su = (float)(colAng * (1.0 / 6.2831853) * nc) + tA * fx.WindX * 0.002f * nc;
+						const float sv = (float)skyRows / (float)(fx.NoiseScale * 0.12f);
+						const float n = fbm(su, sv, nc);
+						float cov = smooth01(1.0f - fx.Coverage - 0.12f, 1.0f - fx.Coverage + 0.12f, n);
+						cov *= std::clamp(skyRel * 6.0f, 0.0f, 1.0f) * std::clamp((fx.SkyHeight - skyRel) * 8.0f, 0.0f, 1.0f) * fx.SkyAmount;
+						const float shade = 0.82f + 0.18f * n;
+						if(cov > 0.001f) lerpTo(cov * 0.9f, ch(fx.Color0, 16) * shade, ch(fx.Color0, 8) * shade, ch(fx.Color0, 0) * shade);
+					} else if(fx.Shadow > 0) {
+						const float n = fbm((u + tA * fx.WindX) / fx.NoiseScale, (v + tA * fx.WindY) / fx.NoiseScale, 0);
+						const float k = 1.0f - fx.Shadow * smooth01(1.0f - fx.Coverage - 0.12f, 1.0f - fx.Coverage + 0.12f, n) * regionW;
+						for(int i = 0; i < 3; i++) { o.M[i] *= k; o.A[i] *= k; }
+					}
+				}
+			}
+		};
+		// cap de chaque vue LISSE d'une frame a l'autre (la camera reconstruite tremble un peu) : ciel stable
+		static double s_cloudHead[8]; static bool s_cloudHeadOk[8] = {};
+		std::vector<double> viewHead(m7Views.size()), viewSide(m7Views.size());
+		for(size_t v = 0; v < m7Views.size(); v++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+			const double h = std::atan2(zn.Fy, zn.Fx);
+			viewSide[v] = (zn.Fx * zn.Ry - zn.Fy * zn.Rx) >= 0 ? 1.0 : -1.0;
+			if(v >= 8) { viewHead[v] = h; continue; }
+			if(!s_cloudHeadOk[v]) { s_cloudHead[v] = h; s_cloudHeadOk[v] = true; }
+			else {
+				const double d = std::remainder(h - s_cloudHead[v], 6.283185307179586);
+				s_cloudHead[v] = std::abs(d) > 0.35 ? h : s_cloudHead[v] + d * 0.35; // virage brusque / changement de vue : suit tout de suite
+			}
+			viewHead[v] = s_cloudHead[v];
+		}
+		const int kS = 4; // pas de la grille (pixels HD)
+		auto atmoBand = [&](uint32_t b0, uint32_t b1) {
+			const int sc = (int)scale;
+			const int nx = ((int)outWidth - 1) / kS + 2;
+			std::vector<AtmoMA> rowA(nx), rowB(nx), rowC(nx), cacheMA(outWidth);
+			std::vector<double> colAngle(nx);
+			std::vector<float> cacheFeet(outWidth); // objets : meme ligne des pieds dans une colonne -> meme resultat
+			for(size_t v = 0; v < m7Views.size(); v++) {
+				const std::vector<AtmoFx>& list = atmoLists[v];
+				if(list.empty()) continue;
+				const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+				const int areaTop = (zn.AreaY0 + (int)dstY) * sc, zoneTop = (zn.Y0 + (int)dstY) * sc;
+				const int areaBot = std::min((int)hdHeight - 1, (zn.AreaY1 + 1 + (int)dstY) * sc - 1);
+				const int y0 = std::max((int)b0, areaTop), y1 = std::min((int)b1 - 1, areaBot);
+				if(y0 > y1) continue;
+				// angle du regard de chaque colonne de la grille (pour les nuages du ciel)
+				for(int j = 0; j < nx; j++) {
+					const int xx = std::min((int)outWidth - 1, j * kS);
+					const double k = (((double)xx + 0.5) / sc - (double)dstX - zn.AxisX) / std::max(1.0, zn.Focal);
+					colAngle[j] = viewHead[v] + viewSide[v] * std::atan(k);
+				}
+				std::fill(cacheFeet.begin(), cacheFeet.end(), -1e9f);
+				auto skyRelOf = [&](int yy) { return (float)(zoneTop - yy) / (float)std::max(1, zoneTop - areaTop); };
+				// une ligne de la grille : points tous les kS pixels ; au sol, point de carte interpole lineairement
+				// le long de la ligne (exact : une ligne d'ecran = une droite sur la carte)
+				auto evalRow = [&](int yy, std::vector<AtmoMA>& dst) {
+					const bool sky = yy < zoneTop;
+					const float sr = sky ? skyRelOf(yy) : 0.0f;
+					const double sy = ((double)yy + 0.5) / sc - (double)dstY;
+					double ua = 0, va = 0, ub = 0, vb = 0; bool okA = false, okB = false;
+					const double xa = 0.5 / sc - (double)dstX, xb = ((double)outWidth - 0.5) / sc - (double)dstX;
+					if(!sky) {
+						const double g = std::clamp(sy, (double)zn.Y0, (double)zn.Y1);
+						okA = zn.Unproject(xa, g, ua, va); okB = zn.Unproject(xb, g, ub, vb);
+					}
+					for(int j = 0; j < nx; j++) {
+						const int xx = std::min((int)outWidth - 1, j * kS);
+						const double sx = ((double)xx + 0.5) / sc - (double)dstX;
+						float u = 0, w = 0, D = 0;
+						if(!sky) {
+							if(okA && okB) {
+								const double f = (sx - xa) / (xb - xa);
+								u = (float)(ua + (ub - ua) * f); w = (float)(va + (vb - va) * f);
+							} else {
+								double uu, ww;
+								if(!zn.Unproject(sx, std::clamp(sy, (double)zn.Y0, (double)zn.Y1), uu, ww)) { dst[j] = { { 1, 1, 1 }, { 0, 0, 0 } }; continue; }
+								u = (float)uu; w = (float)ww;
+							}
+							D = (float)zn.DepthOf(u, w);
+						}
+						evalPoint(list, zn, sky, sr, sky ? colAngle[j] : 0.0, (double)(zoneTop - yy) / sc, u, w, D, dst[j]);
+					}
+				};
+				int curK0 = -1000000, curK1 = -1000000;
+				std::vector<AtmoMA>* pK0 = &rowA; std::vector<AtmoMA>* pK1 = &rowB;
+				for(int yy = y0; yy <= y1; yy++) {
+					const bool sky = yy < zoneTop;
+					// lignes de grille encadrantes (meme cote de l'horizon que la ligne courante, sinon calcul direct)
+					const int k0 = (yy - areaTop) / kS;
+					int g0 = areaTop + k0 * kS, g1 = std::min(areaBot, g0 + kS);
+					const std::vector<AtmoMA>* A0; const std::vector<AtmoMA>* A1; float fy;
+					if(((g0 < zoneTop) != sky) || ((g1 < zoneTop) != sky) || g1 == g0) {
+						evalRow(yy, rowC); A0 = A1 = &rowC; fy = 0;
+					} else {
+						if(curK0 != g0) {
+							if(curK1 == g0) { std::swap(pK0, pK1); curK0 = g0; curK1 = -1000000; }
+							else { evalRow(g0, *pK0); curK0 = g0; }
+						}
+						if(curK1 != g1) { evalRow(g1, *pK1); curK1 = g1; }
+						A0 = pK0; A1 = pK1; fy = (float)(yy - g0) / (float)(g1 - g0);
+					}
+					uint32_t* row = out + (size_t)yy * outWidth;
+					const uint8_t* noL = maskOn ? &s_noLight[(size_t)yy * outWidth] : nullptr;
+					const float* sprRowY = p3Occlusion ? &s_sprRow[(size_t)yy * outWidth] : nullptr; // objets au sol, meme au-dessus de l'horizon
+					for(int xx = 0; xx < (int)outWidth; xx++) {
+						if(noL && noL[xx]) continue;
+						AtmoMA ma;
+						if(sprRowY && sprRowY[xx] >= 0.0f && sprRowY[xx] < kFront) {
+							// objet pose au sol : point de la carte sous ses pieds (calcul exact, garde par colonne)
+							if(cacheFeet[xx] != sprRowY[xx]) {
+								const double sx = ((double)xx + 0.5) / sc - (double)dstX;
+								const double g = std::clamp((double)sprRowY[xx] - 0.5 / sc, (double)zn.Y0, (double)zn.Y1);
+								double uu, ww;
+								if(!zn.Unproject(sx, g, uu, ww)) { cacheMA[xx] = { { 1, 1, 1 }, { 0, 0, 0 } }; }
+								else evalPoint(list, zn, false, 0.0f, 0.0, 0.0, (float)uu, (float)ww, (float)zn.DepthOf(uu, ww), cacheMA[xx]);
+								cacheFeet[xx] = sprRowY[xx];
+							}
+							ma = cacheMA[xx];
+						} else {
+							const int j = xx / kS;
+							const float fx = (float)(xx - j * kS) / (float)kS;
+							const AtmoMA& a = (*A0)[j]; const AtmoMA& b = (*A0)[j + 1];
+							const AtmoMA& c = (*A1)[j]; const AtmoMA& d = (*A1)[j + 1];
+							for(int i = 0; i < 3; i++) {
+								const float mt = a.M[i] + (b.M[i] - a.M[i]) * fx, mb = c.M[i] + (d.M[i] - c.M[i]) * fx;
+								const float at = a.A[i] + (b.A[i] - a.A[i]) * fx, ab = c.A[i] + (d.A[i] - c.A[i]) * fx;
+								ma.M[i] = mt + (mb - mt) * fy; ma.A[i] = at + (ab - at) * fy;
+							}
+						}
+						const uint32_t c = row[xx];
+						const float r = ((c >> 16) & 0xFF) * ma.M[0] + ma.A[0];
+						const float g = ((c >> 8) & 0xFF) * ma.M[1] + ma.A[1];
+						const float b = (c & 0xFF) * ma.M[2] + ma.A[2];
+						row[xx] = (c & 0xFF000000) | ((uint32_t)std::clamp(r + 0.5f, 0.0f, 255.0f) << 16) | ((uint32_t)std::clamp(g + 0.5f, 0.0f, 255.0f) << 8) | (uint32_t)std::clamp(b + 0.5f, 0.0f, 255.0f);
+					}
+				}
+			}
+		};
+		unsigned hc = std::thread::hardware_concurrency();
+		int nThreads = std::clamp((int)hc - 2, 1, 8);
+		if(nThreads <= 1 || hdHeight < 64) {
+			atmoBand(0, hdHeight);
+		} else {
+			uint32_t bandH = (hdHeight + nThreads - 1) / nThreads;
+			std::vector<std::thread> workers;
+			for(int t = 0; t < nThreads; t++) {
+				uint32_t b0 = (uint32_t)t * bandH, b1 = std::min(hdHeight, b0 + bandH);
+				if(b0 >= b1) break;
+				workers.emplace_back([&atmoBand, b0, b1]() { atmoBand(b0, b1); });
+			}
+			for(auto& w : workers) w.join();
+		}
+	}
+
+	// ====================================================================
+	// <m7Effect> flare : REFLETS DE LENTILLE (sequentiel, additif)
+	// Visibilite = part de 5 x 5 echantillons autour de la source non caches (objet plus proche,
+	// HUD...), lissee d'une frame a l'autre ; halo + trainee + reflets le long de la ligne source -> centre.
+	// ====================================================================
+	if(flareOn) {
+		auto addGlow = [&](float cx, float cy, float rad, float cr, float cg, float cb, float inten, bool ring, int clipY0, int clipY1) {
+			if(rad < 1.0f || inten <= 0.002f) return;
+			const int x0 = std::max(0, (int)std::floor(cx - rad)), x1 = std::min((int)outWidth - 1, (int)std::ceil(cx + rad));
+			const int y0 = std::max(clipY0, (int)std::floor(cy - rad)), y1 = std::min(clipY1, (int)std::ceil(cy + rad));
+			for(int yy = y0; yy <= y1; yy++) {
+				uint32_t* row = out + (size_t)yy * outWidth;
+				const uint8_t* noL = maskOn ? &s_noLight[(size_t)yy * outWidth] : nullptr;
+				for(int xx = x0; xx <= x1; xx++) {
+					if(noL && noL[xx]) continue;
+					const float dx = ((float)xx + 0.5f - cx) / rad, dy = ((float)yy + 0.5f - cy) / rad;
+					const float d = std::sqrt(dx * dx + dy * dy);
+					if(d >= 1.0f) continue;
+					float k;
+					if(ring) { const float e = (d - 0.8f) / 0.12f; k = std::exp(-e * e); }
+					else { k = (1.0f - d); k *= k; }
+					k *= inten * 255.0f;
+					const uint32_t c = row[xx];
+					const float r = std::min(255.0f, ((c >> 16) & 0xFF) + cr * k), g = std::min(255.0f, ((c >> 8) & 0xFF) + cg * k), b = std::min(255.0f, (c & 0xFF) + cb * k);
+					row[xx] = (c & 0xFF000000) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+				}
+			}
+		};
+		for(size_t v = 0; v < m7Views.size(); v++) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
+			const int sc = (int)scale;
+			const int areaTop = (zn.AreaY0 + (int)dstY) * sc, zoneTop = (zn.Y0 + (int)dstY) * sc;
+			const int areaBot = std::min((int)hdHeight - 1, (zn.AreaY1 + 1 + (int)dstY) * sc - 1);
+			const float ccx = (float)outWidth * 0.5f, ccy = (float)(areaTop + areaBot) * 0.5f;
+			for(FlareFx& F : flareLists[v]) {
+				SnesHdM7EffectInfo& fx = *F.Fx;
+				float target = 0;
+				if(F.Visible && F.Sx >= 0 && F.Sx < (float)outWidth && F.Sy >= (float)areaTop && F.Sy <= (float)areaBot) {
+					int clear = 0, total = 0;
+					for(int j = -2; j <= 2; j++) for(int i = -2; i <= 2; i++) {
+						const int xx = (int)F.Sx + i * sc, yy = (int)F.Sy + j * sc;
+						total++;
+						if(xx < 0 || xx >= (int)outWidth || yy < areaTop || yy > areaBot) continue;
+						const size_t idx = (size_t)yy * outWidth + xx;
+						if(maskOn && s_noLight[idx]) continue;                       // HUD devant
+						if(fx.Sun && yy >= zoneTop) continue;                         // soleil sous l'horizon
+						if(p3Occlusion) {
+							const float s2 = s_sprRow[idx];
+							if(s2 >= 0.0f && (fx.Sun || s2 > F.GroundRow + 0.25f)) continue; // objet plus proche
+						}
+						clear++;
+					}
+					target = total ? (float)clear / (float)total : 0.0f;
+				}
+				float& vis = fx.FlareVis[F.Key];
+				vis += (target - vis) * 0.35f;
+				if(vis < 0.01f || !F.Visible) continue;
+				const float cr = ((fx.Color0 >> 16) & 0xFF) / 255.0f, cg = ((fx.Color0 >> 8) & 0xFF) / 255.0f, cb = (fx.Color0 & 0xFF) / 255.0f;
+				const float R = fx.FlareSize * (float)sc;
+				const float inten = fx.Intensity * vis;
+				addGlow(F.Sx, F.Sy, R, cr, cg, cb, inten, false, areaTop, areaBot);
+				addGlow(F.Sx, F.Sy, R * 0.35f, 1.0f, 1.0f, 1.0f, inten * 0.8f, false, areaTop, areaBot);
+				if(fx.Streak > 0) {
+					// trainee horizontale fine
+					const float half = R * 3.0f, th = std::max(1.0f, R * 0.05f);
+					const int x0 = std::max(0, (int)(F.Sx - half)), x1 = std::min((int)outWidth - 1, (int)(F.Sx + half));
+					const int y0 = std::max(areaTop, (int)(F.Sy - th * 2)), y1 = std::min(areaBot, (int)(F.Sy + th * 2));
+					for(int yy = y0; yy <= y1; yy++) {
+						uint32_t* row = out + (size_t)yy * outWidth;
+						const float fy = 1.0f - std::min(1.0f, std::abs((float)yy + 0.5f - F.Sy) / (th * 2));
+						for(int xx = x0; xx <= x1; xx++) {
+							if(maskOn && s_noLight[(size_t)yy * outWidth + xx]) continue;
+							const float fxv = 1.0f - std::abs((float)xx + 0.5f - F.Sx) / half;
+							const float k = fx.Streak * inten * fxv * fxv * fy * 160.0f;
+							const uint32_t c = row[xx];
+							const float r = std::min(255.0f, ((c >> 16) & 0xFF) + cr * k), g = std::min(255.0f, ((c >> 8) & 0xFF) + cg * k), b = std::min(255.0f, (c & 0xFF) + cb * k);
+							row[xx] = (c & 0xFF000000) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+						}
+					}
+				}
+				if(fx.Ghosts > 0) {
+					static const float kG[5][6] = { // position sur la ligne, taille, r, g, b, anneau
+						{ 0.55f, 0.20f, 1.0f, 0.6f, 0.3f, 0 }, { 0.90f, 0.10f, 0.4f, 1.0f, 0.5f, 0 }, { 1.25f, 0.32f, 0.5f, 0.6f, 1.0f, 1 },
+						{ 1.60f, 0.14f, 1.0f, 0.4f, 0.8f, 0 }, { 2.10f, 0.45f, 0.4f, 0.9f, 1.0f, 1 } };
+					for(const auto& gh : kG) {
+						const float gx = F.Sx + (ccx - F.Sx) * gh[0], gy = F.Sy + (ccy - F.Sy) * gh[0];
+						addGlow(gx, gy, R * gh[1] * 2.0f, gh[2] * cr, gh[3] * cg, gh[4] * cb, 0.18f * fx.Ghosts * inten, gh[5] > 0.5f, areaTop, areaBot);
+					}
+				}
+			}
+		}
+	}
+
+	// ====================================================================
 	// <m7CameraDebug> : reperes de controle de la camera Mode 7 reconstruite
 	//  - poteaux plantes tous les 64 texels de la carte (pied rouge, sommet cyan, 24 texels de haut) :
 	//    ils doivent rester colles au decor et verticaux, meme en virage ;
@@ -2431,7 +3771,29 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				}
 			}
 		}
+		// <SpriteLight> : cadre vert = tile reconnue qui porte une lumiere, orange = reconnue mais sans lumiere
+		// (hors du sol avec distance=0, plane=0, hors vue...) ; anneau de la couleur de la lumiere au sol + trait jusqu'a sa hauteur
+		for(const SlDebugBox& b : slDbgBoxes) {
+			const uint32_t c = slLitKeys.count(b.Key) ? 0xFF20FF40 : 0xFFFF9020;
+			const int x0 = b.X0 * (int)scale, y0 = b.Y0 * (int)scale, x1 = (b.X1 + 1) * (int)scale - 1, y1 = (b.Y1 + 1) * (int)scale - 1;
+			fillRect(x0, y0, x1, y0 + thick - 1, c, 0, (int)hdHeight - 1); fillRect(x0, y1 - thick + 1, x1, y1, c, 0, (int)hdHeight - 1);
+			fillRect(x0, y0, x0 + thick - 1, y1, c, 0, (int)hdHeight - 1); fillRect(x1 - thick + 1, y0, x1, y1, c, 0, (int)hdHeight - 1);
+		}
+		for(const SlDebugLight& L : slDbgLights) {
+			const SnesHdM7Zone& zn = m7Zones[m7Views[L.View]];
+			const int cy0 = (zn.AreaY0 + (int)dstY) * (int)scale, cy1 = std::min((int)hdHeight - 1, (zn.AreaY1 + 1 + (int)dstY) * (int)scale - 1);
+			double sx, syG, syT, ppt, ppt2;
+			if(!zn.Project(L.U, L.V, 0.0, sx, syG, ppt) || !zn.Project(L.U, L.V, L.H, sx, syT, ppt2)) continue;
+			const int px = (int)std::lround((sx + dstX) * scale), pyG = (int)std::lround((syG + dstY) * scale), pyT = (int)std::lround((syT + dstY) * scale);
+			const uint32_t c = 0xFF000000 | L.Color;
+			fillRect(px - thick / 2, std::min(pyT, pyG), px + thick / 2, std::max(pyT, pyG), c, cy0, cy1);
+			fillRect(px - 3 * thick, pyG - thick, px + 3 * thick, pyG + thick, c, cy0, cy1);
+			fillRect(px - 2 * thick, pyT - 2 * thick, px + 2 * thick, pyT + 2 * thick, 0xFFFFFFFF, cy0, cy1);
+		}
 		uint32_t fn = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
+		if(fn % 120 == 0 && sprLightCand) {
+			MessageManager::Log("[HD-SPRITELIGHT] " + std::to_string(slDbgBoxes.size()) + " tile(s) reconnue(s), " + std::to_string(slDbgLights.size()) + " lumiere(s)");
+		}
 		if(fn % 120 == 0) {
 			std::string msg = "[HD-M7CAM] " + std::to_string(m7Zones.size()) + " zone(s) :";
 			for(const SnesHdM7Zone& zn : m7Zones) {

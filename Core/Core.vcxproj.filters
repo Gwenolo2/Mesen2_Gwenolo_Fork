@@ -2982,6 +2982,15 @@
     <ClInclude Include="SNES\HdPacks\SnesHdMode7Camera.h">
       <Filter>SNES\HdPacks</Filter>
     </ClInclude>
+    <ClInclude Include="SNES\HdPacks\SnesHdGpu.h">
+      <Filter>SNES\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SNES\HdPacks\SnesHdGl.h">
+      <Filter>SNES\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SNES\HdPacks\SnesHdGltf.h">
+      <Filter>SNES\HdPacks</Filter>
+    </ClInclude>
     <ClInclude Include="SNES\HdPacks\SnesHdPackBuilder.h">
       <Filter>SNES\HdPacks</Filter>
     </ClInclude>
@@ -3366,6 +3375,12 @@
       <Filter>SNES\HdPacks</Filter>
     </ClCompile>
     <ClCompile Include="SNES\HdPacks\SnesHdVideoFilter.cpp">
+      <Filter>SNES\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="SNES\HdPacks\SnesHdGpu.cpp">
+      <Filter>SNES\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="SNES\HdPacks\SnesHdGltf.cpp">
       <Filter>SNES\HdPacks</Filter>
     </ClCompile>
   </ItemGroup>

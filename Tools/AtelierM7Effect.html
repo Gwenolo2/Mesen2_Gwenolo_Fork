@@ -1,0 +1,851 @@
+<title>Atelier m7Effect</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Silkscreen&display=swap">
+<style>
+/* Layout : apercu 3D + carte vue de dessus + ligne generee a gauche (collant), type et reglages a droite ; une colonne sur telephone */
+:root {
+  --bg: #EEF1F2; --panel: #FFFFFF; --line: #D3DADD; --fg: #172024; --muted: #56656C;
+  --accent: #0E7C86; --accent-soft: #DCEFF1; --field: #F6F8F9; --warm: #C2550F;
+  --f-display: "Silkscreen", "Courier New", monospace;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0F1517; --panel: #172024; --line: #26343A; --fg: #E3ECEE; --muted: #93A6AD;
+  --accent: #4FC6D0; --accent-soft: #163338; --field: #121A1D; --warm: #F2964F; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0F1517; --panel: #172024; --line: #26343A; --fg: #E3ECEE; --muted: #93A6AD;
+  --accent: #4FC6D0; --accent-soft: #163338; --field: #121A1D; --warm: #F2964F; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 14px; line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 40px }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; max-width: 1360px; margin: 0 auto 18px }
+h1 { font-family: var(--f-display); font-weight: 400; font-size: 26px; margin: 0; letter-spacing: .02em }
+h1 span { color: var(--accent) }
+header p { margin: 0; color: var(--muted); max-width: 72ch }
+.app { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 20px; max-width: 1360px; margin: 0 auto; align-items: start }
+@media (max-width: 980px) { .app { grid-template-columns: minmax(0, 1fr) } .left { position: static !important } }
+.left { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); display: flex; flex-direction: column; gap: 14px; min-width: 0 }
+.right { display: flex; flex-direction: column; gap: 14px; min-width: 0 }
+.screen { background: #000; border-radius: 6px; overflow: hidden; border: 1px solid var(--line) }
+canvas#view { display: block; width: 100%; height: auto; aspect-ratio: 384 / 240; image-rendering: auto }
+.under { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 14px; align-items: start }
+@media (max-width: 560px) { .under { grid-template-columns: minmax(0, 1fr) } }
+canvas#map { width: 200px; height: 200px; max-width: 100%; border: 1px solid var(--line); border-radius: 4px; cursor: crosshair; display: block; background: var(--field) }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0 }
+.card h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.hint { color: var(--muted); font-size: 12.5px; margin: 0 }
+.hint code, .mono { font-family: var(--f-mono); font-size: 12px }
+select, input[type=number], input[type=text], textarea {
+  font: inherit; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; min-width: 0 }
+input[type=text].grow { flex: 1 1 200px }
+textarea { font-family: var(--f-mono); font-size: 12px; width: 100%; resize: vertical; line-height: 1.5 }
+button, .filebtn { font: inherit; font-weight: 500; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 11px; cursor: pointer }
+button:hover, .filebtn:hover { border-color: var(--accent) }
+button.primary, .filebtn.primary { background: var(--accent); border-color: var(--accent); color: var(--panel) }
+.filebtn input { display: none }
+:focus-visible, .filebtn:focus-within { outline: 2px solid var(--accent); outline-offset: 2px }
+.status { font-family: var(--f-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums }
+.status b { color: var(--accent); font-weight: 500 }
+.types { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px }
+@media (max-width: 760px) { .types { grid-template-columns: repeat(4, minmax(0, 1fr)) } }
+.types button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 9px; text-align: left; min-width: 0 }
+.types button b { font-family: var(--f-mono); font-size: 12.5px; font-weight: 500 }
+.types button span { font-size: 11.5px; color: var(--muted); font-weight: 400 }
+.types button[aria-pressed=true] { background: var(--accent-soft); border-color: var(--accent) }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px }
+@media (max-width: 520px) { .grid2 { grid-template-columns: minmax(0, 1fr) } }
+.ctl { display: flex; flex-direction: column; gap: 3px; min-width: 0 }
+.ctl > span { font-size: 12.5px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px }
+.ctl > span output { font-family: var(--f-mono); color: var(--fg); font-variant-numeric: tabular-nums }
+.ctl > span output.changed { color: var(--warm) }
+input[type=range] { width: 100%; accent-color: var(--accent) }
+input[type=color] { width: 44px; height: 30px; border: 1px solid var(--line); border-radius: 4px; background: var(--field); padding: 2px }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden }
+.seg button { border: 0; border-radius: 0; padding: 5px 10px; background: var(--field) }
+.seg button[aria-pressed=true] { background: var(--accent); color: var(--panel) }
+.out { min-height: 92px }
+details.card summary { cursor: pointer; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted) }
+details.card[open] summary { margin-bottom: 4px }
+</style>
+
+<header>
+  <h1>Atelier <span>m7Effect</span></h1>
+  <p>Règle flammes, fumée, brouillard, brume magique, reflets de lentille et nuages sur une piste Mode 7. Les calculs sont ceux de l'émulateur. Copie la ligne générée dans <span class="mono">snes_hires.txt</span>.</p>
+</header>
+
+<div class="app">
+  <section class="left" aria-label="Aperçu">
+    <div class="screen"><canvas id="view" width="384" height="240"></canvas></div>
+    <div class="under">
+      <div class="ctl">
+        <canvas id="map" width="200" height="200" aria-label="Carte vue de dessus"></canvas>
+        <div class="seg" role="group" aria-label="Clic sur la carte">
+          <button id="clickPos" aria-pressed="true">placer</button><button id="clickPath" aria-pressed="false">trajet</button>
+        </div>
+      </div>
+      <div class="ctl" style="gap:8px">
+        <p class="hint">Carte 1024 × 1024 texels. <b>Placer</b> : un clic pose l'effet. <b>Trajet</b> : chaque clic ajoute un point. Le triangle montre la caméra.</p>
+        <div class="row">
+          <label class="row" style="gap:6px"><input type="checkbox" id="orbit" checked> Caméra qui tourne</label>
+          <label class="row" style="gap:6px"><input type="checkbox" id="follow" checked> Suivre l'effet</label>
+        </div>
+        <label class="ctl"><span>Distance caméra <output id="camDistOut"></output></span><input type="range" id="camDist" min="20" max="600" value="90"></label>
+        <label class="ctl"><span>Cap caméra <output id="camHeadOut"></output></span><input type="range" id="camHead" min="0" max="359" value="30"></label>
+        <label class="ctl"><span>Ambiance de la piste <output id="ambOut"></output></span><input type="range" id="amb" min="0.15" max="1" step="0.05" value="1"></label>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <h2>Ligne à copier</h2>
+        <div class="row"><span class="status" id="copyMsg"></span><button class="primary" id="copyBtn">Copier</button></div>
+      </div>
+      <textarea id="out" class="out" readonly spellcheck="false"></textarea>
+      <p class="hint">Seules les valeurs modifiées (en orange) sont écrites : les autres gardent le défaut du type.</p>
+    </div>
+  </section>
+
+  <section class="right" aria-label="Réglages">
+    <div class="card">
+      <h2>Type d'effet</h2>
+      <div class="types" id="types"></div>
+      <div class="row" style="justify-content:flex-end"><button id="resetType">Valeurs par défaut du type</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Carte et ancrage</h2>
+      <div class="grid2">
+        <label class="ctl"><span>Piste d'aperçu</span><select id="ground"><option value="">Piste d'exemple</option></select></label>
+        <label class="ctl"><span>Hash de la carte (ou *, A|B|C)</span><input type="text" id="mapHash" value="*" spellcheck="false"></label>
+        <label class="ctl"><span>Position X <output id="posXOut"></output></span><input type="range" id="posX" min="0" max="1023" value="512"></label>
+        <label class="ctl"><span>Position Y <output id="posYOut"></output></span><input type="range" id="posY" min="0" max="1023" value="512"></label>
+        <label class="ctl"><span>Ancrer sur une tile (hash, facultatif)</span><input type="text" id="tileHash" placeholder="ex. 1C4BFAFD" spellcheck="false"></label>
+        <label class="ctl"><span>Conditions (facultatif)</span><input type="text" id="cond" placeholder="nomCondition&amp;autre" spellcheck="false"></label>
+        <label class="ctl"><span>Décalage depuis le centre de la case, X <output id="dxOut"></output></span><input type="range" id="dx" min="-32" max="32" step="1" value="0"></label>
+        <label class="ctl"><span>Décalage Y <output id="dyOut"></output></span><input type="range" id="dy" min="-32" max="32" step="1" value="0"></label>
+        <label class="ctl" style="grid-column:1/-1"><span>Tiles de piste affichées dans l'aperçu (hashs <code>&lt;m7tiles&gt;</code>, avec leur relief)</span><input type="text" id="blockTiles" placeholder="ex. CCC407D3 7F250736 27261E6F 4F4CEE4E" spellcheck="false"></label>
+      </div>
+      <p class="hint" id="blockInfo">Charge le dossier du pack : les tiles s'assemblent comme dans l'image de l'atlas, avec la hauteur de leur <code>&lt;m7relief&gt;</code>. La tile d'ancrage est posée à la position choisie. Pour un bloc de 2 × 2 cases, ancre sur la tile en haut à gauche avec <code>dx=4, dy=4</code> : une seule lumière au centre du bloc.</p>
+      <p class="hint">Avec une tile, un émetteur naît au centre de chaque case qui la contient ; l'aperçu le montre à la position choisie, et le trajet devient relatif à la case.</p>
+    </div>
+
+    <div class="card" id="paramsCard">
+      <h2 id="paramsTitle">Réglages</h2>
+      <div class="grid2" id="params"></div>
+      <p class="hint" id="lightHint" hidden>Génère une ligne <code>&lt;m7light&gt;</code>. Avec « Ancrer sur une tile », une lumière naît au centre de chaque case de la piste qui contient cette tile Mode 7 (le hash de <code>&lt;m7tiles&gt;</code>, celui que tu utilises déjà pour le relief ou les panneaux) ; l'aperçu la montre à la position choisie. Une lumière fixe ne suit pas de trajet.</p>
+      <p class="hint" id="flareHint" hidden>Le soleil n'apparaît que quand la caméra regarde vers lui : laisse-la tourner ou règle le cap. En jeu, karts, objets et HUD le cachent progressivement.</p>
+    </div>
+
+    <details class="card" id="motionCard">
+      <summary>Mouvement (trajet, flottement)</summary>
+      <div class="grid2">
+        <label class="ctl" style="grid-column:1/-1"><span>Trajet <code>x:y:h|x:y:h|…</code></span><input type="text" id="path" spellcheck="false" placeholder="clique sur la carte en mode trajet"></label>
+        <label class="ctl"><span>Vitesse (texels/s) <output id="speedOut"></output></span><input type="range" id="speed" min="2" max="200" value="32"></label>
+        <label class="ctl"><span>Boucle</span><select id="loop"><option value="loop">boucle</option><option value="pingpong">aller-retour</option><option value="once">une fois</option></select></label>
+        <label class="ctl"><span>Hauteur des nouveaux points <output id="ptHOut"></output></span><input type="range" id="ptH" min="0" max="64" value="0"></label>
+        <label class="row" style="gap:6px"><input type="checkbox" id="smooth" checked> Courbe lissée</label>
+        <label class="ctl"><span>Flottement (texels) <output id="bobampOut"></output></span><input type="range" id="bobamp" min="0" max="24" step="0.5" value="0"></label>
+        <label class="ctl"><span>Fréquence du flottement (Hz) <output id="bobfreqOut"></output></span><input type="range" id="bobfreq" min="0.1" max="4" step="0.05" value="0.5"></label>
+        <label class="ctl"><span>Décalage du temps (s) <output id="offsetOut"></output></span><input type="range" id="offset" min="0" max="10" step="0.1" value="0"></label>
+        <div class="row" style="align-items:end"><button id="clearPath">Effacer le trajet</button></div>
+      </div>
+    </details>
+
+    <div class="card">
+      <h2>Dossier du pack (facultatif)</h2>
+      <div class="row">
+        <label class="filebtn primary">Choisir le dossier<input type="file" id="folder" webkitdirectory directory multiple></label>
+        <span class="status" id="packStatus">Piste d'exemple.</span>
+      </div>
+      <p class="hint">Sert à afficher tes vraies pistes (<code>&lt;m7img&gt;</code>, avec leur hash) et à choisir une texture PNG pour les particules. Tout est lu dans ton navigateur.</p>
+      <label class="ctl"><span>Texture des particules (PNG du pack)</span><select id="texture"><option value="">point doux</option></select></label>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const view = $('view'), ctx = view.getContext('2d');
+const W = view.width, H = view.height;
+const S = 1.5;                    // pixels de l'apercu par pixel SNES
+const HZ = 66, CX = W / 2;        // horizon, axe
+const CAMH = 34, FOC = 150 * S;   // hauteur camera (texels), focale (pixels de l'apercu)
+
+// ------------------------------------------------------------------ types et valeurs par defaut (= loader)
+const TYPES = [
+  { id: 'flame', label: 'flame', desc: 'flammes + lumière' },
+  { id: 'smoke', label: 'smoke', desc: 'fumée' },
+  { id: 'fog', label: 'fog', desc: 'brouillard' },
+  { id: 'magicfog', label: 'magicfog', desc: 'brume lumineuse' },
+  { id: 'flare', label: 'flare', desc: 'reflet / soleil' },
+  { id: 'clouds', label: 'clouds', desc: 'nuages + ombres' },
+  { id: 'light', label: 'm7light', desc: 'lumière seule' },
+];
+const BASE = { maxparticles: 80, rate: 40, lifemin: 0.5, lifemax: 0.9, radius: 3, risemin: 18, risemax: 30, drift: 4, turbulence: 6, turbulencefreq: 2,
+  windx: 0, windy: 0, sizestart: 5, sizeend: 1.5, sizerandom: 0.3, alphastart: 1, alphaend: 0, fadein: 0.1,
+  color0: 'FFF2B0', color1: 'FF9020', color2: 'C02000', blend: 'additive', minpixelsize: 1.5, nearfade: 12, elevation: 0,
+  density: 0.6, start: 200, end: 900, patches: 0.5, scale: 96, region: 0, sky: 0.5, intensity: 0.6, pulse: 0.4,
+  coverage: 0.5, shadow: 0.35, skyheight: 0.85, sun: 0, sunaz: 0, sunel: 25, flaresize: 24, ghosts: 1, streak: 0.6,
+  light: 1, lightradius: 48, lightintensity: 1.4, lightflicker: 0.45, lightcolor: 'FFA040' };
+const OVER = {
+  flame: {},
+  smoke: { maxparticles: 60, rate: 10, lifemin: 2.5, lifemax: 4, radius: 2, risemin: 8, risemax: 14, drift: 3, turbulence: 4, turbulencefreq: 0.6, windx: 6,
+    sizestart: 3, sizeend: 10, sizerandom: 0.3, alphastart: 0.55, alphaend: 0, fadein: 0.15, color0: '9A9A9A', color1: '7A7A7A', color2: '5A5A5A', blend: 'normal', nearfade: 16, light: 0 },
+  fog: { color0: 'C8D0D8', color1: 'C8D0D8', color2: 'C8D0D8', windx: 6, windy: 2, light: 0 },
+  magicfog: { color0: '60FFB0', color1: 'B060FF', patches: 1, scale: 64, windx: 4, windy: -3, light: 0 },
+  flare: { color0: 'FFF0C0', intensity: 1, light: 0 },
+  clouds: { color0: 'FFFFFF', scale: 160, windx: 10, windy: 4, sky: 1, light: 0 },
+  light: { light: 0 },
+};
+// <m7light> : cles propres (valeurs par defaut du loader : height 8, radius 64, FFC080, intensite 1, vitesse 6)
+Object.assign(BASE, { l_height: 8, l_radius: 64, l_color: 'FFC080', l_intensity: 1, l_flicker: 0, l_speed: 6, l_mode: 'light' });
+const defaultsFor = t => Object.assign({}, BASE, OVER[t]);
+
+// reglages : cle, libelle, min, max, pas, types concernes
+const PART = ['flame', 'smoke'];
+const SCHEMA = [
+  // particules
+  { k: 'rate', l: 'Naissances / s', min: 0, max: 200, st: 1, t: PART },
+  { k: 'maxparticles', l: 'Particules max', min: 1, max: 600, st: 1, t: PART },
+  { k: 'lifemin', l: 'Vie mini (s)', min: 0.05, max: 8, st: 0.05, t: PART },
+  { k: 'lifemax', l: 'Vie maxi (s)', min: 0.05, max: 10, st: 0.05, t: PART },
+  { k: 'radius', l: 'Rayon d\'apparition (texels)', min: 0, max: 40, st: 0.5, t: PART },
+  { k: 'elevation', l: 'Hauteur de l\'émetteur', min: 0, max: 80, st: 1, t: ['flame', 'smoke', 'flare'] },
+  { k: 'risemin', l: 'Montée mini (texels/s)', min: -20, max: 80, st: 1, t: PART },
+  { k: 'risemax', l: 'Montée maxi (texels/s)', min: -20, max: 120, st: 1, t: PART },
+  { k: 'drift', l: 'Dérive latérale', min: 0, max: 40, st: 0.5, t: PART },
+  { k: 'turbulence', l: 'Turbulence', min: 0, max: 40, st: 0.5, t: PART },
+  { k: 'turbulencefreq', l: 'Fréquence turbulence (Hz)', min: 0, max: 8, st: 0.1, t: PART },
+  { k: 'sizestart', l: 'Taille au début (texels)', min: 0.2, max: 40, st: 0.1, t: PART },
+  { k: 'sizeend', l: 'Taille à la fin (texels)', min: 0, max: 60, st: 0.1, t: PART },
+  { k: 'sizerandom', l: 'Taille aléatoire', min: 0, max: 0.95, st: 0.05, t: PART },
+  { k: 'alphastart', l: 'Opacité au début', min: 0, max: 1, st: 0.05, t: PART },
+  { k: 'alphaend', l: 'Opacité à la fin', min: 0, max: 1, st: 0.05, t: PART },
+  { k: 'fadein', l: 'Apparition (part de la vie)', min: 0, max: 1, st: 0.05, t: PART },
+  { k: 'nearfade', l: 'Fondu tout près (texels)', min: 0, max: 64, st: 1, t: PART },
+  { k: 'color0', l: 'Couleur début', c: 1, t: PART },
+  { k: 'color1', l: 'Couleur milieu', c: 1, t: PART },
+  { k: 'color2', l: 'Couleur fin', c: 1, t: PART },
+  { k: 'blend', l: 'Mélange', opts: [['additive', 'additif (lumineux)'], ['normal', 'normal']], t: PART },
+  // vent (commun)
+  { k: 'windx', l: 'Vent X (texels/s)', min: -60, max: 60, st: 0.5, t: ['flame', 'smoke', 'fog', 'magicfog', 'clouds'] },
+  { k: 'windy', l: 'Vent Y (texels/s)', min: -60, max: 60, st: 0.5, t: ['flame', 'smoke', 'fog', 'magicfog', 'clouds'] },
+  // lumiere auto (flame)
+  { k: 'light', l: 'Lumière sur la piste', opts: [['1', 'oui'], ['0', 'non']], t: ['flame'] },
+  { k: 'lightradius', l: 'Rayon de la lumière', min: 4, max: 200, st: 1, t: ['flame'] },
+  { k: 'lightintensity', l: 'Intensité de la lumière', min: 0, max: 4, st: 0.05, t: ['flame'] },
+  { k: 'lightflicker', l: 'Vacillement de la lumière', min: 0, max: 1, st: 0.05, t: ['flame'] },
+  { k: 'lightcolor', l: 'Couleur de la lumière', c: 1, t: ['flame'] },
+  // atmosphere
+  { k: 'density', l: 'Densité', min: 0, max: 1, st: 0.02, t: ['fog'] },
+  { k: 'start', l: 'Début (distance, texels)', min: 0, max: 1500, st: 10, t: ['fog'] },
+  { k: 'end', l: 'Plein (distance, texels)', min: 10, max: 2500, st: 10, t: ['fog'] },
+  { k: 'patches', l: 'Nappes', min: 0, max: 2, st: 0.05, t: ['fog', 'magicfog'] },
+  { k: 'scale', l: 'Taille des nappes / nuages (texels)', min: 4, max: 400, st: 2, t: ['fog', 'magicfog', 'clouds'] },
+  { k: 'region', l: 'Zone autour de X, Y (0 = partout)', min: 0, max: 600, st: 5, t: ['fog', 'magicfog', 'clouds'] },
+  { k: 'sky', l: 'Sur le ciel', min: 0, max: 1, st: 0.05, t: ['fog', 'clouds'] },
+  { k: 'intensity', l: 'Intensité', min: 0, max: 3, st: 0.05, t: ['magicfog', 'flare'] },
+  { k: 'pulse', l: 'Pulsation (Hz)', min: 0, max: 4, st: 0.05, t: ['magicfog'] },
+  { k: 'coverage', l: 'Couverture', min: 0, max: 1, st: 0.02, t: ['clouds'] },
+  { k: 'shadow', l: 'Ombres au sol', min: 0, max: 1, st: 0.02, t: ['clouds'] },
+  { k: 'skyheight', l: 'Hauteur de la bande de nuages', min: 0.05, max: 1, st: 0.05, t: ['clouds'] },
+  { k: 'color0', l: 'Couleur', c: 1, t: ['fog', 'clouds', 'flare'] },
+  { k: 'color0', l: 'Couleur 1', c: 1, t: ['magicfog'] },
+  { k: 'color1', l: 'Couleur 2', c: 1, t: ['magicfog'] },
+  // flare
+  { k: 'sun', l: 'Source', opts: [['0', 'point de la carte'], ['1', 'soleil']], t: ['flare'] },
+  { k: 'sunaz', l: 'Soleil : direction (°)', min: 0, max: 359, st: 1, t: ['flare'] },
+  { k: 'sunel', l: 'Soleil : hauteur (°)', min: 1, max: 60, st: 1, t: ['flare'] },
+  { k: 'flaresize', l: 'Taille du halo (px SNES)', min: 2, max: 96, st: 1, t: ['flare'] },
+  { k: 'ghosts', l: 'Reflets secondaires', min: 0, max: 3, st: 0.05, t: ['flare'] },
+  { k: 'streak', l: 'Traînée horizontale', min: 0, max: 2, st: 0.05, t: ['flare'] },
+  // m7light
+  { k: 'l_color', o: 'color', l: 'Couleur', c: 1, t: ['light'] },
+  { k: 'l_mode', o: 'mode', l: 'Mode', opts: [['light', 'éclaire'], ['add', 'ajoute (lueur)'], ['shadow', 'ombre']], t: ['light'] },
+  { k: 'l_radius', o: 'radius', l: 'Rayon (texels)', min: 4, max: 300, st: 1, t: ['light'] },
+  { k: 'l_height', o: 'height', l: 'Hauteur de la source (texels)', min: 0, max: 80, st: 1, t: ['light'] },
+  { k: 'l_intensity', o: 'intensity', l: 'Intensité', min: 0, max: 4, st: 0.05, t: ['light'] },
+  { k: 'l_flicker', o: 'flicker', l: 'Scintillement', min: 0, max: 1, st: 0.05, t: ['light'] },
+  { k: 'l_speed', o: 'speed', l: 'Vitesse du scintillement', min: 0.5, max: 30, st: 0.5, t: ['light'] },
+];
+
+// ------------------------------------------------------------------ etat
+let type = 'flame';
+let P = defaultsFor(type);
+const st = { x: 512, y: 512, dx: 0, dy: 0, path: [], speed: 32, loop: 'loop', smooth: true, bobamp: 0, bobfreq: 0.5, offset: 0 };
+
+function buildTypes() {
+  const box = $('types'); box.innerHTML = '';
+  for (const t of TYPES) {
+    const b = document.createElement('button');
+    b.innerHTML = `<b>${t.label}</b><span>${t.desc}</span>`;
+    b.setAttribute('aria-pressed', t.id === type ? 'true' : 'false');
+    b.onclick = () => setType(t.id, true);
+    box.appendChild(b);
+  }
+}
+function setType(t, keepSame) {
+  const old = type, oldDef = defaultsFor(old);
+  type = t;
+  const nd = defaultsFor(t);
+  // garde les valeurs deja modifiees par l'utilisateur, sinon prend le defaut du nouveau type
+  const np = {};
+  for (const k in nd) np[k] = (keepSame && P[k] !== oldDef[k]) ? P[k] : nd[k];
+  P = np;
+  resetSim(); buildTypes(); buildParams(); update();
+}
+$('resetType').onclick = () => { P = defaultsFor(type); resetSim(); buildParams(); update(); };
+
+const fmt = v => (typeof v === 'number') ? String(+v.toFixed(3)) : String(v);
+function buildParams() {
+  const box = $('params'); box.innerHTML = '';
+  $('paramsTitle').textContent = 'Réglages · ' + type;
+  const d = defaultsFor(type);
+  for (const sp of SCHEMA) {
+    if (!sp.t.includes(type)) continue;
+    if (type === 'flare' && P.sun == 1 && (sp.k === 'elevation')) continue;
+    if (type === 'flare' && P.sun != 1 && (sp.k === 'sunaz' || sp.k === 'sunel')) continue;
+    if (type === 'flame' && P.light == 0 && sp.k.startsWith('light') && sp.k !== 'light') continue;
+    const lab = document.createElement('label'); lab.className = 'ctl';
+    const head = document.createElement('span');
+    const out = document.createElement('output');
+    head.append(document.createTextNode(sp.l), out);
+    lab.appendChild(head);
+    let inp;
+    if (sp.c) {
+      inp = document.createElement('input'); inp.type = 'color'; inp.value = '#' + String(P[sp.k]).toLowerCase();
+      inp.oninput = () => { P[sp.k] = inp.value.slice(1).toUpperCase(); mark(); update(); };
+    } else if (sp.opts) {
+      inp = document.createElement('select');
+      for (const [v, t] of sp.opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; inp.appendChild(o); }
+      inp.value = String(P[sp.k]);
+      inp.onchange = () => { P[sp.k] = isNaN(+inp.value) ? inp.value : +inp.value; if (sp.k === 'blend') P.blend = inp.value; buildParams(); resetSim(); update(); };
+    } else {
+      inp = document.createElement('input'); inp.type = 'range'; inp.min = sp.min; inp.max = sp.max; inp.step = sp.st; inp.value = P[sp.k];
+      inp.oninput = () => { P[sp.k] = +inp.value; mark(); update(); };
+    }
+    inp.id = 'p_' + sp.k + '_' + sp.l.length;
+    const mark = () => { out.textContent = sp.opts ? '' : (sp.c ? String(P[sp.k]).toUpperCase() : fmt(P[sp.k])); out.classList.toggle('changed', String(P[sp.k]) !== String(d[sp.k])); };
+    mark();
+    lab.appendChild(inp);
+    box.appendChild(lab);
+  }
+  $('flareHint').hidden = type !== 'flare';
+  $('lightHint').hidden = type !== 'light';
+  $('motionCard').hidden = !(type === 'flame' || type === 'smoke' || type === 'flare' || type === 'magicfog' || type === 'fog');
+}
+
+// ------------------------------------------------------------------ mouvement (= SnesHdM7ModelInfo::BuildPath / EvalPath)
+let poly = [], cum = [], plen = 0;
+function buildPath() {
+  poly = []; cum = []; plen = 0;
+  const n = st.path.length; if (n < 2) return;
+  const closed = st.loop === 'loop';
+  const Pt = i => { const m = n; i = closed ? ((i % m) + m) % m : Math.max(0, Math.min(m - 1, i)); return st.path[i]; };
+  const segs = closed ? n : n - 1, sub = st.smooth ? 12 : 1;
+  for (let s = 0; s < segs; s++) for (let k = 0; k < sub; k++) {
+    const t = k / sub, q = [0, 0, 0];
+    if (st.smooth) { const p0 = Pt(s - 1), p1 = Pt(s), p2 = Pt(s + 1), p3 = Pt(s + 2), t2 = t * t, t3 = t2 * t;
+      for (let c = 0; c < 3; c++) q[c] = 0.5 * (2 * p1[c] + (-p0[c] + p2[c]) * t + (2 * p0[c] - 5 * p1[c] + 4 * p2[c] - p3[c]) * t2 + (-p0[c] + 3 * p1[c] - 3 * p2[c] + p3[c]) * t3); }
+    else { const p1 = Pt(s), p2 = Pt(s + 1); for (let c = 0; c < 3; c++) q[c] = p1[c] + (p2[c] - p1[c]) * t; }
+    poly.push(q);
+  }
+  poly.push(closed ? poly[0].slice() : st.path[n - 1].slice());
+  cum.push(0);
+  for (let i = 1; i < poly.length; i++) { const du = poly[i][0] - poly[i - 1][0], dv = poly[i][1] - poly[i - 1][1]; plen += Math.hypot(du, dv); cum.push(plen); }
+}
+function evalPath(t) {
+  if (poly.length < 2 || plen <= 0) return null;
+  let s = st.speed * t;
+  if (st.loop === 'loop') { s %= plen; if (s < 0) s += plen; }
+  else if (st.loop === 'pingpong') { let m = s % (2 * plen); if (m < 0) m += 2 * plen; s = m > plen ? 2 * plen - m : m; }
+  else s = Math.max(0, Math.min(plen, s));
+  let lo = 0, hi = cum.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= s) lo = mid; else hi = mid; }
+  const span = cum[hi] - cum[lo], f = span > 1e-6 ? (s - cum[lo]) / span : 0;
+  const a = poly[lo], b = poly[hi];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+}
+const onTile = () => /^[0-9a-f]{4,16}$/i.test($('tileHash').value.trim());
+// tile= : centre de la case (moteur : case * 8 + 4) + dx, dy ; sinon x, y
+const baseX = () => onTile() ? Math.floor(st.x / 8) * 8 + 4 + st.dx : st.x;
+const baseY = () => onTile() ? Math.floor(st.y / 8) * 8 + 4 + st.dy : st.y;
+function effectPos(t) { // = fxPos du filtre
+  let u = baseX(), v = baseY(), h = P.elevation || 0;
+  const tt = t + st.offset;
+  const q = evalPath(tt);
+  if (q) { if (onTile()) { u = baseX() + q[0]; v = baseY() + q[1]; } else { u = q[0]; v = q[1]; } h += q[2]; }
+  if (st.bobamp) h += st.bobamp * Math.sin(6.2831853 * st.bobfreq * tt);
+  return [u, v, h];
+}
+function pathCenter() {
+  if (st.path.length < 2) return [st.x, st.y];
+  let a = 0, b = 0; for (const p of st.path) { a += p[0]; b += p[1]; }
+  a /= st.path.length; b /= st.path.length;
+  return onTile() ? [st.x + a, st.y + b] : [a, b];
+}
+
+// ------------------------------------------------------------------ particules (= SnesHdM7EffectInfo::Step)
+let em = null;
+function newEmitter() { const e = { parts: [], acc: 0, time: 0, rng: (0x2545F491 ^ Math.imul(6, 2654435761)) >>> 0 };
+  e.rand = () => { let r = e.rng; r ^= r << 13; r >>>= 0; r ^= r >>> 17; r ^= r << 5; r >>>= 0; e.rng = r; return (r & 0xFFFFFF) / 16777216; }; return e; }
+function step(e, dt, su, sv, sh) {
+  e.time += dt; e.acc += P.rate * dt;
+  while (e.acc >= 1) {
+    e.acc -= 1;
+    if (e.parts.length >= P.maxparticles) continue;
+    const a = e.rand() * 6.2831853, r = P.radius * Math.sqrt(e.rand());
+    const da = e.rand() * 6.2831853, dr = P.drift * e.rand();
+    const p = { du: su + Math.cos(a) * r, dv: sv + Math.sin(a) * r, h: sh, vu: Math.cos(da) * dr, vv: Math.sin(da) * dr,
+      vh: P.risemin + (P.risemax - P.risemin) * e.rand(), life: Math.max(0.05, P.lifemin + (Math.max(P.lifemin, P.lifemax) - P.lifemin) * e.rand()),
+      size: 1 + P.sizerandom * (e.rand() * 2 - 1), seed: e.rand() * 6.2831853, age: 0 };
+    e.parts.push(p);
+  }
+  const tw = 6.2831853 * P.turbulencefreq;
+  for (let k = 0; k < e.parts.length;) {
+    const p = e.parts[k]; p.age += dt;
+    if (p.age >= p.life) { e.parts[k] = e.parts[e.parts.length - 1]; e.parts.pop(); continue; }
+    let tu = 0, tv = 0;
+    if (P.turbulence) { tu = P.turbulence * Math.sin(tw * e.time + p.seed); tv = P.turbulence * Math.cos(tw * 0.77 * e.time + p.seed * 1.3); }
+    p.du += (p.vu + P.windx + tu) * dt; p.dv += (p.vv + P.windy + tv) * dt; p.h += p.vh * dt;
+    k++;
+  }
+}
+let simT = 0;
+function resetSim() { em = null; }
+
+// ------------------------------------------------------------------ bruit (= table du filtre : xorshift 0x6A09E667)
+const NT = new Float32Array(65536);
+{ let r = 0x6A09E667 >>> 0; for (let i = 0; i < 65536; i++) { r ^= r << 13; r >>>= 0; r ^= r >>> 17; r ^= r << 5; r >>>= 0; NT[i] = (r & 0xFFFF) / 65535; } }
+function vnoise(x, y, px) {
+  const fxl = Math.floor(x), fyl = Math.floor(y), tx = x - fxl, ty = y - fyl;
+  const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+  const ix = fxl | 0, iy = fyl | 0;
+  let x0 = px > 0 ? ((ix % px) + px) % px : (ix & 255), x1 = px > 0 ? (x0 + 1) % px : ((ix + 1) & 255);
+  x0 &= 255; x1 &= 255;
+  const y0 = iy & 255, y1 = (iy + 1) & 255;
+  const a = NT[y0 * 256 + x0], b = NT[y0 * 256 + x1], c = NT[y1 * 256 + x0], d = NT[y1 * 256 + x1];
+  return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+}
+const fbm = (x, y, px) => 0.62 * vnoise(x, y, px) + 0.38 * vnoise(x * 2 + 17.3, y * 2 + 5.1, px > 0 ? px * 2 : 0);
+const smooth01 = (e0, e1, x) => { let t = (x - e0) / (e1 - e0); t = t < 0 ? 0 : t > 1 ? 1 : t; return t * t * (3 - 2 * t); };
+const hexRGB = h => { const n = parseInt(h, 16) || 0; return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+
+// ------------------------------------------------------------------ piste
+const pack = { files: new Map(), m7: [], pngs: [], m7tiles: {}, relief: {} };
+const norm = p => p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+/g, '/').toLowerCase();
+const imgCache = new Map();
+function loadImage(path) {
+  const key = norm(path); if (imgCache.has(key)) return imgCache.get(key);
+  const f = pack.files.get(key);
+  const pr = f ? new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = URL.createObjectURL(f); }) : Promise.resolve(null);
+  imgCache.set(key, pr); return pr;
+}
+let groundTex = null, mapThumb = null, partTex = null;
+function demoGround(u, v, o) {
+  const lane = Math.abs(((v % 256) + 256) % 256 - 128);
+  const n = ((Math.sin(u * 12.9898 + v * 78.233) * 43758.5453) % 1 + 1) % 1;
+  if (lane < 44) { const g = 92 + n * 18; o[0] = g; o[1] = g; o[2] = g + 6; if (lane < 1.2 && ((u >> 4) & 1)) o[0] = o[1] = o[2] = 220; }
+  else if (lane < 52) { const red = (Math.floor(u / 8) & 1) === 0; o[0] = red ? 200 : 235; o[1] = red ? 40 : 235; o[2] = red ? 36 : 235; }
+  else { o[0] = 60 + n * 20; o[1] = 132 + n * 26; o[2] = 52 + n * 14; }
+}
+function makeDemoThumb() {
+  const c = document.createElement('canvas'); c.width = c.height = 200; const g = c.getContext('2d'); const id = g.createImageData(200, 200); const o = [0, 0, 0];
+  for (let y = 0; y < 200; y++) for (let x = 0; x < 200; x++) { demoGround(x * 5.12, y * 5.12, o); const i = (y * 200 + x) * 4; id.data[i] = o[0]; id.data[i + 1] = o[1]; id.data[i + 2] = o[2]; id.data[i + 3] = 255; }
+  g.putImageData(id, 0, 0); return c;
+}
+mapThumb = makeDemoThumb();
+async function setGround(p) {
+  groundTex = null; mapThumb = makeDemoThumb();
+  if (!p) return;
+  const im = await loadImage(p.path); if (!im) return;
+  const N = 1024, c = document.createElement('canvas'); c.width = N; c.height = N; const g = c.getContext('2d'); g.drawImage(im, 0, 0, N, N);
+  groundTex = g.getImageData(0, 0, N, N).data;
+  const t = document.createElement('canvas'); t.width = t.height = 200; t.getContext('2d').drawImage(c, 0, 0, 200, 200); mapThumb = t;
+  if (p.hash && ($('mapHash').value.trim() === '*' || !$('mapHash').value.trim())) { $('mapHash').value = p.hash; update(); }
+}
+$('ground').addEventListener('change', e => { const p = pack.m7[+e.target.value - 1]; setGround(p || null); });
+$('texture').addEventListener('change', async e => {
+  partTex = null; const p = e.target.value; if (!p) { update(); return; }
+  const im = await loadImage(p); if (!im) return;
+  const c = document.createElement('canvas'); c.width = im.width; c.height = im.height; const g = c.getContext('2d'); g.drawImage(im, 0, 0);
+  partTex = { w: im.width, h: im.height, d: g.getImageData(0, 0, im.width, im.height).data, name: p }; update();
+});
+
+async function parseFile(path, depth, seen) {
+  if (depth > 12 || seen.has(norm(path))) return; seen.add(norm(path));
+  const f = pack.files.get(norm(path)); if (!f) return;
+  for (const raw of (await f.text()).split(/\r?\n/)) {
+    let s = raw; const c = s.indexOf('#'); if (c >= 0) s = s.slice(0, c); s = s.trim(); if (!s) continue;
+    if (s[0] === '[') { const e = s.indexOf(']'); if (e > 0) s = s.slice(e + 1).trim(); }
+    const low = s.toLowerCase();
+    if (low.startsWith('<include>')) { await parseFile(s.slice(9).trim(), depth + 1, seen); continue; }
+    if (low.startsWith('<m7tiles>')) { const t = s.slice(9).split(',').map(x => x.trim()); if (t.length >= 5) pack.m7tiles[(t[1] || '').toUpperCase()] = { path: t[0], scale: +t[2] || 4, x: +t[3] || 0, y: +t[4] || 0 }; continue; }
+    if (low.startsWith('<m7relief>')) { const t = s.slice(10).split(',').map(x => x.trim()); if (t.length >= 3 && !pack.relief[(t[1] || '').toUpperCase()]) pack.relief[(t[1] || '').toUpperCase()] = +t[2] || 0; continue; }
+    if (low.startsWith('<m7img>')) { const t = s.slice(7).split(',').map(x => x.trim()); if (t[0] && !pack.m7.some(m => norm(m.path) === norm(t[0]))) pack.m7.push({ path: t[0], hash: (t[1] || '').toUpperCase() }); }
+  }
+}
+$('folder').addEventListener('change', async ev => {
+  const list = [...ev.target.files]; if (!list.length) return;
+  pack.files.clear(); pack.m7 = []; pack.pngs = []; pack.m7tiles = {}; pack.relief = {}; imgCache.clear();
+  let root = null;
+  for (const f of list) { const rp = f.webkitRelativePath || f.name; if (/(^|\/)snes_hires\.txt$/i.test(rp)) { const r = rp.slice(0, rp.length - 14); if (root === null || r.length < root.length) root = r; } }
+  if (root === null) { $('packStatus').textContent = 'Pas de snes_hires.txt dans ce dossier.'; return; }
+  for (const f of list) { const rp = f.webkitRelativePath || f.name; if (!rp.toLowerCase().startsWith(root.toLowerCase())) continue; const k = norm(rp.slice(root.length)); pack.files.set(k, f); if (k.endsWith('.png') && !/^m7_/.test(k.split('/').pop())) pack.pngs.push(rp.slice(root.length)); }
+  await parseFile('snes_hires.txt', 0, new Set());
+  for (const k of pack.files.keys()) { const m = /^m7_([0-9a-f]+)\.png$/i.exec(k); if (m && !pack.m7.some(x => norm(x.path) === k)) pack.m7.push({ path: k, hash: m[1].toUpperCase() }); }
+  $('packStatus').innerHTML = `<b>${pack.m7.length}</b> pistes · <b>${Object.keys(pack.m7tiles).length}</b> tiles Mode 7 · <b>${pack.pngs.length}</b> images`;
+  buildBlock();
+  $('ground').innerHTML = '<option value="">Piste d\'exemple</option>' + pack.m7.map((m, i) => `<option value="${i + 1}">${esc(m.path.replace(/\\/g, '/'))}${m.hash ? ' · ' + esc(m.hash) : ''}</option>`).join('');
+  const effPngs = pack.pngs.filter(p => /effet|fx|particle|partic|flame|smoke|fire|spark|glow/i.test(p));
+  const lst = (effPngs.length ? effPngs : pack.pngs).slice(0, 400);
+  $('texture').innerHTML = '<option value="">point doux</option>' + lst.map(p => `<option value="${esc(p)}">${esc(p.replace(/\\/g, '/'))}</option>`).join('');
+});
+const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// ------------------------------------------------------------------ bloc de tiles Mode 7 (apercu)
+let block = null; // { cells: Map("cx,cy" -> {data,w,h,height}), ax, ay (case d'ancrage) }
+async function buildBlock() {
+  block = null;
+  const hs = $('blockTiles').value.toUpperCase().split(/[^0-9A-F]+/).filter(Boolean);
+  const known = hs.filter(h => pack.m7tiles[h]);
+  if (!known.length) { if (hs.length) $('blockInfo').textContent = Object.keys(pack.m7tiles).length ? 'Aucune de ces tiles n\'a de <m7tiles> dans le pack.' : 'Charge le dossier du pack pour afficher ces tiles.'; return; }
+  const T0 = pack.m7tiles[known[0]], cellPx = 8 * T0.scale;
+  let minx = 1e9, miny = 1e9;
+  for (const h of known) { const t = pack.m7tiles[h]; minx = Math.min(minx, t.x); miny = Math.min(miny, t.y); }
+  const cells = new Map();
+  for (const h of known) {
+    const t = pack.m7tiles[h], im = await loadImage(t.path); if (!im) continue;
+    const n = 8 * t.scale, c = document.createElement('canvas'); c.width = n; c.height = n;
+    const g = c.getContext('2d'); g.drawImage(im, t.x, t.y, n, n, 0, 0, n, n);
+    cells.set(`${Math.round((t.x - minx) / cellPx)},${Math.round((t.y - miny) / cellPx)}`, { data: g.getImageData(0, 0, n, n).data, n, height: pack.relief[h] || 0, hash: h });
+  }
+  const anc = (onTile() && known.includes($('tileHash').value.trim().toUpperCase())) ? $('tileHash').value.trim().toUpperCase() : known[0];
+  const ta = pack.m7tiles[anc];
+  block = { cells, ax: Math.round((ta.x - minx) / cellPx), ay: Math.round((ta.y - miny) / cellPx) };
+  $('blockInfo').textContent = `${cells.size} tile(s) affichée(s), ancrage ${anc}. Relief : ${[...cells.values()].map(c => c.hash + ' = ' + c.height).join(', ')} texels.`;
+}
+$('blockTiles').addEventListener('input', () => { clearTimeout(buildBlock.t); buildBlock.t = setTimeout(buildBlock, 300); update(); });
+$('tileHash').addEventListener('input', () => { clearTimeout(buildBlock.t); buildBlock.t = setTimeout(buildBlock, 300); });
+// case du bloc sous le point (u, v) de la carte -> cellule + coordonnees dans la tile, ou null
+function blockAt(u, v) {
+  if (!block) return null;
+  const bx0 = Math.floor(st.x / 8) * 8 - block.ax * 8, by0 = Math.floor(st.y / 8) * 8 - block.ay * 8;
+  const cx = Math.floor((u - bx0) / 8), cy = Math.floor((v - by0) / 8);
+  const c = block.cells.get(cx + ',' + cy); if (!c) return null;
+  const fu = (u - bx0) / 8 - cx, fv = (v - by0) / 8 - cy;
+  return { c, k: (Math.min(c.n - 1, Math.floor(fv * c.n)) * c.n + Math.min(c.n - 1, Math.floor(fu * c.n))) * 4 };
+}
+
+// ------------------------------------------------------------------ controles generaux
+const bindRange = (id, fn, fmtf) => { const el = $(id); const o = $(id + 'Out'); const f = () => { fn(+el.value); if (o) o.textContent = fmtf ? fmtf(+el.value) : el.value; }; el.addEventListener('input', () => { f(); update(); }); f(); };
+bindRange('posX', v => { st.x = v; }); bindRange('posY', v => { st.y = v; });
+bindRange('dx', v => { st.dx = v; }); bindRange('dy', v => { st.dy = v; });
+bindRange('camDist', () => {}); bindRange('camHead', () => {}, v => v + '°'); bindRange('amb', () => {}, v => v.toFixed(2));
+bindRange('speed', v => { st.speed = v; }); bindRange('ptH', () => {});
+bindRange('bobamp', v => { st.bobamp = v; }); bindRange('bobfreq', v => { st.bobfreq = v; }); bindRange('offset', v => { st.offset = v; });
+$('loop').onchange = () => { st.loop = $('loop').value; buildPath(); update(); };
+$('smooth').onchange = () => { st.smooth = $('smooth').checked; buildPath(); update(); };
+$('path').addEventListener('input', () => { st.path = parsePath($('path').value); buildPath(); resetSim(); update(); });
+$('clearPath').onclick = () => { st.path = []; $('path').value = ''; buildPath(); resetSim(); update(); };
+for (const id of ['mapHash', 'tileHash', 'cond']) $(id).addEventListener('input', update);
+function parsePath(s) { const out = []; for (const pt of s.split('|')) { const c = pt.split(':').map(Number); if (c.length >= 2 && !isNaN(c[0]) && !isNaN(c[1])) out.push([c[0], c[1], isNaN(c[2]) ? 0 : c[2]]); } return out; }
+const pathText = () => st.path.map(p => `${Math.round(p[0])}:${Math.round(p[1])}:${Math.round(p[2])}`).join('|');
+let clickMode = 'pos';
+$('clickPos').onclick = () => { clickMode = 'pos'; $('clickPos').setAttribute('aria-pressed', 'true'); $('clickPath').setAttribute('aria-pressed', 'false'); };
+$('clickPath').onclick = () => { clickMode = 'path'; $('clickPath').setAttribute('aria-pressed', 'true'); $('clickPos').setAttribute('aria-pressed', 'false'); $('motionCard').open = true; };
+$('map').addEventListener('click', e => {
+  const r = e.target.getBoundingClientRect();
+  const u = Math.round((e.clientX - r.left) / r.width * 1024), v = Math.round((e.clientY - r.top) / r.height * 1024);
+  if (clickMode === 'pos') { st.x = u; st.y = v; $('posX').value = u; $('posY').value = v; $('posXOut').textContent = u; $('posYOut').textContent = v; }
+  else { const rel = onTile(); st.path.push([rel ? u - st.x : u, rel ? v - st.y : v, +$('ptH').value]); $('path').value = pathText(); buildPath(); }
+  resetSim(); update();
+});
+
+// ------------------------------------------------------------------ ligne generee
+function update() {
+  const d = defaultsFor(type);
+  const keys = [];
+  for (const sp of SCHEMA) {
+    if (!sp.t.includes(type)) continue;
+    if (keys.some(k => k.startsWith(sp.k + '='))) continue;
+    if (String(P[sp.k]) !== String(d[sp.k])) keys.push(`${sp.o || sp.k}=${sp.c ? String(P[sp.k]).toUpperCase() : fmt(P[sp.k])}`);
+  }
+  if (partTex && PART.includes(type)) keys.push(`texture=${partTex.name.replace(/\//g, '\\')}`);
+  if (type !== 'light' && st.path.length >= 2) {
+    keys.push(`path=${pathText()}`);
+    if (st.speed !== 32) keys.push(`speed=${st.speed}`);
+    if (st.loop !== 'loop') keys.push(`loop=${st.loop}`);
+    if (!st.smooth) keys.push('smooth=0');
+  }
+  if (type !== 'light' && st.bobamp) { keys.push(`bobamp=${fmt(st.bobamp)}`); if (st.bobfreq !== 0.5) keys.push(`bobfreq=${fmt(st.bobfreq)}`); }
+  if (type !== 'light' && st.offset) keys.push(`offset=${fmt(st.offset)}`);
+  const map = $('mapHash').value.trim() || '*';
+  const cond = $('cond').value.trim();
+  let anchor = '';
+  const tile = $('tileHash').value.trim();
+  const needPos = PART.includes(type) || ((type === 'fog' || type === 'magicfog' || type === 'clouds') && P.region > 0) || (type === 'flare' && P.sun != 1);
+  const dxy = onTile() ? (st.dx ? `,dx=${st.dx}` : '') + (st.dy ? `,dy=${st.dy}` : '') : '';
+  if (onTile()) anchor = `,tile=${tile.toUpperCase()}${dxy}`;
+  else if (needPos && !(st.path.length >= 2)) anchor = `,${st.x},${st.y}`;
+  if (type === 'light') {
+    // <m7light> : carte + x, y ; ou tile= (la carte passe alors par map=)
+    const lk = keys;
+    const head = onTile() ? `tile=${tile.toUpperCase()}${map !== '*' ? ',map=' + map : ''}${dxy}` : `${map},${st.x},${st.y}`;
+    $('out').value = `${cond ? '[' + cond + ']' : ''}<m7light>${head}${lk.length ? ',' + lk.join(',') : ''}`;
+  } else
+  $('out').value = `${cond ? '[' + cond + ']' : ''}<m7Effect>${map},type=${type}${anchor}${keys.length ? ',' + keys.join(',') : ''}`;
+  try { localStorage.setItem('m7fx.state', JSON.stringify({ type, P, st, map, cond, tile, block: $('blockTiles').value, cam: [$('camDist').value, $('camHead').value, $('amb').value] })); } catch (e) {}
+}
+$('copyBtn').onclick = async () => {
+  const t = $('out');
+  try { await navigator.clipboard.writeText(t.value); $('copyMsg').textContent = 'Copié'; }
+  catch (e) { t.focus(); t.select(); $('copyMsg').textContent = 'Texte sélectionné : Ctrl+C'; }
+  clearTimeout(update.m); update.m = setTimeout(() => $('copyMsg').textContent = '', 2500);
+};
+
+// ------------------------------------------------------------------ rendu
+const img = ctx.createImageData(W, H), buf = img.data;
+const gu = new Float32Array(W * H), gv = new Float32Array(W * H), gd = new Float32Array(W * H);
+let heading = 0, last = performance.now(), flareVis = 0;
+const col = [0, 0, 0];
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.1, (now - last) / 1000)); last = now;
+  simT += dt;
+  if ($('orbit').checked) { heading += dt * 0.25; $('camHead').value = Math.round(((heading * 57.2958) % 360 + 360) % 360); $('camHeadOut').textContent = $('camHead').value + '°'; }
+  else heading = +$('camHead').value / 57.2958;
+  const amb = +$('amb').value;
+  const tA = simT;
+  const [eu, ev, eh] = effectPos(tA);
+  const [tu, tv] = $('follow').checked ? [eu, ev] : pathCenter();
+  const Fx = Math.cos(heading), Fy = Math.sin(heading), Rx = -Fy, Ry = Fx;
+  const dist = +$('camDist').value;
+  const Cu = tu - Fx * dist, Cv = tv - Fy * dist;
+  const proj = (u, v, h) => { const D = (u - Cu) * Fx + (v - Cv) * Fy; if (D < 1) return null; const L = (u - Cu) * Rx + (v - Cv) * Ry; const ppt = FOC / D; return [CX + L * ppt, HZ + (CAMH - h) * ppt, ppt, D]; };
+
+  // lumiere automatique de la flamme (= <m7light> : multiplie, vacille)
+  let light = null;
+  if (type === 'flame' && P.light == 1) {
+    const n = 0.6 * Math.sin(tA * 9 + st.x * 0.13 + st.y * 0.07) + 0.4 * Math.sin(tA * 9 * 2.31 + (st.x * 0.13 + st.y * 0.07) * 1.7);
+    const k = P.lightintensity * (1 - P.lightflicker * (0.5 + 0.5 * n)) / 255;
+    const c = hexRGB(P.lightcolor);
+    light = { u: eu, v: ev, h2: Math.pow(eh + P.sizestart * 1.5, 2), r2: P.lightradius * P.lightradius, cr: c[0] * k, cg: c[1] * k, cb: c[2] * k };
+  }
+  let addLight = false;
+  if (type === 'light') {
+    const n = 0.6 * Math.sin(tA * P.l_speed + st.x * 0.13 + st.y * 0.07) + 0.4 * Math.sin(tA * P.l_speed * 2.31 + (st.x * 0.13 + st.y * 0.07) * 1.7);
+    const k = P.l_intensity * (P.l_flicker > 0 ? 1 - P.l_flicker * (0.5 + 0.5 * n) : 1) / 255;
+    const c = hexRGB(P.l_color);
+    let cr = c[0] * k, cg = c[1] * k, cb = c[2] * k;
+    if (P.l_mode === 'shadow') { cr = -(255 - c[0]) * k; cg = -(255 - c[1]) * k; cb = -(255 - c[2]) * k; }
+    addLight = P.l_mode === 'add';
+    light = { u: baseX(), v: baseY(), h2: P.l_height * P.l_height, r2: P.l_radius * P.l_radius, cr, cg, cb };
+  }
+  // ciel
+  for (let y = 0; y <= HZ; y++) { const t = y / HZ, r = 110 + 80 * t, g = 165 + 55 * t, b = 225 + 20 * t;
+    for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; buf[i] = r; buf[i + 1] = g; buf[i + 2] = b; buf[i + 3] = 255; } }
+  // sol
+  for (let y = HZ + 1; y < H; y++) {
+    const D = CAMH * FOC / (y - HZ);
+    for (let x = 0; x < W; x++) {
+      const L = (x - CX) * D / FOC, u = Cu + Fx * D + Rx * L, v = Cv + Fy * D + Ry * L, j = y * W + x;
+      gu[j] = u; gv[j] = v; gd[j] = D;
+      if (groundTex) { const k = ((Math.floor(v) & 1023) * 1024 + (Math.floor(u) & 1023)) * 4; col[0] = groundTex[k]; col[1] = groundTex[k + 1]; col[2] = groundTex[k + 2]; }
+      else demoGround(u, v, col);
+      let mr = amb, mg = amb, mb = amb;
+      let ar = 0, ag = 0, ab = 0;
+      if (light) { const du = u - light.u, dv = v - light.v, d2 = du * du + dv * dv + light.h2; if (d2 < light.r2) { let a = 1 - d2 / light.r2; a *= a;
+        if (addLight) { ar = light.cr * a * 255; ag = light.cg * a * 255; ab = light.cb * a * 255; } else { mr += light.cr * a; mg += light.cg * a; mb += light.cb * a; } } }
+      const i = j * 4; buf[i] = Math.min(255, col[0] * Math.max(0, mr) + ar); buf[i + 1] = Math.min(255, col[1] * Math.max(0, mg) + ag); buf[i + 2] = Math.min(255, col[2] * Math.max(0, mb) + ab); buf[i + 3] = 255;
+    }
+  }
+  // tiles Mode 7 du bloc + relief (= renderReliefBand : par colonne, du bas vers l'horizon, sommet = ligne - hauteur x ppt)
+  if (block) {
+    const lightAt = (u, v, o) => { let mr = amb, mg = amb, mb = amb, ar = 0, ag = 0, ab = 0;
+      if (light) { const du = u - light.u, dv = v - light.v, d2 = du * du + dv * dv + light.h2; if (d2 < light.r2) { let a = 1 - d2 / light.r2; a *= a;
+        if (addLight) { ar = light.cr * a * 255; ag = light.cg * a * 255; ab = light.cb * a * 255; } else { mr += light.cr * a; mg += light.cg * a; mb += light.cb * a; } } }
+      o[0] = Math.min(255, o[0] * Math.max(0, mr) + ar); o[1] = Math.min(255, o[1] * Math.max(0, mg) + ag); o[2] = Math.min(255, o[2] * Math.max(0, mb) + ab); };
+    const tc = [0, 0, 0];
+    for (let x = 0; x < W; x++) {
+      let ceil = H; // plus haute ligne deja remplie dans la colonne
+      for (let y = H - 1; y > HZ; y--) {
+        const j = y * W + x, b = blockAt(gu[j], gv[j]); if (!b) continue;
+        const hgt = b.c.height, D = gd[j], ppt = FOC / D;
+        tc[0] = b.c.data[b.k]; tc[1] = b.c.data[b.k + 1]; tc[2] = b.c.data[b.k + 2];
+        if (b.c.data[b.k + 3] < 8) continue;
+        lightAt(gu[j], gv[j], tc);
+        const top = Math.max(0, Math.round(y - hgt * ppt));
+        for (let yy = Math.min(y, ceil - 1); yy >= top; yy--) {
+          const i = (yy * W + x) * 4, side = yy > top && hgt > 0 ? 0.7 : 1;
+          buf[i] = tc[0] * side; buf[i + 1] = tc[1] * side; buf[i + 2] = tc[2] * side;
+        }
+        ceil = Math.min(ceil, top);
+      }
+    }
+  }
+  // particules
+  if (PART.includes(type)) {
+    if (!em) { em = newEmitter(); const pre = Math.min(P.lifemax * 60, 600); for (let s = 0; s < pre; s++) step(em, 1 / 60, eu, ev, eh - (P.elevation || 0)); }
+    step(em, dt, eu, ev, eh - (P.elevation || 0));
+    const c0 = hexRGB(P.color0), c1 = hexRGB(P.color1), c2 = hexRGB(P.color2), add = P.blend === 'additive';
+    const list = [];
+    for (const p of em.parts) {
+      const q = proj(p.du, p.dv, (P.elevation || 0) + p.h); if (!q) continue;
+      const D = q[3]; if (D < 2) continue;
+      const t = p.age / p.life;
+      let a = P.alphastart + (P.alphaend - P.alphastart) * t;
+      if (P.fadein > 0 && t < P.fadein) a *= t / P.fadein;
+      if (P.nearfade > 0 && D < P.nearfade) a *= D / P.nearfade;
+      let sz = p.size * (P.sizestart + (P.sizeend - P.sizestart) * t) * q[2];
+      if (sz <= 0) continue;
+      if (sz < P.minpixelsize) { a *= sz / P.minpixelsize; sz = P.minpixelsize; }
+      if (a <= 0.003) continue;
+      const ca = t < 0.5 ? c0 : c1, cb = t < 0.5 ? c1 : c2, f = t < 0.5 ? t * 2 : (t - 0.5) * 2;
+      list.push({ x: q[0], y: q[1], hw: sz / 2, a: Math.min(1, a), D, r: ca[0] + (cb[0] - ca[0]) * f, g: ca[1] + (cb[1] - ca[1]) * f, b: ca[2] + (cb[2] - ca[2]) * f });
+    }
+    list.sort((A, B) => B.D - A.D);
+    const T = partTex;
+    for (const d of list) {
+      const hh = T ? d.hw * T.h / T.w : d.hw;
+      const x0 = Math.max(0, Math.floor(d.x - d.hw)), x1 = Math.min(W - 1, Math.ceil(d.x + d.hw)), y0 = Math.max(0, Math.floor(d.y - hh)), y1 = Math.min(H - 1, Math.ceil(d.y + hh));
+      for (let y = y0; y <= y1; y++) { const dy = y + 0.5 - d.y;
+        for (let x = x0; x <= x1; x++) { const dx = x + 0.5 - d.x;
+          let sa, sr = 255, sg = 255, sb = 255;
+          if (T) { const iu = Math.floor((dx / d.hw * 0.5 + 0.5) * T.w), iv = Math.floor((dy / hh * 0.5 + 0.5) * T.h); if (iu < 0 || iv < 0 || iu >= T.w || iv >= T.h) continue; const k = (iv * T.w + iu) * 4; sa = T.d[k + 3] / 255; if (sa <= 0.002) continue; sr = T.d[k]; sg = T.d[k + 1]; sb = T.d[k + 2]; }
+          else { const dd = Math.hypot(dx, dy) / d.hw; if (dd >= 1) continue; const s = 1 - dd * dd; sa = s * s; }
+          const aa = sa * d.a; if (aa < 0.004) continue;
+          const i = (y * W + x) * 4, cr = sr * d.r / 255, cg = sg * d.g / 255, cb = sb * d.b / 255;
+          if (add) { buf[i] = Math.min(255, buf[i] + cr * aa); buf[i + 1] = Math.min(255, buf[i + 1] + cg * aa); buf[i + 2] = Math.min(255, buf[i + 2] + cb * aa); }
+          else { buf[i] += (cr - buf[i]) * aa; buf[i + 1] += (cg - buf[i + 1]) * aa; buf[i + 2] += (cb - buf[i + 2]) * aa; }
+        } }
+    }
+  }
+  // atmosphere (= evalPoint du filtre)
+  if (type === 'fog' || type === 'magicfog' || type === 'clouds') {
+    const c0 = hexRGB(P.color0), c1 = hexRGB(P.color1);
+    const Ru = eu, Rv = ev;
+    const nc = Math.max(4, Math.min(128, Math.round(5000 / P.scale)));
+    for (let y = 0; y < H; y++) {
+      const sky = y <= HZ, skyRel = sky ? (HZ - y) / HZ : 0, skyRows = (HZ - y) / S;
+      for (let x = 0; x < W; x++) {
+        const j = y * W + x, i = j * 4;
+        let M = 1, A0 = 0, A1 = 0, A2 = 0;
+        const lerpTo = (k, r, g, b) => { M *= 1 - k; A0 = A0 * (1 - k) + r * k; A1 = A1 * (1 - k) + g * k; A2 = A2 * (1 - k) + b * k; };
+        const u = gu[j], v = gv[j], D = gd[j];
+        let regionW = 1;
+        if (!sky && P.region > 0) { const du = u - Ru, dv = v - Rv, d2 = du * du + dv * dv; if (d2 >= P.region * P.region) continue; regionW = Math.max(0, Math.min(1, (P.region - Math.sqrt(d2)) / (P.region * 0.3))); }
+        let Mr = 1, Mg = 1, Mb = 1;
+        if (type === 'fog') {
+          let f;
+          if (sky) { if (P.region > 0) continue; f = P.density * P.sky * (1 - 0.5 * skyRel); }
+          else { const fd = Math.max(0, Math.min(1, (D - P.start) / Math.max(1, P.end - P.start))) * P.density; let fn = 0;
+            if (P.patches > 0) { const n = fbm((u + tA * P.windx) / P.scale, (v + tA * P.windy) / P.scale, 0); fn = P.patches * smooth01(0.35, 0.85, n); }
+            f = Math.max(0, Math.min(1, fd + (1 - fd) * fn * 0.75)) * regionW; }
+          if (f > 0.001) lerpTo(f, c0[0], c0[1], c0[2]);
+        } else if (type === 'magicfog') {
+          if (sky) continue;
+          const n = fbm((u + tA * P.windx) / P.scale, (v + tA * P.windy) / P.scale, 0);
+          const pulse = 0.75 + 0.25 * Math.sin(6.2831853 * P.pulse * tA + n * 4);
+          const gl = P.intensity * P.patches * smooth01(0.3, 0.85, n) * regionW * pulse;
+          if (gl <= 0.001) continue;
+          const m = 0.5 + 0.5 * Math.sin(tA * 0.7 + n * 6);
+          A0 += (c0[0] + (c1[0] - c0[0]) * m) * gl; A1 += (c0[1] + (c1[1] - c0[1]) * m) * gl; A2 += (c0[2] + (c1[2] - c0[2]) * m) * gl;
+        } else {
+          if (sky) {
+            if (P.sky <= 0 || skyRel > P.skyheight) continue;
+            const colAng = heading + Math.atan((x + 0.5 - CX) / FOC);
+            const su = colAng / 6.2831853 * nc + tA * P.windx * 0.002 * nc, sv = skyRows / (P.scale * 0.12);
+            const n = fbm(su, sv, nc);
+            let cov = smooth01(1 - P.coverage - 0.12, 1 - P.coverage + 0.12, n);
+            cov *= Math.max(0, Math.min(1, skyRel * 6)) * Math.max(0, Math.min(1, (P.skyheight - skyRel) * 8)) * P.sky;
+            const sh = 0.82 + 0.18 * n;
+            if (cov > 0.001) lerpTo(cov * 0.9, c0[0] * sh, c0[1] * sh, c0[2] * sh);
+          } else if (P.shadow > 0) {
+            const n = fbm((u + tA * P.windx) / P.scale, (v + tA * P.windy) / P.scale, 0);
+            const k = 1 - P.shadow * smooth01(1 - P.coverage - 0.12, 1 - P.coverage + 0.12, n) * regionW;
+            M *= k; A0 *= k; A1 *= k; A2 *= k;
+          }
+        }
+        buf[i] = Math.max(0, Math.min(255, buf[i] * M + A0)); buf[i + 1] = Math.max(0, Math.min(255, buf[i + 1] * M + A1)); buf[i + 2] = Math.max(0, Math.min(255, buf[i + 2] * M + A2));
+      }
+    }
+  }
+  // reflet de lentille (= passe flare du filtre)
+  if (type === 'flare') {
+    let sx = 0, sy = 0, vis = false;
+    if (P.sun == 1) { const az = P.sunaz * 0.01745329, el = P.sunel * 0.01745329, dx = Math.cos(az), dy = Math.sin(az), dF = dx * Fx + dy * Fy;
+      if (dF > 0.05) { sx = CX + (dx * Rx + dy * Ry) / dF * FOC; sy = HZ - Math.tan(el) / dF * FOC; vis = sy < HZ; } }
+    else { const q = proj(eu, ev, eh); if (q && q[3] > 2) { sx = q[0]; sy = q[1]; vis = true; } }
+    const target = vis && sx >= 0 && sx < W && sy >= 0 && sy < H ? 1 : 0;
+    flareVis += (target - flareVis) * 0.35;
+    if (flareVis > 0.01 && vis) {
+      const c = hexRGB(P.color0).map(v => v / 255), R = P.flaresize * S, inten = P.intensity * flareVis;
+      const addGlow = (cx, cy, rad, cr, cg, cb, it, ring) => {
+        if (rad < 1 || it <= 0.002) return;
+        for (let y = Math.max(0, Math.floor(cy - rad)); y <= Math.min(H - 1, Math.ceil(cy + rad)); y++)
+          for (let x = Math.max(0, Math.floor(cx - rad)); x <= Math.min(W - 1, Math.ceil(cx + rad)); x++) {
+            const dx = (x + 0.5 - cx) / rad, dy = (y + 0.5 - cy) / rad, d = Math.hypot(dx, dy); if (d >= 1) continue;
+            let k; if (ring) { const e = (d - 0.8) / 0.12; k = Math.exp(-e * e); } else { k = (1 - d); k *= k; }
+            k *= it * 255; const i = (y * W + x) * 4;
+            buf[i] = Math.min(255, buf[i] + cr * k); buf[i + 1] = Math.min(255, buf[i + 1] + cg * k); buf[i + 2] = Math.min(255, buf[i + 2] + cb * k);
+          }
+      };
+      addGlow(sx, sy, R, c[0], c[1], c[2], inten, false);
+      addGlow(sx, sy, R * 0.35, 1, 1, 1, inten * 0.8, false);
+      if (P.streak > 0) { const half = R * 3, th = Math.max(1, R * 0.05);
+        for (let y = Math.max(0, Math.floor(sy - th * 2)); y <= Math.min(H - 1, Math.ceil(sy + th * 2)); y++) { const fy = 1 - Math.min(1, Math.abs(y + 0.5 - sy) / (th * 2));
+          for (let x = Math.max(0, Math.floor(sx - half)); x <= Math.min(W - 1, Math.ceil(sx + half)); x++) { const fxv = 1 - Math.abs(x + 0.5 - sx) / half; if (fxv <= 0) continue;
+            const k = P.streak * inten * fxv * fxv * fy * 160, i = (y * W + x) * 4;
+            buf[i] = Math.min(255, buf[i] + c[0] * k); buf[i + 1] = Math.min(255, buf[i + 1] + c[1] * k); buf[i + 2] = Math.min(255, buf[i + 2] + c[2] * k); } } }
+      if (P.ghosts > 0) {
+        const kG = [[0.55, 0.20, 1.0, 0.6, 0.3, 0], [0.90, 0.10, 0.4, 1.0, 0.5, 0], [1.25, 0.32, 0.5, 0.6, 1.0, 1], [1.60, 0.14, 1.0, 0.4, 0.8, 0], [2.10, 0.45, 0.4, 0.9, 1.0, 1]];
+        const ccx = W / 2, ccy = H / 2;
+        for (const g of kG) addGlow(sx + (ccx - sx) * g[0], sy + (ccy - sy) * g[0], R * g[1] * 2, g[2] * c[0], g[3] * c[1], g[4] * c[2], 0.18 * P.ghosts * inten, g[5] > 0.5);
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  drawMap(eu, ev, Cu, Cv, Fx, Fy);
+  requestAnimationFrame(frame);
+}
+
+// ------------------------------------------------------------------ carte vue de dessus
+const mctx = $('map').getContext('2d');
+function drawMap(eu, ev, Cu, Cv, Fx, Fy) {
+  const k = 200 / 1024;
+  mctx.drawImage(mapThumb, 0, 0, 200, 200);
+  const css = getComputedStyle(document.documentElement);
+  const acc = css.getPropertyValue('--accent').trim() || '#0E7C86', warm = css.getPropertyValue('--warm').trim() || '#C2550F';
+  if (P.region > 0 && (type === 'fog' || type === 'magicfog' || type === 'clouds')) { mctx.strokeStyle = acc; mctx.setLineDash([4, 3]); mctx.beginPath(); mctx.arc(eu * k, ev * k, P.region * k, 0, 6.283); mctx.stroke(); mctx.setLineDash([]); }
+  if (poly.length > 1) { mctx.strokeStyle = warm; mctx.lineWidth = 1.5; mctx.beginPath();
+    const off = onTile() ? [st.x, st.y] : [0, 0];
+    poly.forEach((p, i) => { const x = (p[0] + off[0]) * k, y = (p[1] + off[1]) * k; i ? mctx.lineTo(x, y) : mctx.moveTo(x, y); }); mctx.stroke();
+    mctx.fillStyle = warm; for (const p of st.path) { mctx.fillRect((p[0] + off[0]) * k - 2, (p[1] + off[1]) * k - 2, 4, 4); } }
+  mctx.fillStyle = '#fff'; mctx.strokeStyle = '#000'; mctx.lineWidth = 1;
+  mctx.beginPath(); mctx.arc(eu * k, ev * k, 4, 0, 6.283); mctx.fill(); mctx.stroke();
+  // camera
+  const cx = Cu * k, cy = Cv * k, a = Math.atan2(Fy, Fx);
+  mctx.fillStyle = acc; mctx.beginPath();
+  mctx.moveTo(cx + Math.cos(a) * 8, cy + Math.sin(a) * 8); mctx.lineTo(cx + Math.cos(a + 2.5) * 6, cy + Math.sin(a + 2.5) * 6); mctx.lineTo(cx + Math.cos(a - 2.5) * 6, cy + Math.sin(a - 2.5) * 6); mctx.closePath(); mctx.fill();
+}
+
+// ------------------------------------------------------------------ depart
+try {
+  const s = JSON.parse(localStorage.getItem('m7fx.state') || 'null');
+  if (s && OVER[s.type]) {
+    type = s.type; P = Object.assign(defaultsFor(type), s.P); Object.assign(st, s.st);
+    $('mapHash').value = s.map || '*'; $('cond').value = s.cond || ''; $('tileHash').value = s.tile || '';
+    if (s.cam) { $('camDist').value = s.cam[0]; $('camHead').value = s.cam[1]; $('amb').value = s.cam[2]; }
+    $('blockTiles').value = s.block || '';
+    for (const id of ['posX', 'posY', 'dx', 'dy', 'speed', 'bobamp', 'bobfreq', 'offset']) { const key = { posX: 'x', posY: 'y' }[id] || id; if (st[key] == null) continue; $(id).value = st[key]; $(id + 'Out').textContent = st[key]; }
+    $('loop').value = st.loop; $('smooth').checked = st.smooth; $('path').value = pathText();
+    $('camDistOut').textContent = $('camDist').value; $('ambOut').textContent = (+$('amb').value).toFixed(2);
+  }
+} catch (e) {}
+buildTypes(); buildParams(); buildPath(); update();
+requestAnimationFrame(frame);
+})();
+</script>

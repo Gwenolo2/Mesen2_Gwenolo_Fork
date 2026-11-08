@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <unordered_set> // Ajouté pour WatchedMemoryAddresses
 #include <vector>
+#include <array>
+#include <cstring>
 #include "Shared/MessageManager.h"
 #include "Utilities/PNGHelper.h"
 #include "Utilities/SimpleLock.h"
@@ -208,6 +210,8 @@ struct SnesHdScreenInfo
 
 
 //------------------------------------------------------------------------
+bool SnesHdDecodeImageFallback(const std::vector<uint8_t>& data, std::vector<uint32_t>& pixels, uint32_t& w, uint32_t& h);
+
 struct SnesHdPackBitmapInfo
 {
 private:
@@ -231,6 +235,9 @@ public:
 
 		if(PNGHelper::ReadPNG(FileData, PixelData, Width, Height)) {
 			// PremultiplyAlpha() optionnel
+		} else if(!FileData.empty()) {
+			// pas un PNG : JPG / BMP / TGA (textures des modeles glTF)
+			SnesHdDecodeImageFallback(FileData, PixelData, Width, Height);
 		}
 		FileData.clear();
 		_initDone = true;
@@ -824,6 +831,15 @@ struct SnesHdM7ReliefInfo
 	}
 };
 
+// Carte acceptee ? (any = toutes ; sinon liste A|B|C, ou le hash unique)
+inline bool SnesHdMapMatch(bool any, const std::vector<uint32_t>& hashes, uint32_t first, uint32_t mapHash)
+{
+	if(any) return true;
+	if(hashes.empty()) return first == mapHash;
+	for(uint32_t h : hashes) { if(h == mapHash) return true; }
+	return false;
+}
+
 // ---------------------------------------------------------
 // <m7billboard> : panneau (PNG debout, toujours face a la camera) plante sur la carte Mode 7
 // ---------------------------------------------------------
@@ -832,6 +848,7 @@ struct SnesHdM7BillboardInfo
 	SnesHdPackBitmapInfo* Bitmap = nullptr;
 	bool AnyMap = true;      // sinon : seulement sur la carte <m7img> de hash MapHash
 	uint32_t MapHash = 0;
+	std::vector<uint32_t> MapHashes; // A|B|C : toutes les cartes acceptees (cartes animees : un hash par etape)
 	bool OnTile = false;     // plante au centre de chaque case contenant la tile TileHash
 	uint32_t TileHash = 0;
 	float X = 0, Y = 0;      // position sur la carte (texels, 0-1023)
@@ -895,13 +912,137 @@ struct SnesHdModelTri
 	float UV[3][2];  // coordonnees de texture (v vers le haut, convention OBJ)
 	float N[3][3];   // normales (normale de la face si le fichier n'en a pas)
 	int Mat = 0;
+	uint8_t J[3][4] = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } };                 // glTF : emplacements (os)
+	float Wt[3][4] = { { 1, 0, 0, 0 }, { 1, 0, 0, 0 }, { 1, 0, 0, 0 } };                // glTF : poids
 };
+
+// ---------------------------------------------------------
+// Squelette / hierarchie animee d'un modele glTF (<m7model> .gltf / .glb)
+// Matrices 4x4 en colonnes (convention glTF : m[colonne * 4 + ligne]).
+// "Emplacements" (slots) : une matrice par os de skin, ou par noeud porteur d'un maillage rigide.
+// ---------------------------------------------------------
+struct SnesHdRigNode
+{
+	int Parent = -1;
+	float T[3] = { 0, 0, 0 }, R[4] = { 0, 0, 0, 1 }, S[3] = { 1, 1, 1 };
+	bool HasMatrix = false;
+	float M[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+};
+struct SnesHdRigChannel
+{
+	int Node = -1;
+	int Path = 0;         // 0 = translation, 1 = rotation (quaternion x y z w), 2 = echelle
+	bool Step = false;
+	std::vector<float> Times, Values;
+};
+struct SnesHdRigAnim
+{
+	std::string Name;
+	float Duration = 0;
+	std::vector<SnesHdRigChannel> Channels;
+};
+struct SnesHdModelRig
+{
+	std::vector<SnesHdRigNode> Nodes;
+	std::vector<int> SlotNode;                     // noeud de chaque emplacement
+	std::vector<std::array<float, 16>> SlotInvBind; // matrice inverse de liaison (identite pour un noeud rigide)
+	std::vector<SnesHdRigAnim> Anims;
+
+	static void Mul(const float* a, const float* b, float* o)
+	{
+		float r[16];
+		for(int c = 0; c < 4; c++) for(int l = 0; l < 4; l++) {
+			r[c * 4 + l] = a[0 * 4 + l] * b[c * 4 + 0] + a[1 * 4 + l] * b[c * 4 + 1] + a[2 * 4 + l] * b[c * 4 + 2] + a[3 * 4 + l] * b[c * 4 + 3];
+		}
+		memcpy(o, r, sizeof(r));
+	}
+	static void Compose(const float* t, const float* q, const float* s, float* m)
+	{
+		float x = q[0], y = q[1], z = q[2], w = q[3];
+		m[0] = (1 - 2 * (y * y + z * z)) * s[0]; m[1] = (2 * (x * y + z * w)) * s[0]; m[2] = (2 * (x * z - y * w)) * s[0]; m[3] = 0;
+		m[4] = (2 * (x * y - z * w)) * s[1]; m[5] = (1 - 2 * (x * x + z * z)) * s[1]; m[6] = (2 * (y * z + x * w)) * s[1]; m[7] = 0;
+		m[8] = (2 * (x * z + y * w)) * s[2]; m[9] = (2 * (y * z - x * w)) * s[2]; m[10] = (1 - 2 * (x * x + y * y)) * s[2]; m[11] = 0;
+		m[12] = t[0]; m[13] = t[1]; m[14] = t[2]; m[15] = 1;
+	}
+
+	// Palette d'animation au temps donne : 12 flottants par emplacement (3 lignes x 4 colonnes).
+	// anim < 0 ou absente : pose de repos.
+	void Evaluate(int anim, float time, std::vector<float>& pal) const
+	{
+		const size_t n = Nodes.size();
+		std::vector<float> trs(n * 10);
+		for(size_t i = 0; i < n; i++) {
+			float* d = &trs[i * 10];
+			memcpy(d, Nodes[i].T, 3 * sizeof(float)); memcpy(d + 3, Nodes[i].R, 4 * sizeof(float)); memcpy(d + 7, Nodes[i].S, 3 * sizeof(float));
+		}
+		if(anim >= 0 && anim < (int)Anims.size()) {
+			const SnesHdRigAnim& A = Anims[anim];
+			float t = A.Duration > 0 ? std::fmod(time, A.Duration) : 0.0f;
+			if(t < 0) t += A.Duration;
+			for(const SnesHdRigChannel& ch : A.Channels) {
+				if(ch.Node < 0 || ch.Node >= (int)n || ch.Times.empty()) continue;
+				const int comps = ch.Path == 1 ? 4 : 3;
+				const size_t keys = ch.Times.size();
+				size_t k0 = 0, k1 = 0; float f = 0;
+				if(t <= ch.Times[0]) { k0 = k1 = 0; }
+				else if(t >= ch.Times[keys - 1]) { k0 = k1 = keys - 1; }
+				else {
+					size_t lo = 0, hi = keys - 1;
+					while(hi - lo > 1) { size_t mid = (lo + hi) / 2; if(ch.Times[mid] <= t) lo = mid; else hi = mid; }
+					k0 = lo; k1 = hi;
+					float span = ch.Times[k1] - ch.Times[k0];
+					f = (span > 1e-9f && !ch.Step) ? (t - ch.Times[k0]) / span : 0.0f;
+				}
+				if((k1 + 1) * comps > ch.Values.size()) continue;
+				const float* a = &ch.Values[k0 * comps];
+				const float* b = &ch.Values[k1 * comps];
+				float* d = &trs[(size_t)ch.Node * 10 + (ch.Path == 0 ? 0 : (ch.Path == 1 ? 3 : 7))];
+				if(ch.Path == 1) {
+					float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+					float sgn = dot < 0 ? -1.0f : 1.0f; // chemin le plus court
+					float q[4], len = 0;
+					for(int c = 0; c < 4; c++) { q[c] = a[c] + (b[c] * sgn - a[c]) * f; len += q[c] * q[c]; }
+					len = len > 1e-12f ? 1.0f / std::sqrt(len) : 1.0f;
+					for(int c = 0; c < 4; c++) d[c] = q[c] * len;
+				} else {
+					for(int c = 0; c < 3; c++) d[c] = a[c] + (b[c] - a[c]) * f;
+				}
+			}
+		}
+		// matrices locales puis du monde (parents d'abord, par memo)
+		std::vector<float> world(n * 16);
+		std::vector<char> done(n, 0);
+		std::function<void(int)> solve = [&](int i) {
+			if(done[i]) return;
+			float local[16];
+			if(Nodes[i].HasMatrix) memcpy(local, Nodes[i].M, sizeof(local));
+			else Compose(&trs[(size_t)i * 10], &trs[(size_t)i * 10 + 3], &trs[(size_t)i * 10 + 7], local);
+			int p = Nodes[i].Parent;
+			if(p >= 0 && p < (int)n) { solve(p); Mul(&world[(size_t)p * 16], local, &world[(size_t)i * 16]); }
+			else memcpy(&world[(size_t)i * 16], local, sizeof(local));
+			done[i] = 1;
+		};
+		for(size_t i = 0; i < n; i++) solve((int)i);
+		pal.resize(SlotNode.size() * 12);
+		for(size_t s = 0; s < SlotNode.size(); s++) {
+			float m[16];
+			int nd = SlotNode[s];
+			if(nd >= 0 && nd < (int)n) Mul(&world[(size_t)nd * 16], SlotInvBind[s].data(), m);
+			else { memcpy(m, SlotInvBind[s].data(), sizeof(m)); }
+			for(int l = 0; l < 3; l++) for(int c = 0; c < 4; c++) pal[s * 12 + l * 4 + c] = m[c * 4 + l];
+		}
+	}
+};
+
+// Decodage d'image hors PNG (JPG, BMP, TGA... via stb_image) : textures des modeles glTF. Defini dans SnesHdGltf.cpp.
+bool SnesHdDecodeImageFallback(const std::vector<uint8_t>& data, std::vector<uint32_t>& pixels, uint32_t& w, uint32_t& h);
 
 struct SnesHdModelMesh
 {
 	std::vector<SnesHdModelTri> Tris;
 	std::vector<SnesHdModelMaterial> Mats;
-	float MinX = 0, MinY = 0, MinZ = 0, MaxX = 0, MaxY = 0, MaxZ = 0;
+	float MinX = 0, MinY = 0, MinZ = 0, MaxX = 0, MaxY = 0, MaxZ = 0; // boite de la pose de repos
+	std::shared_ptr<SnesHdModelRig> Rig; // glTF anime / avec squelette (nullptr : statique, OBJ)
 };
 
 struct SnesHdM7ModelInfo
@@ -910,6 +1051,7 @@ struct SnesHdM7ModelInfo
 	std::string File;
 	bool AnyMap = true;
 	uint32_t MapHash = 0;
+	std::vector<uint32_t> MapHashes; // A|B|C : toutes les cartes acceptees (cartes animees : un hash par etape)
 	bool OnTile = false;
 	uint32_t TileHash = 0;
 	float X = 0, Y = 0;          // position sur la carte (texels)
@@ -920,10 +1062,346 @@ struct SnesHdM7ModelInfo
 	bool KeepOrigin = false;     // false : la base du modele (centre, Y mini) est posee au sol en (x, y)
 	std::vector<SnesHdPackCondition*> Conditions;
 
+	// --- Animation glTF ---
+	int Anim = 0;                // animation jouee (index ; -1 = pose de repos)
+	float AnimSpeed = 1.0f;
+	// --- Mouvements programmes ---
+	float Spin = 0;              // degres / s autour de la verticale
+	float BobAmp = 0, BobFreq = 0.5f;     // flottement vertical (texels, Hz)
+	float SwayAmp = 0, SwayFreq = 0.5f;   // balancement lateral (degres, Hz)
+	float TimeOffset = 0;        // decalage du temps (s) : deux copies desynchronisees
+	std::vector<std::array<float, 3>> Path; // trajet (x, y, hauteur) ; avec tile=, positions relatives a la case
+	float PathSpeed = 32;        // texels / s
+	int PathLoop = 0;            // 0 = boucle, 1 = aller-retour, 2 = une fois
+	bool PathOrient = true;      // se tourne dans le sens de la marche
+	bool PathSmooth = true;      // courbe lissee (Catmull-Rom)
+	std::vector<std::array<float, 3>> PathPoly; // trajet echantillonne
+	std::vector<float> PathCum;  // longueurs cumulees
+	float PathLen = 0;
+
+	void BuildPath()
+	{
+		PathPoly.clear(); PathCum.clear(); PathLen = 0;
+		const size_t n = Path.size();
+		if(n < 2) return;
+		const bool closed = (PathLoop == 0);
+		auto P = [&](int i) -> const std::array<float, 3>& {
+			int m = (int)n;
+			if(closed) i = ((i % m) + m) % m; else i = std::clamp(i, 0, m - 1);
+			return Path[(size_t)i];
+		};
+		const int segs = closed ? (int)n : (int)n - 1;
+		const int sub = PathSmooth ? 12 : 1;
+		for(int s = 0; s < segs; s++) {
+			for(int k = 0; k < sub; k++) {
+				float t = (float)k / sub;
+				std::array<float, 3> q;
+				if(PathSmooth) {
+					const auto& p0 = P(s - 1); const auto& p1 = P(s); const auto& p2 = P(s + 1); const auto& p3 = P(s + 2);
+					float t2 = t * t, t3 = t2 * t;
+					for(int c = 0; c < 3; c++)
+						q[c] = 0.5f * (2 * p1[c] + (-p0[c] + p2[c]) * t + (2 * p0[c] - 5 * p1[c] + 4 * p2[c] - p3[c]) * t2 + (-p0[c] + 3 * p1[c] - 3 * p2[c] + p3[c]) * t3);
+				} else {
+					const auto& p1 = P(s); const auto& p2 = P(s + 1);
+					for(int c = 0; c < 3; c++) q[c] = p1[c] + (p2[c] - p1[c]) * t;
+				}
+				PathPoly.push_back(q);
+			}
+		}
+		const std::array<float, 3> last = closed ? PathPoly.front() : Path.back(); // copie (push_back peut deplacer le tableau)
+		PathPoly.push_back(last);
+		PathCum.push_back(0);
+		for(size_t i = 1; i < PathPoly.size(); i++) {
+			float du = PathPoly[i][0] - PathPoly[i - 1][0], dv = PathPoly[i][1] - PathPoly[i - 1][1];
+			PathLen += std::sqrt(du * du + dv * dv);
+			PathCum.push_back(PathLen);
+		}
+	}
+	// Position sur le trajet au temps t (s) ; du, dv = direction de la marche
+	void EvalPath(float t, float& u, float& v, float& h, float& du, float& dv) const
+	{
+		if(PathPoly.size() < 2 || PathLen <= 0) { u = Path.empty() ? 0 : Path[0][0]; v = Path.empty() ? 0 : Path[0][1]; h = Path.empty() ? 0 : Path[0][2]; du = 0; dv = 1; return; }
+		float s = PathSpeed * t, dir = 1.0f;
+		if(PathLoop == 0) { s = std::fmod(s, PathLen); if(s < 0) s += PathLen; }
+		else if(PathLoop == 1) { float m = std::fmod(s, 2 * PathLen); if(m < 0) m += 2 * PathLen; if(m > PathLen) { s = 2 * PathLen - m; dir = -1; } else s = m; }
+		else s = std::clamp(s, 0.0f, PathLen);
+		size_t lo = 0, hi = PathCum.size() - 1;
+		while(hi - lo > 1) { size_t mid = (lo + hi) / 2; if(PathCum[mid] <= s) lo = mid; else hi = mid; }
+		float span = PathCum[hi] - PathCum[lo];
+		float f = span > 1e-6f ? (s - PathCum[lo]) / span : 0.0f;
+		const auto& a = PathPoly[lo]; const auto& b = PathPoly[hi];
+		u = a[0] + (b[0] - a[0]) * f; v = a[1] + (b[1] - a[1]) * f; h = a[2] + (b[2] - a[2]) * f;
+		du = (b[0] - a[0]) * dir; dv = (b[1] - a[1]) * dir;
+	}
+
 	bool MatchesCondition()
 	{
 		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
 		return true;
+	}
+};
+
+// ---------------------------------------------------------
+// <m7light> : lumiere ponctuelle posee sur la carte Mode 7 (eclaire le sol et les objets poses au sol)
+// <m7ambient> : luminosite / teinte generale d'une carte (nuit, chateau...) pour faire ressortir les lumieres
+// ---------------------------------------------------------
+struct SnesHdM7EffectInfo;
+struct SnesHdM7LightInfo
+{
+	const SnesHdM7EffectInfo* Follow = nullptr; // lumiere automatique d'une flamme : suit ses mouvements
+	bool AnyMap = true;
+	uint32_t MapHash = 0;
+	std::vector<uint32_t> MapHashes; // A|B|C : toutes les cartes acceptees (cartes animees : un hash par etape)
+	bool OnTile = false;          // une lumiere au centre de chaque case contenant la tile TileHash
+	uint32_t TileHash = 0;
+	float X = 0, Y = 0;           // position sur la carte (texels)
+	float Dx = 0, Dy = 0;         // tile= : decalage depuis le centre de la case (texels ; 4,4 = coin commun de 4 cases)
+	float Height = 8.0f;          // hauteur de la source (texels)
+	float Radius = 64.0f;         // portee (texels)
+	float Intensity = 1.0f;
+	uint32_t Color = 0xFFC080;
+	float Flicker = 0.0f;         // 0 = stable, 1 = scintille fortement (flamme)
+	float FlickerSpeed = 6.0f;
+	bool Additive = false;        // false : eclaire (multiplie) ; true : ajoute de la lumiere (lueur meme sur du blanc)
+	bool Shadow = false;          // mode=shadow : assombrit (ombre teintee : noir = ombre neutre)
+	std::vector<SnesHdPackCondition*> Conditions;
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+};
+
+// <NoLightFXOnSprite> : sprites exclus de <m7light> / <m7ambient> (HUD...)
+struct SnesHdNoLightRule
+{
+	bool AllSprites = false;       // "*" : tous les sprites
+	bool OffGround = false;        // "hud" (<FrontOf3D>) : sprites dont les pieds ne sont pas sur le sol (HUD, ciel)
+	uint64_t Hash = 0;             // hash de la tile HD du sprite (comme <tile>)
+	bool AnyPalette = true;        // "*" : toutes ses palettes
+	uint32_t Palette = 0;
+	std::vector<SnesHdPackCondition*> Conditions;
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+};
+
+// <SpriteLight> : lumiere 3D attachee a une tile de sprite (explosion, impact, projectile...)
+// Mode 7 : posee au sol sous le sprite (ligne des pieds), a la hauteur de son centre. Plus tard : scenes diorama 2D.
+struct SnesHdSpriteLightInfo
+{
+	uint64_t Hash = 0;            // hash de la tile HD (comme <tile>)
+	bool AnyPalette = true;
+	uint32_t Palette = 0;
+	float Height = -1.0f;         // hauteur (texels) ; < 0 = auto (centre des tiles au-dessus du sol)
+	float Radius = 48.0f;
+	float Intensity = 1.4f;
+	uint32_t Color = 0xFFA040;
+	float Flicker = 0.0f;
+	float FlickerSpeed = 9.0f;
+	bool Additive = false;
+	bool Shadow = false;          // mode=shadow : assombrit au lieu d'eclairer
+	float SelfLight = 1.0f;       // part de la lumiere recue par le sprite lui-meme (0 = eclaire autour, pas le sprite)
+	float Glow = 0.0f;            // lueur propre du sprite (ajoute la couleur sur ses pixels, meme en l'air / hors eclairage)
+	float Halo = 0.0f;            // halo lumineux autour du sprite (rayon en pixels SNES)
+	int BlockId = -1;             // bloc <SpriteLight ...>{ } d'origine (-1 = ligne seule) : ses tiles forment un seul objet
+	float AirDistance = 64.0f;    // sprite hors du sol (Lakitu...) : distance a la camera (texels) ; 0 = pas de lumiere
+	bool PlaneViews = true;       // aussi dans les vues "plates" (carte vue de dessus, ecran du bas de SMK en 1 joueur)
+	std::vector<SnesHdPackCondition*> Conditions;
+	bool Matches(const SnesHdPackTileInfo* t) const
+	{
+		if(!t || t->MemoryHash != Hash) return false;
+		return AnyPalette || t->PaletteHash == 0xFFFFFFFF || t->PaletteHash == Palette;
+	}
+	bool MatchesCondition() const
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+};
+
+struct SnesHdM7AmbientInfo
+{
+	bool AnyMap = true;
+	uint32_t MapHash = 0;
+	std::vector<uint32_t> MapHashes; // A|B|C : toutes les cartes acceptees (cartes animees : un hash par etape)
+	float Brightness = 1.0f;      // 1 = normal, 0.4 = nuit
+	uint32_t Tint = 0xFFFFFF;
+	bool Sky = true;              // assombrir aussi le ciel au-dessus de la piste
+	std::vector<SnesHdPackCondition*> Conditions;
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+};
+
+// ---------------------------------------------------------
+// <m7LiquidBackground> : liquide (eau, lave...) calcule dans le monde Mode 7, visible a travers
+// les pixels transparents / semi-transparents de la texture <m7img> (et des <m7tiles> posees dessus)
+// ---------------------------------------------------------
+struct SnesHdM7LiquidInfo
+{
+	bool AnyMap = true;
+	uint32_t MapHash = 0;
+	std::vector<uint32_t> MapHashes; // A|B|C : toutes les cartes acceptees (cartes animees : un hash par etape)
+	bool Lava = false;                 // style=lava (sinon water)
+	uint32_t Color = 0x2A7FC0;         // couleur principale (eau peu profonde / lave)
+	uint32_t Deep = 0x0C3A70;          // couleur des creux
+	uint32_t Sky = 0xA8D8FF;           // eau : reflet du ciel ; lave : couleur des points chauds
+	float Speed = 10.0f;               // texels / s
+	float Scale = 48.0f;               // longueur des vagues (texels)
+	float Waves = 0.5f;                // force du relief des vagues (0..1)
+	float Specular = 0.8f;             // reflets du soleil (eau)
+	float Reflect = 0.65f;             // reflet du ciel maxi (eau, angle rasant)
+	float Foam = 0.6f;                 // ecume dans les zones semi-transparentes du rivage
+	SnesHdPackBitmapInfo* Texture = nullptr; // detail optionnel (PNG qui se repete)
+	float TexScale = 32.0f;            // taille d'une repetition de la texture (texels)
+	std::vector<SnesHdPackCondition*> Conditions;
+
+	std::vector<std::vector<uint32_t>> Mips; std::vector<uint32_t> MipW, MipH; bool Built = false;
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+	void Build()
+	{
+		if(Built) return;
+		Built = true;
+		if(!Texture) return;
+		if(Texture->PixelData.empty()) Texture->Init();
+		if(Texture->PixelData.empty() || !Texture->Width || !Texture->Height) return;
+		Mips.push_back(Texture->PixelData); MipW.push_back(Texture->Width); MipH.push_back(Texture->Height);
+		while(MipW.back() > 1 || MipH.back() > 1) {
+			uint32_t pw = MipW.back(), ph = MipH.back(), nw = std::max<uint32_t>(1, pw / 2), nh = std::max<uint32_t>(1, ph / 2);
+			const std::vector<uint32_t>& prev = Mips.back();
+			std::vector<uint32_t> m((size_t)nw * nh, 0);
+			for(uint32_t y = 0; y < nh; y++) for(uint32_t x = 0; x < nw; x++) {
+				uint32_t r = 0, g = 0, b = 0, a = 0;
+				for(uint32_t dy = 0; dy < 2; dy++) for(uint32_t dx = 0; dx < 2; dx++) {
+					uint32_t q = prev[(size_t)std::min(ph - 1, y * 2 + dy) * pw + std::min(pw - 1, x * 2 + dx)];
+					a += q >> 24; r += (q >> 16) & 0xFF; g += (q >> 8) & 0xFF; b += q & 0xFF;
+				}
+				m[(size_t)y * nw + x] = ((a / 4) << 24) | ((r / 4) << 16) | ((g / 4) << 8) | (b / 4);
+			}
+			Mips.push_back(std::move(m)); MipW.push_back(nw); MipH.push_back(nh);
+		}
+	}
+};
+
+// ---------------------------------------------------------
+// <m7Effect> : effets ancres sur la carte Mode 7 (etape 1 : type=flame, type=smoke)
+// Emetteur PONCTUEL de particules 3D (positions relatives a l'emetteur, en texels de carte).
+// ---------------------------------------------------------
+struct SnesHdFxParticle
+{
+	float Du = 0, Dv = 0, H = 0;      // position relative a l'emetteur
+	float Vu = 0, Vv = 0, Vh = 0;     // vitesse (texels / s)
+	float Age = 0, Life = 1, Size = 1, Seed = 0;
+};
+
+struct SnesHdM7EffectInfo
+{
+	int Type = 0;                       // 0 = flame, 1 = smoke, 2 = fog, 3 = magicfog, 4 = flare, 5 = clouds
+	bool AnyMap = true;
+	uint32_t MapHash = 0;
+	std::vector<uint32_t> MapHashes;
+	bool OnTile = false;                // un emetteur au centre de chaque case contenant la tile
+	uint32_t TileHash = 0;
+	float X = 0, Y = 0, Elevation = 0;
+	float Dx = 0, Dy = 0;               // tile= : decalage depuis le centre de la case (texels)
+	std::vector<SnesHdPackCondition*> Conditions;
+
+	int ZIndex = 95;
+	int MaxParticles = 80;
+	float Rate = 40;                    // naissances / s
+	float LifeMin = 0.5f, LifeMax = 0.9f;
+	float Radius = 3;                   // rayon de la zone d'apparition (texels)
+	float RiseMin = 18, RiseMax = 30;   // vitesse de montee (texels / s)
+	float Drift = 4;                    // vitesse laterale aleatoire
+	float Turbulence = 6, TurbulenceFreq = 2;
+	float WindX = 0, WindY = 0;
+	float SizeStart = 5, SizeEnd = 1.5f, SizeRandom = 0.3f; // taille dans le monde (texels)
+	float AlphaStart = 1, AlphaEnd = 0, FadeIn = 0.1f;
+	uint32_t Color0 = 0xFFF2B0, Color1 = 0xFF9020, Color2 = 0xC02000; // debut / milieu / fin de vie
+	bool Additive = true;
+	float MinPixelSize = 1.5f, NearFade = 12;
+	SnesHdPackBitmapInfo* Texture = nullptr;
+
+	// --- mouvement (memes cles que <m7model> : path, speed, loop, smooth, bobamp, bobfreq, offset) ---
+	SnesHdM7ModelInfo Motion;
+	bool HasMotion = false;
+
+	// --- fog / magicfog / clouds (passe "atmosphere" sur l'image finale) ---
+	float Density = 0.6f;               // fog : brouillard de distance maxi
+	float FogStart = 200, FogEnd = 900; // fog : distances (texels) debut / plein
+	float Patches = 0.5f;               // nappes de bruit qui derivent (0 = aucune)
+	float NoiseScale = 96;              // taille des nappes / nuages (texels)
+	float Region = 0;                   // rayon de la zone (texels) autour de x, y ; 0 = toute la carte
+	float SkyAmount = 0.5f;             // fog : part du brouillard sur le ciel ; clouds : 1 = nuages dans le ciel
+	float Intensity = 0.6f;             // magicfog : force de la lueur
+	float Pulse = 0.4f;                 // magicfog : pulsation (Hz)
+	float Coverage = 0.5f;              // clouds : part du ciel couverte
+	float Shadow = 0.35f;               // clouds : assombrissement des ombres sur la piste
+	float SkyHeight = 0.85f;            // clouds : hauteur de la bande de nuages (part du ciel)
+	// --- flare (reflets de lentille) ---
+	bool Sun = false;                   // source a l'infini (soleil) : SunAz / SunEl
+	float SunAz = 0, SunEl = 25;        // degres : 0 = vers +x de la carte, 90 = vers +y ; hauteur au-dessus de l'horizon
+	float FlareSize = 24;               // rayon du halo (pixels SNES)
+	float Ghosts = 1.0f;                // force des reflets secondaires
+	float Streak = 0.6f;                // trainee horizontale
+	std::unordered_map<int, float> FlareVis; // visibilite lissee (occultation progressive)
+
+	struct Emitter
+	{
+		std::vector<SnesHdFxParticle> Parts;
+		float Acc = 0, Time = 0;
+		bool Initialized = false;
+		uint32_t LastFrame = 0xFFFFFFFF;
+		uint32_t Rng = 0x2545F491;
+		float Rand() { Rng ^= Rng << 13; Rng ^= Rng >> 17; Rng ^= Rng << 5; return (float)(Rng & 0xFFFFFF) / 16777216.0f; }
+	};
+	std::unordered_map<int, Emitter> Emitters; // cle : -1 = emetteur unique, sinon numero de case (tile=)
+
+	bool MatchesCondition()
+	{
+		for(auto* c : Conditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
+
+	void Step(Emitter& e, float dt, float spawnU = 0, float spawnV = 0, float spawnH = 0)
+	{
+		e.Time += dt;
+		e.Acc += Rate * dt;
+		while(e.Acc >= 1.0f) {
+			e.Acc -= 1.0f;
+			if((int)e.Parts.size() >= MaxParticles) continue;
+			SnesHdFxParticle p;
+			float a = e.Rand() * 6.2831853f, r = Radius * std::sqrt(e.Rand());
+			p.Du = spawnU + std::cos(a) * r; p.Dv = spawnV + std::sin(a) * r; p.H = spawnH;
+			float da = e.Rand() * 6.2831853f, dr = Drift * e.Rand();
+			p.Vu = std::cos(da) * dr; p.Vv = std::sin(da) * dr;
+			p.Vh = RiseMin + (RiseMax - RiseMin) * e.Rand();
+			p.Life = std::max(0.05f, LifeMin + (LifeMax - LifeMin) * e.Rand());
+			p.Size = 1.0f + SizeRandom * (e.Rand() * 2.0f - 1.0f);
+			p.Seed = e.Rand() * 6.2831853f;
+			e.Parts.push_back(p);
+		}
+		const float tw = 6.2831853f * TurbulenceFreq;
+		for(size_t k = 0; k < e.Parts.size();) {
+			SnesHdFxParticle& p = e.Parts[k];
+			p.Age += dt;
+			if(p.Age >= p.Life) { p = e.Parts.back(); e.Parts.pop_back(); continue; }
+			float tu = 0, tv = 0;
+			if(Turbulence != 0) { tu = Turbulence * std::sin(tw * e.Time + p.Seed); tv = Turbulence * std::cos(tw * 0.77f * e.Time + p.Seed * 1.3f); }
+			p.Du += (p.Vu + WindX + tu) * dt;
+			p.Dv += (p.Vv + WindY + tv) * dt;
+			p.H += p.Vh * dt;
+			k++;
+		}
 	}
 };
 
@@ -1085,6 +1563,17 @@ public:
 
 	// <m7model> : modeles 3D .obj poses sur la carte Mode 7
 	std::vector<std::unique_ptr<SnesHdM7ModelInfo>> M7Models;
+	// <m7light> / <m7ambient> : eclairage de la piste Mode 7
+	std::vector<std::unique_ptr<SnesHdM7LightInfo>> M7Lights;
+	std::vector<std::unique_ptr<SnesHdM7AmbientInfo>> M7Ambients;
+	std::vector<std::unique_ptr<SnesHdNoLightRule>> NoLightRules; // <NoLightFXOnSprite>
+	std::vector<std::unique_ptr<SnesHdSpriteLightInfo>> SpriteLights; // <SpriteLight>
+	std::vector<std::unique_ptr<SnesHdNoLightRule>> FrontOf3DRules; // <FrontOf3D> : devant relief / panneaux / modeles / effets
+	std::vector<std::unique_ptr<SnesHdM7LiquidInfo>> M7Liquids;   // <m7LiquidBackground>
+	std::vector<std::unique_ptr<SnesHdM7EffectInfo>> M7Effects;   // <m7Effect>
+
+	// <gpu3d>on|off : moteur 3D sur la carte graphique (defaut : actif si disponible)
+	bool Gpu3D = true;
 
 	// <m7CameraDebug> : reperes de controle de la camera Mode 7 reconstruite
 	bool M7CameraDebug = false;
