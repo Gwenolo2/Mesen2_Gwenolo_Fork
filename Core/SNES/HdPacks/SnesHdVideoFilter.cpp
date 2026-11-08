@@ -969,6 +969,21 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		return 0xFF000000 | ((uint32_t)std::clamp(r, 0.0f, 255.0f) << 16) | ((uint32_t)std::clamp(g, 0.0f, 255.0f) << 8) | (uint32_t)std::clamp(b, 0.0f, 255.0f);
 	};
 
+	// <Ignore2DOverlays> : tiles (HUD) et ressources (m7img, m7tiles, background) restant nettes pendant la distorsion <2DOverlay>
+	std::vector<const SnesHdNoLightRule*> ign2dRules;
+	for(auto& ur : SnesHdPackLoader::ActivePack->Ignore2DOverlaysRules) if(ur->MatchesCondition()) ign2dRules.push_back(ur.get());
+	const bool ign2dOn = !ign2dRules.empty() || SnesHdPackLoader::ActivePack->HasIgnore2DResources;
+	auto ign2dTile = [&](const SnesHdPackTileInfo* t) -> bool {
+		if(ign2dRules.empty() || !t) return false;
+		for(const SnesHdNoLightRule* r : ign2dRules) {
+			if(t->MemoryHash != r->Hash) continue;
+			if(r->AnyPalette || t->PaletteHash == 0xFFFFFFFF || t->PaletteHash == r->Palette) return true;
+		}
+		return false;
+	};
+	static std::vector<uint8_t> s_ign2D;
+	if(ign2dOn) s_ign2D.assign((size_t)outWidth * hdHeight, 0);
+
 	// ====================================================================
 	// MODE 7 HD - PHASE 2 (parallele) : rendu d'une ligne SNES (= 'scale' lignes HD)
 	// Filtrage : trilineaire ('bilinear') ou anisotrope ('anisotropic', jusqu'a 8 echantillons).
@@ -976,6 +991,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// ====================================================================
 	auto renderMode7Line = [&](uint32_t y) {
 		const M7Line& L = m7Lines[y];
+		const bool m7LineIgn = ign2dOn && L.Img && L.Img->IsIgnored2D(); // <Ignore2DOverlays> : carte m7img entiere
 		const SnesHdM7LiquidInfo* lineLiq = lineLiquid[y];
 		const SnesHdM7Zone* lineZn = lineZone[y];
 		const SnesHdPixelData& refM7Data = L.Ref;
@@ -1436,6 +1452,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					}
 
 					out[outIdx + sx] = finalColor;
+					if(ign2dOn) s_ign2D[outIdx + sx] = m7LineIgn ? 1 : 0;
 					_zBuffer[outIdx + sx] = ((finalColor >> 24) == 0) ? 0 : pixelZ;
 
 					posFX += stepFX;
@@ -1509,6 +1526,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			// --- STEP 1.5: INDIVIDUAL MODE 7 TILES (<m7tiles>) WITH ANISOTROPIC FILTERING ---
 			auto renderMode7Tile = [&](const SnesHdPixelData& m7Data, uint8_t targetZ, bool useColorMath) {
 				SnesHdMode7Image* m7Img = SnesHdPackLoader::ActivePack->GetMode7Image(m7Data.M7TileHash);
+				const bool m7TileIgn = ign2dOn && m7Img && m7Img->IsIgnored2D(); // <Ignore2DOverlays> : tile m7tiles entiere
 
 				if(m7Img && m7Img->Bitmap && !m7Img->Bitmap->PixelData.empty()) {
 					const uint32_t* rawPixelData = m7Img->Bitmap->PixelData.data();
@@ -1655,6 +1673,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								uint32_t finalColor = (hdColorFromPng & 0xFF000000) | (outR << 16) | (outG << 8) | outB;
 
 								out[outBaseIdx + sx] = finalColor;
+								if(ign2dOn) s_ign2D[outBaseIdx + sx] = m7TileIgn ? 1 : 0;
 								_zBuffer[outBaseIdx + sx] = targetZ;
 							}
 						}
@@ -1893,6 +1912,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			SnesHdOverlayInfo& ov = *hdOverlays[i];
 			ov.Active = ov.MatchesCondition();
 			if(!ov.Active) continue; // effet fige tant que sa condition est fausse
+			if(ov.IsDistortion || ov.IsRays || ov.IsPlainScreen || ov.IsEllipse || ov.IsNoise) { ov.Time += 1.0f / 60.0f; continue; } // distorsion : appliquee plus tard sur l'image finale, pas de particules
 			ovActive[i] = 1;
 			ov.FieldWidthPx = (float)cropWidth * ov.FieldW;
 			ov.FieldHeightPx = (float)cropHeight * ov.FieldH;
@@ -3310,6 +3330,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		if(task.type == 0) {
 			auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[task.index];
 			if(!bgReady[task.index]) continue;
+			const bool bgIgn = ign2dOn && bg->IsIgnored2D(); // <Ignore2DOverlays> : fond entier
 
 			int bgWidth = bg->Bitmap->Width;
 			int bgHeight = bg->Bitmap->Height;
@@ -3372,6 +3393,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						if(bg->ZIndex >= _zBuffer[outIdx]) {
 							if(alpha == 255) {
 								out[outIdx] = pixelColor | 0xFF000000;
+								if(ign2dOn) s_ign2D[outIdx] = bgIgn ? 1 : 0;
 							} else {
 								uint32_t dstColor = out[outIdx];
 								uint32_t invAlpha = 255 - alpha;
@@ -3385,6 +3407,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								uint32_t out_AG = ((s_AG * alpha + d_AG * invAlpha) >> 8) & 0x00FF00FF;
 
 								out[outIdx] = out_RB | (out_AG << 8) | 0xFF000000;
+								if(ign2dOn) s_ign2D[outIdx] = bgIgn ? 1 : 0;
 							}
 							_zBuffer[outIdx] = bg->ZIndex;
 						}
@@ -3447,6 +3470,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								if(noReflOn) s_noRefl[pixelIndex] = noReflTile(item.Tile) ? 1 : 0;
 							}
 							if(maskOn && alpha >= 128) s_noLight[pixelIndex] = (item.oamIndex < 128 && (sprGroupRow[itemSprId(item)] < 0.0f || noLightTile(item.Tile))) ? 1 : 0;
+							if(ign2dOn) s_ign2D[pixelIndex] = (alpha >= 128 && ign2dTile(item.Tile)) ? 1 : 0;
 							uint32_t finalColor = hdColorFromPng;
 
 							if(alpha == 255) {
@@ -4240,7 +4264,236 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 
 	// ====================================================================
-	SnesHdPassTimer tmTail(_tailMs);
+	// <2DOverlay> type=distortion (chaleur) : deformation horizontale sinusoidale de l'image finale (avant la video)
+	// Parallele par lignes : chaque thread traite ses lignes avec son propre tampon.
+	{
+		const float twoPi = 6.2831853f;
+		const float degToRad = 3.14159265f / 180.0f;
+		auto lerpArgb = [](uint32_t c0, uint32_t c1, float f) -> uint32_t {
+			uint32_t res = 0xFF000000;
+			for(int sh = 0; sh <= 16; sh += 8) {
+				const float v0 = (float)((c0 >> sh) & 0xFF), v1 = (float)((c1 >> sh) & 0xFF);
+				res |= ((uint32_t)std::min(255.0f, v0 + (v1 - v0) * f + 0.5f)) << sh;
+			}
+			return res;
+		};
+		for(size_t i = 0; i < hdOverlays.size(); i++) {
+			const SnesHdOverlayInfo& ov = *hdOverlays[i];
+			if(!ov.IsDistortion || !ov.Active) continue;
+			const uint32_t zy0 = (uint32_t)std::clamp(ov.ZoneY0 * (float)hdHeight, 0.0f, (float)hdHeight);
+			const uint32_t zy1 = (uint32_t)std::clamp(ov.ZoneY1 * (float)hdHeight, 0.0f, (float)hdHeight);
+			const uint32_t zx0 = (uint32_t)std::clamp(ov.ZoneX0 * (float)outWidth, 0.0f, (float)outWidth);
+			const uint32_t zx1 = (uint32_t)std::clamp(ov.ZoneX1 * (float)outWidth, 0.0f, (float)outWidth);
+			if(zx0 >= zx1 || zy0 >= zy1) continue;
+			const float S = (float)scale; // pixels HD par pixel SNES
+			const int nT = std::max(1, std::min(_pool.Size(), (int)(zy1 - zy0)));
+			_pool.Run(nT, [&](int t) {
+				std::vector<uint32_t> rowCopy(outWidth);
+				for(uint32_t r = zy0 + (uint32_t)t; r < zy1; r += (uint32_t)nT) {
+					const float yS = (float)r / S; // position en lignes SNES
+					float dx = ov.DistAmp1 * std::sin(twoPi * (yS / ov.DistWave1 + ov.DistSpeed1 * ov.Time) + ov.DistPhase1 * degToRad)
+					         + ov.DistAmp2 * std::sin(twoPi * (yS / ov.DistWave2 + ov.DistSpeed2 * ov.Time) + ov.DistPhase2 * degToRad);
+					dx *= S * ov.Alpha; // Alpha = force globale de la distorsion
+					uint32_t* row = out + (size_t)r * outWidth;
+					const uint8_t* ign = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr; // <Ignore2DOverlays>
+					for(uint32_t x = zx0; x < zx1; x++) rowCopy[x] = row[x];
+					for(uint32_t x = zx0; x < zx1; x++) {
+						if(ign && ign[x]) continue; // <Ignore2DOverlays> : HUD reste net
+						float sx = std::clamp((float)x - dx, (float)zx0, (float)(zx1 - 1));
+						const uint32_t ix = (uint32_t)sx;
+						const uint32_t ix1 = std::min(ix + 1, zx1 - 1);
+						if(ign && (ign[ix] || ign[ix1])) continue; // <Ignore2DOverlays> : une source HUD ne doit pas se recopier en fantome
+						row[x] = lerpArgb(rowCopy[ix], rowCopy[ix1], sx - (float)ix);
+					}
+				}
+			});
+		}
+	}
+
+	// <2DOverlay> type=rays : faisceaux de lumiere additifs (animes), partant d'un point ; HUD (<Ignore2DOverlays>) respecte
+	// Intensite calculee sur une grille de noeuds espacee de kRayStep pixels HD, interpolee (bilineaire) pour chaque pixel.
+	{
+		const float radToDeg = 180.0f / 3.14159265f;
+		const int kRayStep = 4;
+		for(size_t i = 0; i < hdOverlays.size(); i++) {
+			const SnesHdOverlayInfo& ov = *hdOverlays[i];
+			if(!ov.IsRays || !ov.Active) continue;
+			const uint32_t zy0 = (uint32_t)std::clamp(ov.ZoneY0 * (float)hdHeight, 0.0f, (float)hdHeight);
+			const uint32_t zy1 = (uint32_t)std::clamp(ov.ZoneY1 * (float)hdHeight, 0.0f, (float)hdHeight);
+			const uint32_t zx0 = (uint32_t)std::clamp(ov.ZoneX0 * (float)outWidth, 0.0f, (float)outWidth);
+			const uint32_t zx1 = (uint32_t)std::clamp(ov.ZoneX1 * (float)outWidth, 0.0f, (float)outWidth);
+			if(zx0 >= zx1 || zy0 >= zy1) continue;
+			const float sx0 = ov.RayX * (float)outWidth;
+			const float sy0 = ov.RayY * (float)hdHeight;
+			const float diag = std::sqrt((float)outWidth * (float)outWidth + (float)hdHeight * (float)hdHeight);
+			const float len = ov.RayLength * diag;
+			const int N = ov.RayCount;
+			// angle et amplitude de chaque faisceau pour cette image (scintillement + oscillation)
+			std::vector<float> bAng(N), bAmp(N);
+			for(int k = 0; k < N; k++) {
+				const float f = (N > 1) ? (float)k / (float)(N - 1) : 0.5f;
+				const float base = (ov.RaySpread >= 360.0f) ? ov.RayAngle + 360.0f * (float)k / (float)N
+				                                             : ov.RayAngle + (f - 0.5f) * ov.RaySpread;
+				bAng[k] = base + ov.RayWobble * std::sin(6.2831853f * (ov.RaySpeed * 0.5f * ov.Time) + (float)k * 1.7f);
+				bAmp[k] = 0.6f + 0.4f * std::sin(6.2831853f * (ov.RaySpeed * ov.Time + (float)k * 0.37f));
+			}
+			const float invW = 1.0f / std::max(0.01f, ov.RayWidth);
+			const float cR = (float)((ov.RayColor >> 16) & 0xFF), cG = (float)((ov.RayColor >> 8) & 0xFF), cB = (float)(ov.RayColor & 0xFF);
+			const float gain = ov.Alpha;
+			// grille de noeuds : gx x gy, le noeud (i,j) est au pixel HD (zx0 + i*kRayStep, zy0 + j*kRayStep)
+			const int gx = (int)((zx1 - zx0) / kRayStep) + 2;
+			const int gy = (int)((zy1 - zy0) / kRayStep) + 2;
+			std::vector<float> node((size_t)gx * gy, 0.0f);
+			const int nN = std::max(1, std::min(_pool.Size(), gy));
+			_pool.Run(nN, [&](int tt) {
+				for(int j = tt; j < gy; j += nN) {
+					const float dy = (float)(zy0 + (uint32_t)(j * kRayStep)) + 0.5f - sy0;
+					for(int ii = 0; ii < gx; ii++) {
+						const float dx = (float)(zx0 + (uint32_t)(ii * kRayStep)) + 0.5f - sx0;
+						const float dist = std::sqrt(dx * dx + dy * dy);
+						float I = 0.0f;
+						if(dist < len) {
+							const float pa = std::atan2(dy, dx) * radToDeg;
+							for(int k = 0; k < N; k++) {
+								const float d = std::fmod(pa - bAng[k] + 540.0f, 360.0f) - 180.0f; // ecart angulaire dans [-180, 180[
+								const float q = d * invW;
+								if(q > 3.0f || q < -3.0f) continue;
+								I += bAmp[k] * std::exp(-q * q);
+							}
+							const float fade = 1.0f - dist / len;
+							I *= fade * fade * gain;
+						}
+						node[(size_t)j * gx + ii] = I;
+					}
+				}
+			});
+			// ajout additif pixel par pixel (interpolation bilineaire des noeuds)
+			const int nT = std::max(1, std::min(_pool.Size(), (int)(zy1 - zy0)));
+			_pool.Run(nT, [&](int tt) {
+				for(uint32_t r = zy0 + (uint32_t)tt; r < zy1; r += (uint32_t)nT) {
+					uint32_t* row = out + (size_t)r * outWidth;
+					const uint8_t* ign = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr;
+					const float fy = (float)(r - zy0) / (float)kRayStep;
+					const int jy = (int)fy;
+					const float ty = fy - (float)jy;
+					const float* n0 = &node[(size_t)jy * gx];
+					const float* n1 = &node[(size_t)(jy + 1) * gx];
+					for(uint32_t x = zx0; x < zx1; x++) {
+						if(ign && ign[x]) continue; // <Ignore2DOverlays> : HUD reste net
+						const float fx = (float)(x - zx0) / (float)kRayStep;
+						const int ix = (int)fx;
+						const float tx = fx - (float)ix;
+						const float I = (n0[ix] * (1.0f - tx) + n0[ix + 1] * tx) * (1.0f - ty) + (n1[ix] * (1.0f - tx) + n1[ix + 1] * tx) * ty;
+						if(I <= 0.0f) continue;
+						const uint32_t c = row[x];
+						const float rr = (float)((c >> 16) & 0xFF) + cR * I;
+						const float gg = (float)((c >> 8) & 0xFF) + cG * I;
+						const float bb = (float)(c & 0xFF) + cB * I;
+						row[x] = 0xFF000000 | ((uint32_t)std::min(255.0f, rr) << 16) | ((uint32_t)std::min(255.0f, gg) << 8) | (uint32_t)std::min(255.0f, bb);
+					}
+				}
+			});
+		}
+	}
+
+		// <2DOverlay> type=plainscreen / ellipse / shadows / clouds / fog : calques poses sur l'image finale (apres la distorsion ; <Ignore2DOverlays> respecte)
+	{
+		auto fxBlend = [](uint32_t d, uint32_t s, float a) -> uint32_t {
+			const float ia = 1.0f - a;
+			const float r = ((d >> 16) & 0xFF) * ia + ((s >> 16) & 0xFF) * a;
+			const float g = ((d >> 8) & 0xFF) * ia + ((s >> 8) & 0xFF) * a;
+			const float b = (d & 0xFF) * ia + (s & 0xFF) * a;
+			return 0xFF000000 | ((uint32_t)(r + 0.5f) << 16) | ((uint32_t)(g + 0.5f) << 8) | (uint32_t)(b + 0.5f);
+		};
+		auto fxHash = [](int x, int y, int seed) -> float {
+			uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u + (uint32_t)seed * 2246822519u;
+			h = (h ^ (h >> 13)) * 1274126177u;
+			h ^= h >> 16;
+			return (float)(h & 0xFFFF) / 65535.0f;
+		};
+		auto fxNoise = [&fxHash](float x, float y, int seed) -> float { // bruit de valeur lisse, 0..1
+			const int xi = (int)std::floor(x), yi = (int)std::floor(y);
+			const float fx = x - (float)xi, fy = y - (float)yi;
+			const float ux = fx * fx * (3.0f - 2.0f * fx), uy = fy * fy * (3.0f - 2.0f * fy);
+			const float a = fxHash(xi, yi, seed), b = fxHash(xi + 1, yi, seed);
+			const float c = fxHash(xi, yi + 1, seed), d = fxHash(xi + 1, yi + 1, seed);
+			const float top = a + (b - a) * ux, bot = c + (d - c) * ux;
+			return top + (bot - top) * uy;
+		};
+		const float S = (float)scale;
+		const float degToRad = 3.14159265f / 180.0f;
+		for(size_t i = 0; i < hdOverlays.size(); i++) {
+			const SnesHdOverlayInfo& ov = *hdOverlays[i];
+			if(!ov.Active || !(ov.IsPlainScreen || ov.IsEllipse || ov.IsNoise)) continue;
+			const uint32_t zy0 = (uint32_t)std::clamp(ov.ZoneY0 * (float)hdHeight, 0.0f, (float)hdHeight);
+			const uint32_t zy1 = (uint32_t)std::clamp(ov.ZoneY1 * (float)hdHeight, 0.0f, (float)hdHeight);
+			const uint32_t zx0 = (uint32_t)std::clamp(ov.ZoneX0 * (float)outWidth, 0.0f, (float)outWidth);
+			const uint32_t zx1 = (uint32_t)std::clamp(ov.ZoneX1 * (float)outWidth, 0.0f, (float)outWidth);
+			if(zx0 >= zx1 || zy0 >= zy1) continue;
+			const float a = ov.Alpha;
+			const uint32_t col = ov.FxColor & 0xFFFFFF;
+			const int nT = std::max(1, std::min(_pool.Size(), (int)(zy1 - zy0)));
+			if(ov.IsPlainScreen) {
+				_pool.Run(nT, [&](int tt) {
+					for(uint32_t r = zy0 + (uint32_t)tt; r < zy1; r += (uint32_t)nT) {
+						uint32_t* row = out + (size_t)r * outWidth;
+						const uint8_t* ign = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr;
+						for(uint32_t x = zx0; x < zx1; x++) {
+							if(ign && ign[x]) continue;
+							row[x] = fxBlend(row[x], col, a);
+						}
+					}
+				});
+			} else if(ov.IsEllipse) {
+				const float cx = ov.FxEllipseX * S, cy = ov.FxEllipseY * S;
+				const float rx = std::max(0.5f, ov.FxRadiusX * S), ry = std::max(0.5f, ov.FxRadiusY * S);
+				const bool neg = ov.FxNegative;
+				_pool.Run(nT, [&](int tt) {
+					for(uint32_t r = zy0 + (uint32_t)tt; r < zy1; r += (uint32_t)nT) {
+						uint32_t* row = out + (size_t)r * outWidth;
+						const uint8_t* ign = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr;
+						const float dy = ((float)r + 0.5f - cy) / ry;
+						for(uint32_t x = zx0; x < zx1; x++) {
+							if(ign && ign[x]) continue;
+							const float dx = ((float)x + 0.5f - cx) / rx;
+							const bool inside = dx * dx + dy * dy < 1.0f;
+							// normal : l'ellipse est teintee ; negatif : tout sauf l'ellipse est couvert (fenetre de jeu)
+							if(inside != neg) row[x] = fxBlend(row[x], col, a);
+						}
+					}
+				});
+			} else {
+				// ombres / nuages / brouillard : bruit a deux octaves qui derive (direction, vitesse), seuille par la couverture
+				const float size = std::max(4.0f, ov.FxSize);
+				const float dirRad = ov.FxDirection * degToRad;
+				const float ox = std::cos(dirRad) * ov.FxSpeed * ov.Time, oy = std::sin(dirRad) * ov.FxSpeed * ov.Time; // pixels SNES
+				const float thr = 1.0f - std::clamp(ov.FxCoverage, 0.0f, 1.0f);
+				const int seed = ov.FxSeed, kind = ov.NoiseKind;
+				_pool.Run(nT, [&](int tt) {
+					for(uint32_t r = zy0 + (uint32_t)tt; r < zy1; r += (uint32_t)nT) {
+						uint32_t* row = out + (size_t)r * outWidth;
+						const uint8_t* ign = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr;
+						const float py = ((float)r + 0.5f) / S - oy;
+						for(uint32_t x = zx0; x < zx1; x++) {
+							if(ign && ign[x]) continue;
+							const float px = ((float)x + 0.5f) / S - ox;
+							const float u = px / size, v = py / size;
+							const float n = 0.65f * fxNoise(u, v, seed) + 0.35f * fxNoise(u * 2.03f + 17.0f, v * 2.03f + 9.0f, seed + 1);
+							float m;
+							if(kind == 2) m = std::clamp((n - (thr - 0.1f)) / 0.4f, 0.0f, 1.0f) * 0.85f; // brouillard : bords doux
+							else if(kind == 1) m = std::clamp((n - thr) / 0.08f, 0.0f, 1.0f);            // nuages : bords nets
+							else m = std::clamp((n - thr) / 0.12f, 0.0f, 1.0f);                           // ombres
+							m = m * m * (3.0f - 2.0f * m);
+							if(m <= 0.0f) continue;
+							row[x] = fxBlend(row[x], col, a * m);
+						}
+					}
+				});
+			}
+		}
+	}
+
+		SnesHdPassTimer tmTail(_tailMs);
 	// ÉTAPE 4 : GESTION DES VIDÉOS (pl_mpeg)
 	// ====================================================================
 	if(SnesHdPackLoader::ActivePack != nullptr && out != nullptr) {

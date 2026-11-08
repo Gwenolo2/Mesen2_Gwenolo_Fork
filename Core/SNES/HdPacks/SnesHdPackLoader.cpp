@@ -392,6 +392,10 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 	std::vector<char> blockKinds;
 	std::vector<std::vector<SnesHdPackCondition*>> frontBlockStack; // conditions de chaque bloc <FrontOf3D>{ ouvert
 	std::vector<std::vector<SnesHdPackCondition*>> noReflBlockStack; // conditions de chaque bloc <NoLiquidReflect>{ ouvert ('N')
+	std::vector<std::vector<SnesHdPackCondition*>> ign2dBlockStack; // conditions de chaque bloc <Ignore2DOverlays>{ ouvert ('I')
+	std::vector<int> ign2dBlockId, ign2dBlockCount;                  // numero du bloc, tiles ajoutees
+	int ign2dBlockNext = 0;
+	std::unordered_set<std::string> ign2dBlockSeen;                  // bloc|hash|palette deja ajoutes
 	std::vector<int> noReflBlockCount;
 	std::unordered_set<std::string> noReflSeen;
 	auto isNoReflTag = [](const std::string& line) -> size_t { // longueur de la balise, 0 si absente (accepte la faute "refelct")
@@ -737,6 +741,13 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <NoLiquidReflect>{ } : " + std::to_string(noReflBlockCount.back()) + " tile(s) sans reflet");
 					noReflBlockCount.pop_back();
 				}
+			} else if(!blockKinds.empty() && blockKinds.back() == 'I') {
+				blockKinds.pop_back();
+				if(!ign2dBlockStack.empty()) ign2dBlockStack.pop_back();
+				if(!ign2dBlockCount.empty()) {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <Ignore2DOverlays>{ } : " + std::to_string(ign2dBlockCount.back()) + " tile(s) nettes pendant la distorsion");
+					ign2dBlockCount.pop_back(); ign2dBlockId.pop_back();
+				}
 			} else if(!blockKinds.empty() && blockKinds.back() == 'R') {
 				blockKinds.pop_back();
 				if(!frontBlockStack.empty()) frontBlockStack.pop_back();
@@ -786,7 +797,19 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			continue;
 		}
 
-		// DÉBUT DE BLOC [conditions]<NoLiquidReflect>{ ... } : les <tile...> du bloc ne se refletent pas dans le liquide
+		// DÉBUT DE BLOC [conditions]<Ignore2DOverlays>{ ... } : chaque <tile...> du bloc reste net pendant la distorsion <2DOverlay>
+		if(StringUtilities::ToLower(lineContent.substr(0, 18)) == "<ignore2doverlays>" && StringUtilities::Trim(lineContent.substr(18)).substr(0, 1) == "{") {
+			std::vector<SnesHdPackCondition*> blockConds = currentConditions;
+			// imbrication : herite des conditions du <FrontOf3D> et du <Ignore2DOverlays> englobants
+			if(!frontBlockStack.empty()) blockConds.insert(blockConds.begin(), frontBlockStack.back().begin(), frontBlockStack.back().end());
+			if(!ign2dBlockStack.empty()) blockConds.insert(blockConds.begin(), ign2dBlockStack.back().begin(), ign2dBlockStack.back().end());
+			ign2dBlockStack.push_back(blockConds);
+			ign2dBlockId.push_back(ign2dBlockNext++); ign2dBlockCount.push_back(0);
+			blockKinds.push_back('I');
+			continue;
+		}
+
+// DÉBUT DE BLOC [conditions]<NoLiquidReflect>{ ... } : les <tile...> du bloc ne se refletent pas dans le liquide
 		if(size_t nl = isNoReflTag(lineContent); nl && StringUtilities::Trim(lineContent.substr(nl)).substr(0, 1) == "{") {
 			std::vector<SnesHdPackCondition*> blockConds = currentConditions;
 			if(!noReflBlockStack.empty()) blockConds.insert(blockConds.begin(), noReflBlockStack.back().begin(), noReflBlockStack.back().end());
@@ -857,6 +880,27 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			}
 
 			// <NoLiquidReflect>{ ... } : la tile (hash, palette) ne se reflete pas (Lakitu en l'air, piece qui s'envole...)
+			// <Ignore2DOverlays>{ ... } : la tile (hash, palette) reste nette pendant la distorsion (HUD)
+			if(!ign2dBlockStack.empty() && !tokens.empty()) {
+				auto addIgn2d = [&](const std::string& palTok) {
+					auto rule = std::make_unique<SnesHdNoLightRule>();
+					try { rule->Hash = std::stoull(tokens[0], nullptr, 16); } catch(...) { return; }
+					std::string p = StringUtilities::ToLower(StringUtilities::Trim(palTok));
+					if(!(p.empty() || p == "*" || p == "all")) {
+						try { rule->Palette = (uint32_t)std::stoul(p); rule->AnyPalette = false; } catch(...) {}
+					}
+					const std::string key = std::to_string(ign2dBlockId.back()) + "|" + StringUtilities::ToLower(tokens[0]) + "|" + (rule->AnyPalette ? std::string("*") : std::to_string(rule->Palette));
+					if(!ign2dBlockSeen.insert(key).second) return;
+					ign2dBlockCount.back()++;
+					rule->Conditions = ign2dBlockStack.back();
+					outData->Ignore2DOverlaysRules.push_back(std::move(rule));
+				};
+				addIgn2d(tokens.size() >= 2 ? tokens[1] : std::string("*"));
+				for(const auto& fbState : fallbackStack) addIgn2d(fbState.Palette);
+				// reference simple (hash seul) : consommee ici si aucun autre bloc ne la prend
+				if(tokens.size() < 3 && frontBlockStack.empty() && noReflBlockStack.empty() && spriteLightBlockStack.empty()) continue;
+			}
+
 			if(!noReflBlockStack.empty() && !tokens.empty()) {
 				auto addNoRefl = [&](const std::string& palTok) {
 					auto rule = std::make_unique<SnesHdNoLightRule>();
@@ -1794,6 +1838,29 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			else MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <NoLiquidReflect> : hash invalide.");
 		}
 
+		/// PARSING <Ignore2DOverlays> : tile HD qui reste NETTE pendant la distorsion <2DOverlay> (HUD qui tremble sinon)
+		// [conditions]<Ignore2DOverlays>HASH_TILE[,palette|*]
+		else if(StringUtilities::ToLower(lineContent.substr(0, 18)) == "<ignore2doverlays>") {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(18), ',');
+			auto rule = std::make_unique<SnesHdNoLightRule>();
+			rule->Conditions = currentConditions;
+			std::string h = tokens.empty() ? std::string("") : StringUtilities::ToLower(StringUtilities::Trim(tokens[0]));
+			bool ok = true;
+			try { rule->Hash = std::stoull(h, nullptr, 16); } catch(...) { ok = false; }
+			if(tokens.size() >= 2) {
+				std::string p = StringUtilities::ToLower(StringUtilities::Trim(tokens[1]));
+				if(!(p.empty() || p == "*" || p == "all")) {
+					try { rule->Palette = (uint32_t)std::stoul(p); rule->AnyPalette = false; } catch(...) {}
+				}
+			}
+			if(ok) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <Ignore2DOverlays> tile " + h + (rule->AnyPalette ? std::string(", toutes palettes") : ", palette " + std::to_string(rule->Palette)));
+				outData->Ignore2DOverlaysRules.push_back(std::move(rule));
+			} else {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <Ignore2DOverlays> : hash invalide.");
+			}
+		}
+
 		/// PARSING <FrontOf3D> : tiles / sprites qui restent DEVANT le relief, les panneaux, les modeles 3D et les effets
 		// [conditions]<FrontOf3D>hud                     -> tous les sprites hors du sol (HUD, objets dans le ciel)
 		// [conditions]<FrontOf3D>*                       -> tous les sprites (karts compris)
@@ -2397,8 +2464,64 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				};
 
 				std::string type = StringUtilities::ToLower(str("type"));
-				if(!type.empty() && type != "particles") {
-					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> : type '" + type + "' pas encore gere (seul 'particles' l'est).");
+				ov->IsDistortion = (type == "distortion");
+				ov->IsRays = (type == "rays");
+				ov->IsPlainScreen = (type == "plainscreen");
+				ov->IsEllipse = (type == "ellipse");
+				ov->IsNoise = (type == "shadows" || type == "clouds" || type == "fog");
+				ov->NoiseKind = (type == "clouds") ? 1 : ((type == "fog") ? 2 : 0);
+				if(!type.empty() && type != "particles" && !ov->IsDistortion && !ov->IsRays && !ov->IsPlainScreen && !ov->IsEllipse && !ov->IsNoise) {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> : type '" + type + "' pas encore gere (particles, distortion, rays, plainscreen, ellipse, shadows, clouds, fog).");
+				}
+				if(ov->IsDistortion) {
+					// distorsion : parametres sinusoidaux (amplitude en px SNES, longueur d'onde en lignes SNES, vitesse en cycles/s, phase en degres)
+					ov->DistAmp1 = num("amp1", 0.0f); ov->DistWave1 = std::max(1.0f, num("wave1", 32.0f));
+					ov->DistSpeed1 = num("speed1", 0.5f); ov->DistPhase1 = num("phase1", 0.0f);
+					ov->DistAmp2 = num("amp2", 0.0f); ov->DistWave2 = std::max(1.0f, num("wave2", 17.0f));
+					ov->DistSpeed2 = num("speed2", 0.3f); ov->DistPhase2 = num("phase2", 0.0f);
+					ov->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f); ov->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
+					ov->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f); ov->ZoneY1 = std::clamp(num("ymax", 1.0f), 0.0f, 1.0f);
+				}
+
+				if(ov->IsRays) {
+					ov->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f); ov->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
+					ov->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f); ov->ZoneY1 = std::clamp(num("ymax", 1.0f), 0.0f, 1.0f);
+					ov->RayX = std::clamp(num("rayx", 0.5f), 0.0f, 1.0f); ov->RayY = std::clamp(num("rayy", 0.0f), 0.0f, 1.0f);
+					ov->RayCount = std::clamp((int)num("raycount", 8.0f), 1, 64);
+					ov->RayAngle = num("rayangle", 90.0f); ov->RaySpread = std::clamp(num("rayspread", 60.0f), 0.0f, 360.0f);
+					ov->RayWidth = std::max(0.1f, num("raywidth", 4.0f)); ov->RayLength = std::max(0.01f, num("raylength", 0.8f));
+					ov->RaySpeed = num("rayspeed", 0.2f); ov->RayWobble = num("raywobble", 3.0f);
+					ov->RayColor = color("raycolor", 0xFFE8A0);
+				}
+
+				auto fxColor = [&](const char* k, uint32_t def) -> uint32_t {
+					std::string v = StringUtilities::ToLower(StringUtilities::Trim(str(k)));
+					if(v.empty()) return def;
+					if(v == "black" || v == "noir") return 0x000000;
+					if(v == "white" || v == "blanc") return 0xFFFFFF;
+					if(v == "yellow" || v == "jaune") return 0xFFFF00;
+					if(v == "green" || v == "vert") return 0x00FF00;
+					if(v == "bleue" || v == "bleu" || v == "blue") return 0x0000FF;
+					if(v == "red" || v == "rouge") return 0xFF0000;
+					return color(k, def);
+				};
+				if(ov->IsPlainScreen || ov->IsEllipse || ov->IsNoise) {
+					// calques : zone (fractions de l'image) et couleur (hexa ou alias black/white/yellow/green/bleue/red)
+					ov->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f); ov->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
+					ov->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f); ov->ZoneY1 = std::clamp(num("ymax", 1.0f), 0.0f, 1.0f);
+					const uint32_t defCol = ov->IsEllipse ? (boolean("negative", false) ? 0x000000 : 0xFFFFFF) : (type == "fog" ? 0xA8B8C8 : (type == "clouds" ? 0xFFFFFF : 0x000000));
+					ov->FxColor = fxColor("color", defCol);
+				}
+				if(ov->IsEllipse) {
+					ov->FxEllipseX = num("x", 128.0f); ov->FxEllipseY = num("y", 112.0f);
+					ov->FxNegative = boolean("negative", false);
+					ov->FxRadiusX = std::max(0.5f, num("radiusx", 32.0f)); ov->FxRadiusY = std::max(0.5f, num("radiusy", 16.0f));
+				}
+				if(ov->IsNoise) {
+					ov->FxSize = std::max(4.0f, num("size", 48.0f));
+					ov->FxSpeed = num("speed", 8.0f); ov->FxDirection = num("direction", 0.0f);
+					ov->FxCoverage = std::clamp(num("coverage", 0.5f), 0.0f, 1.0f);
+					ov->FxSeed = (int)num("seed", 1.0f);
 				}
 
 				ov->ZIndex = (int)num("z", num("zindex", 95.0f));
@@ -2593,6 +2716,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				bg->TileX = tileX;
 				bg->TileY = tileY;
 				bg->Conditions = currentConditions;
+				if(!ign2dBlockStack.empty()) { bg->Ignore2D = true; bg->Ignore2DConditions = ign2dBlockStack.back(); outData->HasIgnore2DResources = true; }
 				outData->Backgrounds.push_back(std::move(bg));
 			}
 		}// END BACKGROUND TAG PARSING 
@@ -2651,6 +2775,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 			// CRÉATION DE L'OBJET MODE 7
 			auto m7Map = std::make_unique<SnesHdMode7Image>();
+			if(!ign2dBlockStack.empty()) { m7Map->Ignore2D = true; m7Map->Ignore2DConditions = ign2dBlockStack.back(); outData->HasIgnore2DResources = true; }
 			m7Map->Bitmap = targetBitmap;
 			m7Map->Scale = m7Scale;
 			m7Map->IgnoreColorMath = ignoreColorMath;
@@ -2715,6 +2840,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 				// --- CRÉATION DE L'OBJET MODE 7 POUR LA TUILE ---
 				auto m7Map = std::make_unique<SnesHdMode7Image>();
+			if(!ign2dBlockStack.empty()) { m7Map->Ignore2D = true; m7Map->Ignore2DConditions = ign2dBlockStack.back(); outData->HasIgnore2DResources = true; }
 				m7Map->Bitmap = targetBitmap;
 				m7Map->Scale = m7Scale;
 

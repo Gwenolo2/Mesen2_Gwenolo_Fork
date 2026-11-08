@@ -452,6 +452,15 @@ public:
 //----------------------------------------------------------
 struct SnesHdBackgroundInfo
 {
+	// <Ignore2DOverlays>{ } : toute la ressource reste nette pendant la distorsion <2DOverlay> (si les conditions du bloc sont vraies)
+	bool Ignore2D = false;
+	std::vector<SnesHdPackCondition*> Ignore2DConditions;
+	bool IsIgnored2D()
+	{
+		if(!Ignore2D) return false;
+		for(auto* c : Ignore2DConditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
 
 	enum class ScrollOperator
 	{
@@ -509,6 +518,15 @@ enum class Mode7FilterMode
 
 struct SnesHdMode7Image
 {
+	// <Ignore2DOverlays>{ } : toute la ressource reste nette pendant la distorsion <2DOverlay> (si les conditions du bloc sont vraies)
+	bool Ignore2D = false;
+	std::vector<SnesHdPackCondition*> Ignore2DConditions;
+	bool IsIgnored2D()
+	{
+		if(!Ignore2D) return false;
+		for(auto* c : Ignore2DConditions) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	}
 	SnesHdPackBitmapInfo* Bitmap = nullptr;
 	uint32_t Scale = 1;
 
@@ -688,6 +706,32 @@ struct SnesHdOverlayInfo
 	uint32_t ColorStart = 0xFFFFFF, ColorEnd = 0xFFFFFF; // teinte RGB (multiplie la texture)
 	float DotSize = 2.0f;                    // diametre du point doux (pixels SNES) si pas de texture
 	bool Prewarm = true;                     // remplit l'ecran des la 1re apparition
+
+	// Distorsion d'image (type=distortion) : deformation horizontale sinusoidale de l'image finale (chaleur)
+	bool IsDistortion = false;
+	float DistAmp1 = 0, DistWave1 = 32, DistSpeed1 = 0.5f, DistPhase1 = 0;  // amplitude (px SNES), longueur d'onde (lignes SNES), vitesse (cycles / s), phase (degres)
+	float DistAmp2 = 0, DistWave2 = 17, DistSpeed2 = 0.3f, DistPhase2 = 0;  // 2e sinusoide, combinee a la 1re
+	float ZoneX0 = 0, ZoneX1 = 1, ZoneY0 = 0, ZoneY1 = 1;
+
+	// Rayons de lumiere (type=rays) : faisceaux additifs partant d'un point, animes
+	bool IsRays = false;
+	float RayX = 0.5f, RayY = 0.0f;        // source (fractions de l'image)
+	int RayCount = 8;                      // nombre de faisceaux
+	float RayAngle = 90.0f, RaySpread = 60.0f; // direction centrale et etalement (degres ; 360 = radial)
+	float RayWidth = 4.0f, RayLength = 0.8f;   // demi-largeur (degres) et longueur (fraction de la diagonale)
+	float RaySpeed = 0.2f, RayWobble = 3.0f;   // scintillement (cycles/s) et oscillation angulaire (degres)
+	uint32_t RayColor = 0xFFE8A0;
+	// Calques plein ecran et nuages (types plainscreen, ellipse, shadows, clouds, fog)
+	bool IsPlainScreen = false, IsEllipse = false, IsNoise = false;
+	int NoiseKind = 0;                  // IsNoise : 0 = ombres, 1 = nuages, 2 = brouillard
+	uint32_t FxColor = 0x000000;        // couleur RGB du calque
+	float FxEllipseX = 128.0f, FxEllipseY = 112.0f;   // centre de l'ellipse (pixels SNES)
+	float FxRadiusX = 32.0f, FxRadiusY = 16.0f;       // rayons de l'ellipse (pixels SNES)
+	float FxSize = 48.0f;               // taille des motifs de bruit (pixels SNES)
+	float FxSpeed = 8.0f, FxDirection = 0.0f; // vitesse (pixels SNES / s) et direction (degres, 0 = droite, 90 = bas)
+	float FxCoverage = 0.5f;            // part de l'image couverte (0 = rien, 1 = tout)
+	int FxSeed = 1;
+	bool FxNegative = false;            // ellipse negative : tout l'ecran est couvert sauf l'ellipse (fenetre de jeu)                   // zone touchee (fractions de l'image)
 
 	// Etat d'execution (filtre HD)
 	std::vector<SnesHdParticle> Particles;
@@ -1670,6 +1714,8 @@ public:
 	std::vector<std::unique_ptr<SnesHdSpriteLightInfo>> SpriteLights; // <SpriteLight>
 	std::vector<std::unique_ptr<SnesHdNoLightRule>> NoReflectRules; // <NoLiquidReflect> : tiles sans reflet dans l'eau / la lave
 	std::vector<std::unique_ptr<SnesHdNoLightRule>> FrontOf3DRules; // <FrontOf3D> : devant relief / panneaux / modeles / effets
+	std::vector<std::unique_ptr<SnesHdNoLightRule>> Ignore2DOverlaysRules; // <Ignore2DOverlays> : tiles nettes pendant la distorsion <2DOverlay> (HUD)
+	bool HasIgnore2DResources = false; // une ressource (background, m7img, m7tiles) est dans un bloc <Ignore2DOverlays>
 	std::vector<std::unique_ptr<SnesHdM7MaterialInfo>> M7Materials; // <m7material>
 	std::vector<std::unique_ptr<SnesHdM7LiquidInfo>> M7Liquids;   // <m7LiquidBackground>
 	std::vector<std::unique_ptr<SnesHdM7EffectInfo>> M7Effects;   // <m7Effect>

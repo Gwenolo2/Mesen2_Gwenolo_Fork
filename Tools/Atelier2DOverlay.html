@@ -64,7 +64,7 @@ fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 7px }
 
 <header>
   <h1>Atelier <span>2DOverlay</span></h1>
-  <p>Réglez un effet de particules, voyez-le sur un écran SNES 256 × 224, puis copiez le JSON dans le dossier <code>effets\</code> de votre pack. Même moteur que le filtre HD de Mesen.</p>
+  <p>Réglez un effet (particules, chaleur ou rayons de lumière), voyez-le sur un écran SNES 256 × 224, puis copiez le JSON dans le dossier <code>effets\</code> de votre pack. Même moteur que le filtre HD de Mesen.</p>
 </header>
 
 <div class="app">
@@ -82,7 +82,7 @@ fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 7px }
     </div>
     <div class="card out">
       <h2>Ligne pour snes_hires.txt</h2>
-      <label class="inline" for="fname">Nom du fichier <input id="fname" type="text" value="mon_effet" size="16"> .json</label>
+      <label class="inline" for="fname">Nom du fichier <input id="fname" type="text" value="neige" size="16"> .json</label>
       <div class="tagline" id="tag"></div>
       <h2 style="margin-top:6px">JSON</h2>
       <pre class="code" id="json"></pre>
@@ -96,18 +96,48 @@ fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 7px }
 
   <section class="right">
     <div class="card">
+      <h2>Type d'effet</h2>
+      <label class="inline" for="etype">Effet
+        <select id="etype"><option value="particles">Particules</option><option value="distortion">Chaleur (distorsion)</option><option value="rays">Rayons de lumière</option><option value="plainscreen">Écran coloré (plainscreen)</option><option value="ellipse">Ellipse / fenêtre</option><option value="shadows">Ombres de nuages</option><option value="clouds">Nuages</option><option value="fog">Brouillard (nappes)</option></select></label>
+      <p class="hint">Chaque type produit son propre JSON (<code>"type"</code>) et son aperçu. Les réglages de « Balise et ancrage » valent pour tous les types.</p>
+    </div>
+    <div class="card">
       <h2>Préréglages</h2>
       <div class="presets" id="presets"></div>
+      <div class="bar" style="margin-top:10px">
+        <input id="pname" type="text" placeholder="Nom du préréglage" size="18" aria-label="Nom du préréglage">
+        <button id="addPreset" type="button">Ajouter le réglage actuel</button>
+        <button id="delPreset" type="button">Supprimer le perso</button>
+      </div>
+      <div class="bar" style="margin-top:8px">
+        <button id="savePresets" type="button">Save Presets</button>
+        <button id="loadPresets" type="button">Load Presets</button>
+        <input id="presetFile" type="file" accept=".json,application/json" hidden>
+        <span class="toast" id="presetMsg" role="status"></span>
+      </div>
+      <p class="hint">« Save Presets » exporte vos préréglages personnels dans un fichier .json ; « Load Presets » les recharge (les préréglages intégrés sont déjà dans l'atelier).</p>
     </div>
-    <div class="card"><h2>Naissance</h2><fieldset id="g-spawn"></fieldset></div>
-    <div class="card"><h2>Mouvement</h2><fieldset id="g-move"></fieldset>
+    <div class="card" data-kind="particles"><h2>Naissance</h2><fieldset id="g-spawn"></fieldset></div>
+    <div class="card" data-kind="particles"><h2>Mouvement</h2><fieldset id="g-move"></fieldset>
       <p class="hint">Angles : 0 = droite, 90 = bas, 180 = gauche, 270 = haut.</p></div>
-    <div class="card"><h2>Apparence</h2><fieldset id="g-look"></fieldset></div>
+    <div class="card" data-kind="particles"><h2>Apparence</h2><fieldset id="g-look"></fieldset></div>
+    <div class="card" data-kind="distortion"><h2>Chaleur : deux ondes</h2><fieldset id="g-heat"></fieldset>
+      <p class="hint">Amplitude en px SNES, longueur d'onde en lignes SNES, vitesse en cycles/s, phase en degrés. Les deux ondes s'ajoutent.</p></div>
+    <div class="card" data-kind="distortion rays plainscreen ellipse shadows clouds fog"><h2>Zone d'effet</h2><fieldset id="g-zone"></fieldset>
+      <p class="hint">Fractions de l'écran : X de 0 (gauche) à 1 (droite), Y de 0 (haut) à 1 (bas).</p></div>
+    <div class="card" data-kind="rays"><h2>Rayons de lumière</h2><fieldset id="g-ray"></fieldset>
+      <p class="hint">L'origine (rayx, rayy) est une fraction de l'écran : 0,0 = coin haut-gauche. Angles : 0 = droite, 90 = bas. Pour un rayon oblique dans un coin, mettez l'origine à 0 / 0 et un angle entre 0 et 90 (ex. 45).</p></div>
+    <div class="card" data-kind="plainscreen ellipse shadows clouds fog"><h2>Couleur</h2><fieldset id="g-fx"></fieldset>
+      <p class="hint">Couleur du calque (hexa ou sélecteur). L'opacité est l'« Alpha global » de la carte Balise.</p></div>
+    <div class="card" data-kind="ellipse"><h2>Ellipse</h2><fieldset id="g-ell"></fieldset>
+      <p class="hint">Coordonnées SNES. Avec « Négatif », tout l'écran est couvert sauf l'ellipse, qui montre la fenêtre de jeu.</p></div>
+    <div class="card" data-kind="shadows clouds fog"><h2>Ombres, nuages, brouillard</h2><fieldset id="g-noise"></fieldset>
+      <p class="hint">Direction : 0 = droite, 90 = bas. Couverture : 0 = rien, 1 = tout l'écran.</p></div>
     <div class="card"><h2>Balise et ancrage</h2><fieldset id="g-tag"></fieldset>
       <p class="hint">« Défilement simulé » imite la couche d'ancrage qui défile, pour voir l'effet de SpeedX / SpeedY. Il n'est pas exporté.</p></div>
     <div class="card out">
       <h2>Importer un JSON</h2>
-      <textarea id="imp" rows="5" placeholder='Collez ici un JSON existant (ex. neige.json)'></textarea>
+      <textarea id="imp" rows="5" placeholder='Collez ici un JSON existant (ex. neige.json, chaleur.json, ray.json)'></textarea>
       <div class="bar"><button id="doImp" type="button">Charger dans l'atelier</button><span class="toast" id="impMsg" role="status"></span></div>
     </div>
   </section>
@@ -153,6 +183,39 @@ const P = [
   ['look','colorStart','Couleur début','color','#FFFFFF'],
   ['look','colorEnd','Couleur fin','color','#FFFFFF'],
   ['look','blend','Mélange','blend','normal'],
+  ['heat','amp1','Amplitude 1 (px SNES)',0,8,0.1,0],
+  ['heat','wave1','Longueur d\'onde 1 (lignes)',1,128,1,32],
+  ['heat','speed1','Vitesse 1 (cycles/s)',-4,4,0.05,0.5],
+  ['heat','phase1','Phase 1 (°)',0,360,1,0],
+  ['heat','amp2','Amplitude 2 (px SNES)',0,8,0.1,0],
+  ['heat','wave2','Longueur d\'onde 2 (lignes)',1,128,1,17],
+  ['heat','speed2','Vitesse 2 (cycles/s)',-4,4,0.05,0.3],
+  ['heat','phase2','Phase 2 (°)',0,360,1,0],
+  ['zone','xmin','X min (0–1)',0,1,0.01,0],
+  ['zone','xmax','X max (0–1)',0,1,0.01,1],
+  ['zone','ymin','Y min (0–1)',0,1,0.01,0],
+  ['zone','ymax','Y max (0–1)',0,1,0.01,1],
+  ['ray','rayx','Origine X (0–1)',0,1,0.01,0.5],
+  ['ray','rayy','Origine Y (0–1)',0,1,0.01,0],
+  ['ray','raycount','Nombre de rayons',1,64,1,8],
+  ['ray','rayangle','Angle central (°)',0,360,1,90],
+  ['ray','rayspread','Écart entre rayons (°)',0,360,1,60],
+  ['ray','raywidth','Largeur angulaire (°)',0.1,30,0.1,4],
+  ['ray','raylength','Longueur (× diagonale)',0.01,2,0.01,0.8],
+  ['ray','rayspeed','Vitesse scintillement',-2,2,0.01,0.2],
+  ['ray','raywobble','Oscillation (°)',0,60,0.5,3],
+  ['ray','raycolor','Couleur des rayons','color','#FFE8A0'],
+  ['fx','fxColor','Couleur','color','#000000'],
+  ['ell','ex','Centre X (px SNES)',0,256,1,128],
+  ['ell','ey','Centre Y (px SNES)',0,224,1,112],
+  ['ell','erx','Rayon X (px SNES)',0.5,256,1,40],
+  ['ell','ery','Rayon Y (px SNES)',0.5,224,1,30],
+  ['ell','eneg','Négatif (écran noir, fenêtre)','bool',false],
+  ['noise','nsize','Taille des motifs (px SNES)',4,256,1,64],
+  ['noise','nspeed','Vitesse (px SNES / s)',-200,200,1,10],
+  ['noise','ndir','Direction (°)',0,360,1,20],
+  ['noise','ncov','Couverture (0–1)',0,1,0.01,0.45],
+  ['noise','nseed','Graine',1,99,1,1],
   ['tag','Z','Z-index',0,255,1,95],
   ['tag','Layer','Couche d\'ancrage',0,4,1,1],
   ['tag','SpeedX','SpeedX',-4,4,0.05,1],
@@ -166,10 +229,18 @@ const P = [
 const DEF = {}, META = {};
 for (const d of P) { const [g,k,label,a] = d; META[k] = d;
   DEF[k] = (a==='bool'||a==='tex'||a==='color'||a==='blend') ? d[4] : d[6]; }
+DEF.type = 'particles';
+// noms JSON (C++) des clés dont l'identifiant de l'atelier diffère
+const JSON_ALIAS = { fxColor:'color', ex:'x', ey:'y', erx:'radiusx', ery:'radiusy', eneg:'negative', nsize:'size', nspeed:'speed', ndir:'direction', ncov:'coverage', nseed:'seed' };
 const LOWER = {}; for (const k in DEF) LOWER[k.toLowerCase()] = k; LOWER['zindex'] = 'Z';
+for (const k in JSON_ALIAS) LOWER[JSON_ALIAS[k].toLowerCase()] = k;
 const TAGKEYS = ['Z','Layer','SpeedX','SpeedY','Alpha','FieldW','FieldH','scrollX','scrollY'];
+// groupes exportés par type d'effet (les autres groupes sont masqués)
+const EXPORT_GROUPS = { particles: ['spawn','move','look'], distortion: ['heat','zone'], rays: ['ray','zone'],
+  plainscreen: ['fx','zone'], ellipse: ['fx','ell','zone'], shadows: ['fx','noise','zone'], clouds: ['fx','noise','zone'], fog: ['fx','noise','zone'] };
 let S = { ...DEF };
 let texImg = null; // {w,h,px:Uint32Array ARGB, name}
+let activePreset = null; // 'Neige' ou 'u:NomPerso'
 
 const PRESETS = {
   'Neige': { maxParticles:350, rate:70, lifeMin:4, lifeMax:7, speedMin:12, speedMax:25, windX:6, turbulence:10, turbulenceFreq:0.4,
@@ -187,7 +258,23 @@ const PRESETS = {
     turbulenceFreq:0.15, dotSize:1.5, sizeRandom:0.3, alphaStart:0.5, alphaEnd:0.5, fadeIn:0.25, fadeOut:0.3, colorStart:'#FFF4D6', colorEnd:'#FFF4D6' },
   'Bulles': { maxParticles:70, rate:7, lifeMin:3, lifeMax:6, spawnY:0.85, spawnH:0.15, speedMin:18, speedMax:35, angleMin:265, angleMax:275,
     turbulence:8, turbulenceFreq:0.7, dotSize:3, sizeRandom:0.5, sizeStart:0.6, sizeEnd:1.2, alphaStart:0.6, alphaEnd:0.4, colorStart:'#CFEFFF', colorEnd:'#FFFFFF' },
+  'Chaleur': { type:'distortion', amp1:1.5, wave1:24, speed1:0.4, amp2:0.8, wave2:11, speed2:0.7, ymin:0.5, ymax:0.9, Alpha:1 },
+  'Rayons': { type:'rays', rayx:0.5, rayy:0, raycount:7, rayangle:90, rayspread:50, raywidth:3, raylength:0.9, rayspeed:0.15,
+    raywobble:4, raycolor:'#FFE8A0', Alpha:0.35 },
+  "Rayon d'angle": { type:'rays', rayx:0, rayy:0, raycount:6, rayangle:45, rayspread:30, raywidth:2.5, raylength:0.9, rayspeed:0.15,
+    raywobble:3, raycolor:'#FFF0C0', Alpha:0.4, ymin:0, ymax:0.7 },
+  'Sous-marin': { type:'plainscreen', fxColor:'#0040A0', Alpha:0.3 },
+  'Fenêtre': { type:'ellipse', ex:128, ey:112, erx:40, ery:30, eneg:true, fxColor:'#000000', Alpha:1 },
+  'Ombres': { type:'shadows', nsize:64, nspeed:10, ndir:20, ncov:0.45, fxColor:'#000000', Alpha:0.35 },
+  'Nuages': { type:'clouds', nsize:56, nspeed:12, ndir:0, ncov:0.5, fxColor:'#FFFFFF', Alpha:0.8 },
+  'Brouillard': { type:'fog', nsize:120, nspeed:4, ndir:0, ncov:0.5, fxColor:'#A8B8C8', Alpha:0.4 },
 };
+
+// ---------- Préréglages personnels (localStorage si disponible, sinon mémoire) ----------
+let USER = {};
+try { USER = JSON.parse(localStorage.getItem('atelier2d.presets') || '{}') || {}; } catch (e) { USER = {}; }
+function saveUser() { try { localStorage.setItem('atelier2d.presets', JSON.stringify(USER)); } catch (e) { /* stockage indisponible */ } }
+const slug = n => n.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'mon_effet';
 
 // ---------- Construction de l'interface ----------
 const $ = id => document.getElementById(id);
@@ -242,23 +329,83 @@ for (const d of P) {
 function syncInputs() { for (const k in inputs) inputs[k].set(S[k]); }
 
 const presetBox = $('presets');
-for (const name in PRESETS) {
-  const b = document.createElement('button'); b.type = 'button'; b.textContent = name; b.setAttribute('aria-pressed', 'false');
-  b.onclick = () => { const keepTag = {}; for (const t of TAGKEYS) keepTag[t] = S[t];
-    S = { ...DEF, ...PRESETS[name], ...keepTag }; texImg = null;
-    for (const o of presetBox.children) o.setAttribute('aria-pressed', o === b ? 'true' : 'false');
-    $('fname').value = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    syncInputs(); changed(true); };
-  presetBox.appendChild(b);
+function presetMsg(t) { $('presetMsg').textContent = t; }
+function buildPresetBar() {
+  presetBox.innerHTML = '';
+  const add = (label, id, isUser) => { const b = document.createElement('button'); b.type = 'button';
+    b.textContent = isUser ? '★ ' + label : label; b.setAttribute('aria-pressed', String(activePreset === id));
+    b.onclick = () => selectPreset(id); presetBox.appendChild(b); };
+  for (const name in PRESETS) add(name, name, false);
+  for (const name in USER) add(name, 'u:' + name, true);
 }
+// Applique un préréglage : les valeurs de balise/ancrage courantes sont gardées sauf si le préréglage les fixe
+function applyValues(values) {
+  const keep = {}; for (const t of TAGKEYS) keep[t] = S[t];
+  S = { ...DEF, ...values };
+  for (const t of TAGKEYS) if (!(t in values)) S[t] = keep[t];
+  texImg = null;
+}
+function applyType() {
+  $('etype').value = S.type;
+  for (const el of document.querySelectorAll('[data-kind]')) el.hidden = !el.dataset.kind.split(' ').includes(S.type);
+}
+function selectPreset(id) {
+  const isUser = id.startsWith('u:'); const name = isUser ? id.slice(2) : id;
+  const values = isUser ? USER[name] : PRESETS[name]; if (!values) return;
+  applyValues(values); activePreset = id;
+  $('fname').value = slug(name);
+  buildPresetBar(); syncInputs(); applyType(); changed(true);
+}
+$('etype').onchange = () => { S.type = $('etype').value; activePreset = null; applyType(); buildPresetBar(); changed(true); };
+
+// Ajouter / supprimer un préréglage personnel
+$('addPreset').onclick = () => {
+  const name = $('pname').value.trim();
+  if (!name) { presetMsg('Donnez un nom au préréglage.'); return; }
+  const vals = {}; for (const k in S) if (!TAGKEYS.includes(k)) vals[k] = S[k];
+  USER[name] = vals; saveUser(); activePreset = 'u:' + name; buildPresetBar();
+  $('pname').value = ''; presetMsg('Préréglage « ' + name + ' » ajouté.');
+};
+$('delPreset').onclick = () => {
+  if (!activePreset || !activePreset.startsWith('u:')) { presetMsg('Sélectionnez un préréglage personnel (★) à supprimer.'); return; }
+  const name = activePreset.slice(2); delete USER[name]; saveUser(); activePreset = null; buildPresetBar();
+  presetMsg('« ' + name + ' » supprimé.');
+};
+
+// Save Presets : télécharge les préréglages personnels dans un fichier JSON
+$('savePresets').onclick = () => {
+  const data = { format: 'atelier2d-presets', version: 1, presets: USER };
+  const blob = new Blob([JSON.stringify(data, null, 2) + '\n'], { type: 'application/json' });
+  const url = URL.createObjectURL(blob); const a = document.createElement('a');
+  a.href = url; a.download = 'atelier2d_presets.json'; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  presetMsg(Object.keys(USER).length + ' préréglage(s) personnel(s) sauvegardé(s).');
+};
+// Load Presets : lit un fichier JSON de préréglages et fusionne dans la liste personnelle
+$('loadPresets').onclick = () => $('presetFile').click();
+$('presetFile').onchange = () => {
+  const f = $('presetFile').files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result); const src = (data && data.presets) || data; let n = 0;
+      for (const name in src) { const v = src[name]; if (v && typeof v === 'object' && !Array.isArray(v)) { USER[name] = v; n++; } }
+      if (!n) throw new Error('aucun préréglage trouvé');
+      saveUser(); buildPresetBar(); presetMsg(n + ' préréglage(s) chargé(s).');
+    } catch (e) { presetMsg('Fichier non reconnu : ' + e.message); }
+  };
+  reader.readAsText(f); $('presetFile').value = '';
+};
 
 // ---------- Export ----------
 function num(v) { return +(+v).toFixed(3); }
 function buildJson() {
-  const o = { type: 'particles' };
-  for (const d of P) { const [g,k] = d; if (g === 'tag') continue;
+  const o = { type: S.type };
+  const groups = EXPORT_GROUPS[S.type] || EXPORT_GROUPS.particles;
+  for (const d of P) { const [g,k] = d; if (!groups.includes(g)) continue;
     if (k === 'texture') { if (S.texture) o.texture = S.texture; continue; }
-    const v = S[k]; o[k] = (typeof v === 'number') ? num(v) : v; }
+    const v = S[k]; o[JSON_ALIAS[k] || k] = (typeof v === 'number') ? num(v) : v; }
+  if (S.type !== 'particles') o.alpha = num(S.Alpha); // force globale (la balise peut la remplacer)
   const lines = Object.entries(o).map(([k, v]) => '  "' + k + '": ' + JSON.stringify(v));
   return '{\n' + lines.join(',\n') + '\n}\n';
 }
@@ -286,8 +433,10 @@ $('doImp').onclick = () => {
   const re = /"([^"]+)"\s*:\s*("(?:[^"\\]|\\.)*"|[^,}\n\r]+)/g; let m, n = 0; const next = { ...DEF };
   for (const t of TAGKEYS) next[t] = S[t];
   while ((m = re.exec(txt))) {
-    const key = LOWER[m[1].trim().toLowerCase()]; if (!key) continue;
+    const low = m[1].trim().toLowerCase();
     let v = m[2].trim(); if (v[0] === '"') v = v.slice(1, -1).replace(/\\(["\\])/g, '$1');
+    if (low === 'type') { const tv = v.toLowerCase(); if (['particles','distortion','rays','plainscreen','ellipse','shadows','clouds','fog'].includes(tv)) next.type = tv; n++; continue; }
+    const key = LOWER[low]; if (!key) continue;
     const a = META[key][3];
     if (a === 'bool') next[key] = /^(true|1|yes)$/i.test(v);
     else if (a === 'color') { v = v.replace('#', ''); if (/^[0-9a-f]{6}$/i.test(v)) next[key] = '#' + v.toUpperCase(); }
@@ -297,8 +446,8 @@ $('doImp').onclick = () => {
     n++;
   }
   if (!n) { $('impMsg').textContent = 'Aucune clé reconnue. Vérifiez le format "clé": valeur.'; return; }
-  S = next; texImg = null; syncInputs(); changed(true);
-  for (const o of presetBox.children) o.setAttribute('aria-pressed', 'false');
+  S = next; texImg = null; activePreset = null;
+  syncInputs(); applyType(); buildPresetBar(); changed(true);
   $('impMsg').textContent = n + ' réglages chargés.';
 };
 
@@ -371,9 +520,79 @@ $('shotFile').onchange = () => { const f = $('shotFile').files[0]; if (!f) retur
   im.onload = () => { shot = im; makeBackground(); }; im.src = url; };
 $('scale').onchange = () => { scale = +$('scale').value; makeBackground(); };
 
-// ---------- Rendu (portage de renderOverlayBand) ----------
-function render() {
-  const W = view.width, H = view.height, out = frame.data; out.set(base.data);
+// ---------- Rendu ----------
+// Zone d'effet en pixels HD (même troncature que le C++) ; null si vide
+function zoneRect(W, H) {
+  const x0 = Math.max(0, Math.min(W, Math.trunc(S.xmin * W))), x1 = Math.max(0, Math.min(W, Math.trunc(S.xmax * W)));
+  const y0 = Math.max(0, Math.min(H, Math.trunc(S.ymin * H))), y1 = Math.max(0, Math.min(H, Math.trunc(S.ymax * H)));
+  return (x0 >= x1 || y0 >= y1) ? null : { x0, x1, y0, y1 };
+}
+// Chaleur : décalage horizontal sinusoïdal par ligne (portage de la passe de distorsion)
+function drawHeat(out, W, H) {
+  const z = zoneRect(W, H); if (!z) return;
+  const sc = scale, t = sim.time, src = base.data, TWO_PI = 2 * PI, D2R = PI / 180;
+  for (let r = z.y0; r < z.y1; r++) {
+    const yS = r / sc;
+    let dx = S.amp1 * Math.sin(TWO_PI * (yS / S.wave1 + S.speed1 * t) + S.phase1 * D2R)
+           + S.amp2 * Math.sin(TWO_PI * (yS / S.wave2 + S.speed2 * t) + S.phase2 * D2R);
+    dx *= sc * S.Alpha;
+    const row = r * W;
+    for (let x = z.x0; x < z.x1; x++) {
+      let sxp = x - dx; if (sxp < z.x0) sxp = z.x0; else if (sxp > z.x1 - 1) sxp = z.x1 - 1;
+      const ix = Math.floor(sxp), ix1 = Math.min(ix + 1, z.x1 - 1), f = sxp - ix;
+      const i = (row + x) * 4, a = (row + ix) * 4, b = (row + ix1) * 4;
+      out[i]     = src[a]     + (src[b]     - src[a])     * f;
+      out[i + 1] = src[a + 1] + (src[b + 1] - src[a + 1]) * f;
+      out[i + 2] = src[a + 2] + (src[b + 2] - src[a + 2]) * f;
+    }
+  }
+}
+// Rayons : faisceaux additifs sur une grille de nœuds de 4 px HD, interpolés (portage de la passe type=rays)
+function drawRays(out, W, H) {
+  const z = zoneRect(W, H); if (!z) return;
+  const sx0 = S.rayx * W, sy0 = S.rayy * H, len = S.raylength * Math.hypot(W, H);
+  const N = Math.max(1, Math.round(S.raycount)), t = sim.time, TWO_PI = 2 * PI;
+  const bAng = new Float64Array(N), bAmp = new Float64Array(N);
+  for (let k = 0; k < N; k++) {
+    const f = N > 1 ? k / (N - 1) : 0.5;
+    const baseAng = S.rayspread >= 360 ? S.rayangle + 360 * k / N : S.rayangle + (f - 0.5) * S.rayspread;
+    bAng[k] = baseAng + S.raywobble * Math.sin(TWO_PI * (S.rayspeed * 0.5 * t) + k * 1.7);
+    bAmp[k] = 0.6 + 0.4 * Math.sin(TWO_PI * (S.rayspeed * t + k * 0.37));
+  }
+  const invW = 1 / Math.max(0.01, S.raywidth);
+  const col = parseInt(S.raycolor.slice(1), 16), cR = (col >> 16) & 255, cG = (col >> 8) & 255, cB = col & 255;
+  const gain = S.Alpha, STEP = 4;
+  const gx = Math.floor((z.x1 - z.x0) / STEP) + 2, gy = Math.floor((z.y1 - z.y0) / STEP) + 2;
+  const node = new Float64Array(gx * gy);
+  for (let j = 0; j < gy; j++) {
+    const dy = (z.y0 + j * STEP) + 0.5 - sy0;
+    for (let ii = 0; ii < gx; ii++) {
+      const dx = (z.x0 + ii * STEP) + 0.5 - sx0, dist = Math.hypot(dx, dy); let I = 0;
+      if (dist < len) {
+        const pa = Math.atan2(dy, dx) * 180 / PI;
+        for (let k = 0; k < N; k++) {
+          const d = ((pa - bAng[k] + 540) % 360) - 180, q = d * invW;
+          if (q > 3 || q < -3) continue;
+          I += bAmp[k] * Math.exp(-q * q);
+        }
+        const fade = 1 - dist / len; I *= fade * fade * gain;
+      }
+      node[j * gx + ii] = I;
+    }
+  }
+  for (let r = z.y0; r < z.y1; r++) {
+    const fy = (r - z.y0) / STEP, jy = Math.floor(fy), ty = fy - jy, n0 = jy * gx, n1 = (jy + 1) * gx;
+    for (let x = z.x0; x < z.x1; x++) {
+      const fx = (x - z.x0) / STEP, ix = Math.floor(fx), tx = fx - ix;
+      const I = (node[n0 + ix] * (1 - tx) + node[n0 + ix + 1] * tx) * (1 - ty) + (node[n1 + ix] * (1 - tx) + node[n1 + ix + 1] * tx) * ty;
+      if (I <= 0) continue;
+      const i = (r * W + x) * 4;
+      out[i] = out[i] + cR * I; out[i + 1] = out[i + 1] + cG * I; out[i + 2] = out[i + 2] + cB * I;
+    }
+  }
+}
+// Particules (portage de renderOverlayBand)
+function drawParticles(out, W, H) {
   const fW = sim.fw, fH = sim.fh, sc = scale, tex = texImg;
   const lerp = (a, b, t) => a + (b - a) * t;
   const c0 = parseInt(S.colorStart.slice(1), 16), c1 = parseInt(S.colorEnd.slice(1), 16);
@@ -417,8 +636,73 @@ function render() {
         } }
     }
   }
+}
+// Bruit de valeur (même hachage que le C++, calculé à la résolution SNES)
+function fxHash(x, y, seed) {
+  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 2246822519)) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0;
+  return (h & 0xFFFF) / 65535;
+}
+function fxNoise(x, y, seed) {
+  const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+  const a = fxHash(xi, yi, seed), b = fxHash(xi + 1, yi, seed), c = fxHash(xi, yi + 1, seed), d = fxHash(xi + 1, yi + 1, seed);
+  const top = a + (b - a) * ux, bot = c + (d - c) * ux;
+  return top + (bot - top) * uy;
+}
+const clamp01 = v => v < 0 ? 0 : (v > 1 ? 1 : v);
+// Calques : écran coloré, ellipse (ou écran noir avec fenêtre), ombres / nuages / brouillard
+function drawFx(out, W, H) {
+  const z = zoneRect(W, H); if (!z) return;
+  const sc = scale, a = S.Alpha, col = parseInt(S.fxColor.slice(1), 16);
+  const cR = (col >> 16) & 255, cG = (col >> 8) & 255, cB = col & 255;
+  const put = (i, k) => { out[i] += (cR - out[i]) * k; out[i + 1] += (cG - out[i + 1]) * k; out[i + 2] += (cB - out[i + 2]) * k; };
+  if (S.type === 'plainscreen') {
+    for (let r = z.y0; r < z.y1; r++) for (let x = z.x0; x < z.x1; x++) put((r * W + x) * 4, a);
+  } else if (S.type === 'ellipse') {
+    const cx = S.ex * sc, cy = S.ey * sc, rx = Math.max(0.5, S.erx) * sc, ry = Math.max(0.5, S.ery) * sc;
+    for (let r = z.y0; r < z.y1; r++) {
+      const dy = (r + 0.5 - cy) / ry;
+      for (let x = z.x0; x < z.x1; x++) {
+        const dx = (x + 0.5 - cx) / rx, inside = dx * dx + dy * dy < 1;
+        if (inside !== S.eneg) put((r * W + x) * 4, a);
+      }
+    }
+  } else {
+    const size = Math.max(4, S.nsize), dir = S.ndir * PI / 180;
+    const ox = Math.cos(dir) * S.nspeed * sim.time, oy = Math.sin(dir) * S.nspeed * sim.time;
+    const thr = 1 - clamp01(S.ncov), kind = S.type === 'clouds' ? 1 : (S.type === 'fog' ? 2 : 0);
+    const seed = Math.round(S.nseed);
+    for (let sy = 0; sy < SNES_H; sy++) {
+      const cyc = sy * sc + sc / 2; if (cyc < z.y0 || cyc >= z.y1) continue;
+      const py = (sy + 0.5) - oy;
+      for (let sx = 0; sx < SNES_W; sx++) {
+        const cxc = sx * sc + sc / 2; if (cxc < z.x0 || cxc >= z.x1) continue;
+        const px = (sx + 0.5) - ox, u = px / size, v = py / size;
+        const n = 0.65 * fxNoise(u, v, seed) + 0.35 * fxNoise(u * 2.03 + 17, v * 2.03 + 9, seed + 1);
+        let m;
+        if (kind === 2) m = clamp01((n - (thr - 0.1)) / 0.4) * 0.85;
+        else if (kind === 1) m = clamp01((n - thr) / 0.08);
+        else m = clamp01((n - thr) / 0.12);
+        m = m * m * (3 - 2 * m);
+        if (m <= 0) continue;
+        const k = a * m;
+        for (let yy = sy * sc; yy < sy * sc + sc; yy++) { if (yy < z.y0 || yy >= z.y1) continue;
+          for (let xx = sx * sc; xx < sx * sc + sc; xx++) { if (xx < z.x0 || xx >= z.x1) continue; put((yy * W + xx) * 4, k); } }
+      }
+    }
+  }
+}
+function render() {
+  const W = view.width, H = view.height, out = frame.data; out.set(base.data);
+  if (S.type === 'distortion') drawHeat(out, W, H);
+  else if (S.type === 'rays') drawRays(out, W, H);
+  else if (S.type === 'particles') drawParticles(out, W, H);
+  else drawFx(out, W, H);
   ctx.putImageData(frame, 0, 0);
-  $('stat').textContent = sim.parts.length + ' particules';
+  $('stat').textContent = S.type === 'particles' ? sim.parts.length + ' particules'
+    : S.type === 'rays' ? Math.round(S.raycount) + ' rayon(s)' : (S.type === 'distortion' ? 'chaleur (distorsion)' : S.type);
 }
 
 // ---------- Boucle (pas fixe 1/60 s comme dans Mesen) ----------
@@ -429,12 +713,12 @@ $('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ?
 function loop(ts) {
   if (!last) last = ts; acc += Math.min(0.1, (ts - last) / 1000); last = ts;
   if (!paused) { let n = 0; while (acc >= DT && n < 4) { step(); acc -= DT; n++; } if (n >= 4) acc = 0; if (n) dirty = true; } else acc = 0;
-  if (dirty) { render(); dirty = false; }
+  if (dirty || S.type !== 'particles') { render(); dirty = false; }
   requestAnimationFrame(loop);
 }
 
 S = { ...DEF, ...PRESETS['Neige'] };
-presetBox.children[0].setAttribute('aria-pressed', 'true'); $('fname').value = 'neige';
-syncInputs(); makeBackground(); resetSim(); refreshText(); requestAnimationFrame(loop);
+activePreset = 'Neige';
+buildPresetBar(); syncInputs(); applyType(); makeBackground(); resetSim(); refreshText(); requestAnimationFrame(loop);
 })();
 </script>
