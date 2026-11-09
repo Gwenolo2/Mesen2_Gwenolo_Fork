@@ -274,6 +274,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 	// Dimensions du tampon de sortie selon le mode Stretch
 	uint32_t wsExt = GetWidescreenExtForFrame(_emu, _baseFrameInfo, overscan, stretch);
+	SnesHdPackLoader::ActivePack->WsExtPx = wsExt; // lu par le PPU pour les sprites de la bande
 	uint32_t outWidth = ((stretch ? cropWidth : _baseFrameInfo.Width) + 2 * wsExt) * scale;
 	uint32_t hdHeight = stretch ? (cropHeight * scale) : (_baseFrameInfo.Height * scale);
 

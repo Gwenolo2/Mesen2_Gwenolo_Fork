@@ -978,6 +978,11 @@ void SnesPpu::FetchSpritePosition(uint8_t spriteIndex) {
       _oamRam[0x200 | (spriteIndex >> 2)] >> ((spriteIndex << 1) & 0x06);
   _currentSprite.X =
       (int16_t)(sign[highTableValue & 0x01] | _oamRam[(spriteIndex << 2)]);
+  // Format large : bandes 16:9 de wsPx colonnes de chaque cote (0 hors format large)
+  const int wsPx = SnesHdPackLoader::ActivePack ? (int)SnesHdPackLoader::ActivePack->WsExtPx : 0;
+  const bool wsObjUnsafe = SnesHdPackLoader::ActivePack && SnesHdPackLoader::ActivePack->WsObjUnsafe;
+  // Repli 9 bits : X dans [-256, -256+wsPx) = colonnes 256..256+wsPx-1 (bande droite)
+  if (wsPx > 0 && wsObjUnsafe && _currentSprite.X > -256 && _currentSprite.X < -256 + wsPx) _currentSprite.X += 512;
   _currentSprite.Y = _oamRam[(spriteIndex << 2) + 1];
 
   uint8_t mode = _state.OamMode | ((highTableValue & 0x02) << 2);
@@ -987,10 +992,12 @@ void SnesPpu::FetchSpritePosition(uint8_t spriteIndex) {
   if (spriteIndex != _currentSprite.Index) {
     _currentSprite.Index = spriteIndex;
     _currentSprite.ColumnOffset = (_currentSprite.Width / 8);
-    if (_currentSprite.X <= -8 && _currentSprite.X != -256) {
+    // Colonnes cachees a gauche de la zone visible (0, ou -wsPx en format large)
+    int hiddenLimit = _currentSprite.X + wsPx;
+    if (hiddenLimit <= -8 && _currentSprite.X != -256) {
       // Skip the first tiles of the sprite (because the tiles are hidden to the
       // left of the screen)
-      _currentSprite.ColumnOffset += _currentSprite.X / 8;
+      _currentSprite.ColumnOffset += hiddenLimit / 8;
     }
   }
 }
@@ -1214,7 +1221,10 @@ void SnesPpu::FetchSpriteTile(bool secondCycle) {
     // HD PACK : Enregistrement de cette tuile (groupe de 8px) dans la file globale de la frame.
     // On ne le fait qu'une fois par tuile 8x8 (dédupliquée sur ses 8 scanlines).
     // Les coordonnées StartX et StartY sont calculées exactement selon la même formule que Step 1.
-    if(_currentSprite.HdTile != nullptr && SnesHdPackLoader::ActivePack != nullptr) {
+    // Mode safe : un sprite entierement dans la bande gauche n'est pas affiche
+    const bool wsHiddenSafe = SnesHdPackLoader::ActivePack && SnesHdPackLoader::ActivePack->WsExtPx > 0
+      && !SnesHdPackLoader::ActivePack->WsObjUnsafe && (_currentSprite.X + _currentSprite.Width) <= 0;
+    if(_currentSprite.HdTile != nullptr && SnesHdPackLoader::ActivePack != nullptr && !wsHiddenSafe) {
       auto& sprQueue = SnesHdPackLoader::ActivePack->ActiveSpritesQueues[SnesHdPackLoader::ActivePack->ActiveSpriteQueueWriteIndex];
       int startX = (int)xPos;
       int visualY = _currentSprite.VerticalMirror ? (7 - _currentSprite.TileY) : _currentSprite.TileY;

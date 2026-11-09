@@ -1618,6 +1618,10 @@ public:
 	bool OverscanStretch = true; // true is défault (streched image)
 	// <widescreen> : 0 off, 1 mode7, 2 all (bandes 16:9 ; 2 traite comme 1 en v1)
 	uint8_t WidescreenMode = 0;
+	// Extension 16:9 courante (colonnes SNES de chaque cote), ecrite par le filtre a chaque frame
+	uint32_t WsExtPx = 0;
+	// Sprites en format large : 0 = safe (visibles si partiellement dans la zone SNES), 1 = unsafe (aussi dans la bande seule)
+	uint8_t WsObjUnsafe = 0;
 
 	std::vector<std::unique_ptr<SnesHdPackBitmapInfo>> ImageFileData;
 	std::unordered_map<SnesHdTileKey, std::vector<SnesHdPackTileInfo*>> TileByKey;

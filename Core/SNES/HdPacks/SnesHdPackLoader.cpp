@@ -2892,11 +2892,14 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 		/// PARSING <widescreen> TAG --------------------------------
 		else if(lineContent.substr(0, 12) == "<widescreen>") {
-			std::string opt = StringUtilities::ToLower(StringUtilities::Trim(lineContent.substr(12)));
+			std::vector<std::string> wsTokens = StringUtilities::Split(lineContent.substr(12), ',');
+			std::string opt = wsTokens.size() > 0 ? StringUtilities::ToLower(StringUtilities::Trim(wsTokens[0])) : std::string("");
+			std::string objOpt = wsTokens.size() > 1 ? StringUtilities::ToLower(StringUtilities::Trim(wsTokens[1])) : std::string("safe");
 			if(opt == "mode7") outData->WidescreenMode = 1;
 			else if(opt == "all") outData->WidescreenMode = 2;
 			else outData->WidescreenMode = 0;
-			MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - Widescreen 16:9 : " + opt);
+			outData->WsObjUnsafe = (objOpt == "unsafe") ? 1 : 0;
+			MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - Widescreen 16:9 : " + opt + ", sprites : " + objOpt);
 		}
 
 		/// PARSING <OVERSCAN> TAG --------------------------------
