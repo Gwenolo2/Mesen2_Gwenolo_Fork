@@ -20,6 +20,11 @@ HdNesPack<scale>::HdNesPack(NesConsole* console, EmuSettings* settings, HdPackDa
 	_settings = settings;
 	_hdData = hdData;
 
+	// Threads permanents du rendu HD : on laisse 2 coeurs a l'emulation et au reste du systeme.
+	_pool.Start(std::clamp((int)std::thread::hardware_concurrency() - 2, 1, 8));
+	_resolvedBg.resize(NesConstants::ScreenPixelCount, nullptr);
+	_resolvedSprites.resize(NesConstants::ScreenPixelCount * 4, nullptr);
+
 	InitializeFallbackTiles();
 	CleanupInvalidRules();
 
@@ -257,32 +262,38 @@ void HdNesPack<scale>::DrawTile(HdPpuTileInfo &tileInfo, HdPackTileInfo &hdPackT
 }
 
 template<uint32_t scale>
-void HdNesPack<scale>::OnLineStart(HdPpuPixelInfo &lineFirstPixel, uint8_t y)
+void HdNesPack<scale>::OnLineStart(HdPpuPixelInfo &lineFirstPixel)
 {
+	//Passe 1 (sequentielle) : etat du cache de tile pour la ligne
 	_scrollX = ((lineFirstPixel.TmpVideoRamAddr & 0x1F) << 3) | lineFirstPixel.XScroll | ((lineFirstPixel.TmpVideoRamAddr & 0x400) ? 0x100 : 0);
 	_useCachedTile = false;
+}
 
+template<uint32_t scale>
+void HdNesPack<scale>::ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8_t y, HdBgConfig* lineCfg)
+{
+	//Passe 2 (parallele) : position des <background> pour la ligne, dans un tableau local au thread.
+	//Ne modifie aucun membre de la classe.
+	int32_t scrollX = ((lineFirstPixel.TmpVideoRamAddr & 0x1F) << 3) | lineFirstPixel.XScroll | ((lineFirstPixel.TmpVideoRamAddr & 0x400) ? 0x100 : 0);
 	int32_t scrollY = (((lineFirstPixel.TmpVideoRamAddr & 0x3E0) >> 2) | ((lineFirstPixel.TmpVideoRamAddr & 0x7000) >> 12)) + ((lineFirstPixel.TmpVideoRamAddr & 0x800) ? 240 : 0);
 	
 	for(int layer = 0; layer < 4; layer++) {
 		for(int i = 0; i < _activeBgCount[layer]; i++) {
-			HdBgConfig& cfg = _bgConfig[layer * HdNesPack::PriorityLevelsPerLayer + i];
-			if(cfg.BackgroundIndex < 0) {
-				continue;
-			}
+			int cfgIndex = layer * HdNesPack::PriorityLevelsPerLayer + i;
+			HdBgConfig cfg = _bgConfig[cfgIndex];
+			cfg.BgMinX = -1;
+			cfg.BgMaxX = -1;
+			if(cfg.BackgroundIndex >= 0) {
+				HdBackgroundInfo& bgInfo = _hdData->BackgroundsByPriority[cfg.BgPriority][cfg.BackgroundIndex];
 
-			HdBackgroundInfo& bgInfo = _hdData->BackgroundsByPriority[cfg.BgPriority][cfg.BackgroundIndex];
-			bgInfo.Data->Init();
-
-			cfg.BgScrollX = (int32_t)(_scrollX * bgInfo.HorizontalScrollRatio);
-			cfg.BgScrollY = (int32_t)(scrollY * bgInfo.VerticalScrollRatio);
-			if(y >= -cfg.BgScrollY && (y + bgInfo.Top + cfg.BgScrollY + 1) * scale <= bgInfo.Data->Height) {
-				cfg.BgMinX = -cfg.BgScrollX;
-				cfg.BgMaxX = bgInfo.Data->Width / scale - bgInfo.Left - cfg.BgScrollX - 1;
-			} else {
-				cfg.BgMinX = -1;
-				cfg.BgMaxX = -1;
+				cfg.BgScrollX = (int32_t)(scrollX * bgInfo.HorizontalScrollRatio);
+				cfg.BgScrollY = (int32_t)(scrollY * bgInfo.VerticalScrollRatio);
+				if(y >= -cfg.BgScrollY && (y + bgInfo.Top + cfg.BgScrollY + 1) * scale <= bgInfo.Data->Height) {
+					cfg.BgMinX = -cfg.BgScrollX;
+					cfg.BgMaxX = bgInfo.Data->Width / scale - bgInfo.Left - cfg.BgScrollX - 1;
+				}
 			}
+			lineCfg[cfgIndex] = cfg;
 		}
 	}
 }
@@ -331,6 +342,12 @@ void HdNesPack<scale>::OnBeforeApplyFilter()
 			}
 		}
 		_activeBgCount[layer] = activeCount;
+
+		//Decodage des PNG des <background> actifs ici (sequentiel), plus dans la boucle des lignes
+		for(uint32_t i = 0; i < activeCount; i++) {
+			HdBgConfig& cfg = _bgConfig[layer * HdNesPack::PriorityLevelsPerLayer + i];
+			_hdData->BackgroundsByPriority[cfg.BgPriority][cfg.BackgroundIndex].Data->Init();
+		}
 	}
 
 	ProcessAdditionalSprites();
@@ -503,9 +520,8 @@ HdPackTileInfo* HdNesPack<scale>::GetMatchingTile(uint32_t x, uint32_t y, HdPpuT
 }
 
 template<uint32_t scale>
-void HdNesPack<scale>::DrawBackgroundLayer(uint8_t priority, uint32_t x, uint32_t y, uint32_t* outputBuffer, uint32_t screenWidth)
+void HdNesPack<scale>::DrawBackgroundLayer(const HdBgConfig& bgConfig, uint32_t x, uint32_t y, uint32_t* outputBuffer, uint32_t screenWidth)
 {
-	HdBgConfig bgConfig = _bgConfig[(int)priority];
 	if((int32_t)x >= bgConfig.BgMinX && (int32_t)x <= bgConfig.BgMaxX) {
 		HdBackgroundInfo& bgInfo = _hdData->BackgroundsByPriority[bgConfig.BgPriority][bgConfig.BackgroundIndex];
 		switch(bgInfo.BlendMode) {
@@ -517,23 +533,67 @@ void HdNesPack<scale>::DrawBackgroundLayer(uint8_t priority, uint32_t x, uint32_
 }
 
 template<uint32_t scale>
-void HdNesPack<scale>::GetPixels(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelInfo, uint32_t *outputBuffer, uint32_t screenWidth)
+void HdNesPack<scale>::ResolvePixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelInfo)
 {
+	//Passe 1 (sequentielle) : recherche des tiles HD du pixel, dans le meme ordre que l'ancien GetPixels.
+	//Les conditions (cache de resultat, tileNearby/spriteNearby) et l'init des tiles ne sont pas thread-safe.
+	uint32_t pixelIndex = (y << 8) | x;
+
 	HdPackTileInfo *hdPackTileInfo = nullptr;
+	if(pixelInfo.Tile.TileIndex != HdPpuTileInfo::NoTile) {
+		hdPackTileInfo = GetCachedMatchingTile(x, y, &pixelInfo.Tile);
+	}
+	_resolvedBg[pixelIndex] = hdPackTileInfo;
+
+	if(pixelInfo.SpriteCount > 0) {
+		HdPackTileInfo** sprites = _resolvedSprites.data() + (pixelIndex << 2);
+		int lowestBgSprite = 999;
+		for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
+			if(pixelInfo.Sprite[k].BackgroundPriority) {
+				if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
+					lowestBgSprite = k;
+				}
+				sprites[k] = GetMatchingTile(x, y, &pixelInfo.Sprite[k]);
+			}
+		}
+
+		for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
+			if(!pixelInfo.Sprite[k].BackgroundPriority && lowestBgSprite > k) {
+				sprites[k] = GetMatchingTile(x, y, &pixelInfo.Sprite[k]);
+			}
+		}
+	}
+}
+
+template<uint32_t scale>
+void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelInfo, uint32_t *outputBuffer, uint32_t screenWidth, const HdBgConfig* lineCfg)
+{
+	//Passe 2 (parallele) : dessin seul. Ne lit que des donnees figees par la passe 1.
+	uint32_t pixelIndex = (y << 8) | x;
+	HdPackTileInfo *hdPackTileInfo = _resolvedBg[pixelIndex];
 	HdPackTileInfo *hdPackSpriteInfo = nullptr;
+	HdPackTileInfo* const* sprites = _resolvedSprites.data() + (pixelIndex << 2);
 
 	bool hasSprite = pixelInfo.SpriteCount > 0;
 	bool renderOriginalTiles = ((_hdData->OptionFlags & (int)HdPackOptions::DontRenderOriginalTiles) == 0);
-	if(pixelInfo.Tile.TileIndex != HdPpuTileInfo::NoTile) {
-		hdPackTileInfo = GetCachedMatchingTile(x, y, &pixelInfo.Tile);
+
+	//La tile de fond couvre-t-elle tout le bloc scale x scale de facon opaque ?
+	//Si oui, tout ce qui est dessine avant elle (couleur de fond, <background> derriere, sprites derriere) serait ecrase : on ne le dessine pas.
+	bool opaqueBgTile;
+	if(hdPackTileInfo) {
+		opaqueBgTile = !hdPackTileInfo->IsFullyTransparent && !hdPackTileInfo->HasTransparentPixels;
+	} else {
+		opaqueBgTile = renderOriginalTiles && pixelInfo.Tile.BgColorIndex != 0;
 	}
 
 	int lowestBgSprite = 999;
 	
-	DrawColor(_palette[pixelInfo.Tile.PpuBackgroundColor], outputBuffer, screenWidth);
+	if(!opaqueBgTile) {
+		DrawColor(_palette[pixelInfo.Tile.PpuBackgroundColor], outputBuffer, screenWidth);
 
-	for(int i = 0; i < _activeBgCount[0]; i++) {
-		DrawBackgroundLayer(HdNesPack::BehindBgSpritesPriority+i, x, y, outputBuffer, screenWidth);
+		for(int i = 0; i < _activeBgCount[0]; i++) {
+			DrawBackgroundLayer(lineCfg[HdNesPack::BehindBgSpritesPriority+i], x, y, outputBuffer, screenWidth);
+		}
 	}
 
 	if(hasSprite) {
@@ -543,18 +603,22 @@ void HdNesPack<scale>::GetPixels(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 					lowestBgSprite = k;
 				}
 
-				hdPackSpriteInfo = GetMatchingTile(x, y, &pixelInfo.Sprite[k]);
-				if(hdPackSpriteInfo) {
-					DrawTile(pixelInfo.Sprite[k], *hdPackSpriteInfo, outputBuffer, screenWidth);
-				} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
-					DrawColor(_palette[pixelInfo.Sprite[k].SpriteColor], outputBuffer, screenWidth);
+				if(!opaqueBgTile) {
+					hdPackSpriteInfo = sprites[k];
+					if(hdPackSpriteInfo) {
+						DrawTile(pixelInfo.Sprite[k], *hdPackSpriteInfo, outputBuffer, screenWidth);
+					} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
+						DrawColor(_palette[pixelInfo.Sprite[k].SpriteColor], outputBuffer, screenWidth);
+					}
 				}
 			}
 		}
 	}
 	
-	for(int i = 0; i < _activeBgCount[1]; i++) {
-		DrawBackgroundLayer(HdNesPack::BehindBgPriority+i, x, y, outputBuffer, screenWidth);
+	if(!opaqueBgTile) {
+		for(int i = 0; i < _activeBgCount[1]; i++) {
+			DrawBackgroundLayer(lineCfg[HdNesPack::BehindBgPriority+i], x, y, outputBuffer, screenWidth);
+		}
 	}
 	
 	if(hdPackTileInfo) {
@@ -567,13 +631,13 @@ void HdNesPack<scale>::GetPixels(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 	}
 
 	for(int i = 0; i < _activeBgCount[2]; i++) {
-		DrawBackgroundLayer(HdNesPack::BehindFgSpritesPriority+i, x, y, outputBuffer, screenWidth);
+		DrawBackgroundLayer(lineCfg[HdNesPack::BehindFgSpritesPriority+i], x, y, outputBuffer, screenWidth);
 	}
 
 	if(hasSprite) {
 		for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
 			if(!pixelInfo.Sprite[k].BackgroundPriority && lowestBgSprite > k) {
-				hdPackSpriteInfo = GetMatchingTile(x, y, &pixelInfo.Sprite[k]);
+				hdPackSpriteInfo = sprites[k];
 				if(hdPackSpriteInfo) {
 					DrawTile(pixelInfo.Sprite[k], *hdPackSpriteInfo, outputBuffer, screenWidth);
 				} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
@@ -584,7 +648,7 @@ void HdNesPack<scale>::GetPixels(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 	}
 
 	for(int i = 0; i < _activeBgCount[3]; i++) {
-		DrawBackgroundLayer(HdNesPack::ForegroundPriority+i, x, y, outputBuffer, screenWidth);
+		DrawBackgroundLayer(lineCfg[HdNesPack::ForegroundPriority+i], x, y, outputBuffer, screenWidth);
 	}
 }
 
@@ -594,18 +658,45 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	_hdScreenInfo = hdScreenInfo;
 	uint32_t hdScale = GetScale();
 	uint32_t screenWidth = (NesConstants::ScreenWidth - overscan.Left - overscan.Right) * hdScale;
+	const uint32_t yStart = overscan.Top, yEnd = 240 - overscan.Bottom;
+	const uint32_t xStart = overscan.Left, xEnd = 256 - overscan.Right;
 
 	OnBeforeApplyFilter();
-	for(uint32_t i = overscan.Top, iMax = 240 - overscan.Bottom; i < iMax; i++) {
-		OnLineStart(hdScreenInfo->ScreenTiles[i << 8], i);
-		uint32_t bufferIndex = (i - overscan.Top) * screenWidth * hdScale;
+
+	//Passe 1 (sequentielle) : quelle tile HD pour chaque pixel (fond + sprites)
+	for(uint32_t i = yStart; i < yEnd; i++) {
+		OnLineStart(hdScreenInfo->ScreenTiles[i << 8]);
+		for(uint32_t j = xStart; j < xEnd; j++) {
+			ResolvePixel(j, i, hdScreenInfo->ScreenTiles[i * 256 + j]);
+		}
+	}
+
+	//Passe 2 (parallele) : dessin. Chaque ligne NES ecrit ses propres lignes HD, sans recouvrement.
+	auto drawLine = [&](uint32_t i) {
+		HdBgConfig lineCfg[40];
+		ComputeLineBgConfig(hdScreenInfo->ScreenTiles[i << 8], (uint8_t)i, lineCfg);
+		uint32_t bufferIndex = (i - yStart) * screenWidth * hdScale;
 		uint32_t lineStartIndex = bufferIndex;
-		for(uint32_t j = overscan.Left, jMax = 256 - overscan.Right; j < jMax; j++) {
-			GetPixels(j, i, hdScreenInfo->ScreenTiles[i * 256 + j], outputBuffer + bufferIndex, screenWidth);
+		for(uint32_t j = xStart; j < xEnd; j++) {
+			DrawPixel(j, i, hdScreenInfo->ScreenTiles[i * 256 + j], outputBuffer + bufferIndex, screenWidth, lineCfg);
 			bufferIndex += hdScale;
 		}
 
 		ProcessGrayscaleAndEmphasis(hdScreenInfo->ScreenTiles[i * 256], outputBuffer + lineStartIndex, screenWidth);
+	};
+
+	int nThreads = _pool.Size();
+	if(nThreads <= 1 || yEnd <= yStart || yEnd - yStart < 16) {
+		for(uint32_t i = yStart; i < yEnd; i++) {
+			drawLine(i);
+		}
+	} else {
+		//Lignes entrelacees entre les threads pour equilibrer la charge
+		_pool.Run(nThreads, [&](int t) {
+			for(uint32_t i = yStart + (uint32_t)t; i < yEnd; i += (uint32_t)nThreads) {
+				drawLine(i);
+			}
+		});
 	}
 }
 

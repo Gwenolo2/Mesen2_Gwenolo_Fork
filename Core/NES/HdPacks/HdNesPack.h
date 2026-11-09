@@ -1,6 +1,7 @@
 #pragma once
 #include "pch.h"
 #include "NES/HdPacks/HdData.h"
+#include "SNES/HdPacks/SnesHdThreadPool.h"
 
 class NesConsole;
 class EmuSettings;
@@ -66,6 +67,11 @@ private:
 	bool _cacheEnabled = false;
 	bool _useCachedTile = false;
 	int32_t _scrollX = 0;
+
+	// Rendu multi-coeur : passe 1 (sequentielle) = recherche des tiles HD, passe 2 (parallele) = dessin.
+	SnesHdThreadPool _pool;
+	vector<HdPackTileInfo*> _resolvedBg;      // 1 entree par pixel NES (tile de fond HD ou nullptr)
+	vector<HdPackTileInfo*> _resolvedSprites; // 4 entrees par pixel NES (sprites HD ou nullptr)
 	
 	unordered_map<HdTileKey, vector<HdPackAdditionalSpriteInfo>> _additionalTilesByKey;
 
@@ -79,12 +85,13 @@ private:
 	__forceinline HdPackTileInfo* GetCachedMatchingTile(uint32_t x, uint32_t y, HdPpuTileInfo* tile);
 	__forceinline HdPackTileInfo* GetMatchingTile(uint32_t x, uint32_t y, HdPpuTileInfo* tile, bool* disableCache = nullptr);
 
-	__forceinline void DrawBackgroundLayer(uint8_t priority, uint32_t x, uint32_t y, uint32_t* outputBuffer, uint32_t screenWidth);
+	__forceinline void DrawBackgroundLayer(const HdBgConfig& bgConfig, uint32_t x, uint32_t y, uint32_t* outputBuffer, uint32_t screenWidth);
 
 	template<HdPackBlendMode blendMode>
 	__forceinline void DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *outputBuffer, uint32_t x, uint32_t y, uint32_t screenWidth);
 
-	void OnLineStart(HdPpuPixelInfo &lineFirstPixel, uint8_t y);
+	void OnLineStart(HdPpuPixelInfo &lineFirstPixel);
+	void ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8_t y, HdBgConfig* lineCfg);
 	int32_t GetLayerIndex(uint8_t priority);
 	void OnBeforeApplyFilter();
 
@@ -93,7 +100,8 @@ private:
 	void BuildAdditionalTileCache(int32_t x, int32_t y, HdPpuTileInfo& tile, bool checkFallbackTiles);
 	void InsertAdditionalSprite(int32_t x, int32_t y, HdPpuTileInfo& sprite, HdPackAdditionalSpriteInfo& additionalSprite);
 
-	__forceinline void GetPixels(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelInfo, uint32_t *outputBuffer, uint32_t screenWidth);
+	__forceinline void ResolvePixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelInfo);
+	__forceinline void DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelInfo, uint32_t *outputBuffer, uint32_t screenWidth, const HdBgConfig* lineCfg);
 	__forceinline void ProcessGrayscaleAndEmphasis(HdPpuPixelInfo &pixelInfo, uint32_t* outputBuffer, uint32_t hdScreenWidth);
 	
 	void CleanupInvalidRules();
