@@ -1841,6 +1841,10 @@ void SnesPpu::RenderScanline() {
 	  size_t chunkTaille = (_drawEndX - _drawStartX + 1) * sizeof(SnesHdPixelData);
 	  memset(_hdMainScreenBuffer + _drawStartX, 0, chunkTaille);
 	  memset(_hdSubScreenBuffer + _drawStartX, 0, chunkTaille);
+	  // ETAPE 2 16:9 : efface la rangee de bande Mode 7 HD de cette scanline
+	  if(_drawStartX == 0 && SnesHdPackLoader::ActivePack && SnesHdPackLoader::ActivePack->WsExtPx > 0) {
+		  { const int bandRowC = _overscanFrame ? (int)_scanline - 1 : (int)_scanline + 6; if(bandRowC >= 0 && bandRowC < 240) memset(_currentHdBuffer + SnesHdM7BandBase + ((uint32_t)bandRowC << 8), 0, 256 * sizeof(SnesHdPixelData)); }
+	  }
 	  // ====================================================================
 
 	  if(_state.ForcedBlank) {
@@ -2388,25 +2392,13 @@ void SnesPpu::RenderTilemapMode7()
 	int16_t m7D = _state.Mode7.VerticalMirroring ? -_state.Mode7.Matrix[3] : _state.Mode7.Matrix[3];
 
 
-	// --- 4. BOUCLE DE RENDU DES PIXELS ---
-	for(int x = _drawStartX; x <= _drawEndX; x++) {
-
-		// ON SAUVEGARDE LES VALEURS EXACTES AVANT QU'ELLES SOIENT INCRÉMENTÉES
-		int32_t currentM7X = xValue;
-		int32_t currentM7Y = yValue;
-
-
-		int32_t xOffset = xValue >> 8;
-		int32_t yOffset = yValue >> 8;
-		xValue += xStep;
-		yValue += yStep;
-
-
-		SnesHdPixelData hdData = {};
+	// --- ECHANTILLONNAGE HD D'UN PIXEL MODE 7 (etape 1 : extraction, meme comportement) ---
+	auto sampleMode7Hd = [&](int32_t currentM7X, int32_t currentM7Y, uint8_t& tileIndex, SnesHdPixelData& hdData) -> bool {
+		int32_t xOffset = currentM7X >> 8;
+		int32_t yOffset = currentM7Y >> 8;
 		bool hdFound = false;
 
 		// --- 1. CALCUL DU TILE SNES (On le remonte au tout début) ---
-		uint8_t tileIndex;
 		if(!_state.Mode7.LargeMap) {
 			int32_t yOff = yOffset & 0x3FF;
 			int32_t xOff = xOffset & 0x3FF;
@@ -2414,7 +2406,7 @@ void SnesPpu::RenderTilemapMode7()
 		} else {
 			if(yOffset < 0 || yOffset > 0x3FF || xOffset < 0 || xOffset > 0x3FF) {
 				if(_state.Mode7.FillWithTile0) tileIndex = 0;
-				else continue;
+				else return false;
 			} else {
 				tileIndex = (uint8_t)_vram[((yOffset & ~0x07) << 4) | (xOffset >> 3)];
 			}
@@ -2490,6 +2482,53 @@ void SnesPpu::RenderTilemapMode7()
 		}
 
 
+		return true;
+	};
+
+	// --- ETAPE 2 16:9 : COLONNES DE BANDE MODE 7 (tuiles <m7tiles>) ---
+	// Calcul hors de l'ecran SNES : x = -W..-1 et 256..256+W-1, extrapolation lineaire des compteurs.
+	// Desactive en miroir horizontal (point de depart dependant du segment).
+	if constexpr(layerIndex == 0) {
+		if(SnesHdPackLoader::ActivePack && _scanline > 0 && _drawStartX == 0 && !_state.Mode7.HorizontalMirroring && SnesHdPackLoader::ActivePack->WsExtPx > 0 && (drawMain || drawSub)) {
+			const int32_t wsB = (int32_t)std::min<uint32_t>(SnesHdPackLoader::ActivePack->WsExtPx, 128u);
+			const int32_t baseX = xValue;
+			const int32_t baseY = yValue;
+			SnesHdPixelData* bandRow = _currentHdBuffer + SnesHdM7BandBase + ((uint32_t)(_overscanFrame ? (int)_scanline - 1 : (int)_scanline + 6) << 8);
+			for(int32_t bx = -wsB; bx < 256 + wsB; bx++) {
+				if(bx >= 0 && bx < 256) continue;
+				const int32_t cX = baseX + xStep * bx;
+				const int32_t cY = baseY + yStep * bx;
+				uint8_t bTile = 0;
+				SnesHdPixelData bd = {};
+				if(sampleMode7Hd(cX, cY, bTile, bd) && bd.IsMode7Tile) {
+					const int32_t bxo = (cX >> 8) & 7;
+					const int32_t byo = (cY >> 8) & 7;
+					const uint8_t bColorIdx = (uint8_t)(_vram[((bTile << 6) + (byo << 3) + bxo)] >> 8);
+					bd.BaseColor = directColorMode ? (uint16_t)(((bColorIdx & 0x07) << 2) | ((bColorIdx & 0x38) << 4) | ((bColorIdx & 0xC0) << 7)) : _cgram[bColorIdx];
+					bd.SnesPriorityLevel = normalPriority;
+					bandRow[bx < 0 ? (bx + 128) : (bx - 128)] = bd;
+				}
+			}
+		}
+	}
+
+	// --- 4. BOUCLE DE RENDU DES PIXELS ---
+	for(int x = _drawStartX; x <= _drawEndX; x++) {
+
+		// ON SAUVEGARDE LES VALEURS EXACTES AVANT QU'ELLES SOIENT INCRÉMENTÉES
+		int32_t currentM7X = xValue;
+		int32_t currentM7Y = yValue;
+
+
+		int32_t xOffset = xValue >> 8;
+		int32_t yOffset = yValue >> 8;
+		xValue += xStep;
+		yValue += yStep;
+
+
+		SnesHdPixelData hdData = {};
+		uint8_t tileIndex = 0;
+		if(!sampleMode7Hd(currentM7X, currentM7Y, tileIndex, hdData)) continue;
 		uint16_t colorIndex;
 		uint8_t priority;
 		if constexpr(layerIndex == 1) {

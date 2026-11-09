@@ -27,6 +27,10 @@ class SnesPpu;
 struct SnesPpuState;
 struct SnesHdPixelData;
 
+// Bande 16:9 Mode 7 (tuiles <m7tiles>) : rangee dans le buffer HD, apres les lignes 512 px.
+// Ligne y, colonnes SNES -128..-1 -> index +0..127, colonnes 256..383 -> index +128..255.
+constexpr uint32_t SnesHdM7BandBase = 512u * 240u;
+
 
 // Enumération pour le mode de lecture
 enum class SnesHdVideoMode

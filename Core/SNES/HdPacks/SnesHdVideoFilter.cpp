@@ -1553,48 +1553,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	}
 
-	const auto tPrep1 = std::chrono::steady_clock::now();
-	for(uint32_t y = 0; y < cropHeight; y++) {
-		uint32_t snesY = y + srcY;
-		uint32_t outY = y + dstY;
-
-		// --- BOUCLE X POUR LES SPRITES ET TUILES DE BASE ---
-		for(uint32_t x = 0; x < cropWidth; x++) {
-			uint32_t snesX = x + srcX;
-			uint32_t outX = x + dstX;
-
-			uint32_t bufferOffset = snesY * _baseFrameInfo.Width + snesX;
-			uint16_t snesPixel = cwPixel(snesY, snesX, ppuOutputBuffer[bufferOffset]);
-
-			SnesHdPixelData hdDataMain = hdBuffer[bufferOffset];
-			SnesHdPixelData hdDataSub = hdSubBuffer[bufferOffset];
-			SnesHdPixelData hdData = hdDataMain;
-
-			bool hasSubScreenHdElement = (hdDataSub.Tile != nullptr && !hdDataSub.Tile->HdTileData.empty());
-			if(hasSubScreenHdElement) {
-				hdData = hdDataSub;
-			}
-
-			if(hdData.IsMode7) continue;
-
-			uint32_t sdColor = SnesHdPackLoader::ActivePack->IsColorMathDisabled
-				? _calculatedPalette[hdData.BaseColor]
-				: _calculatedPalette[snesPixel];
-
-			uint8_t pixelZ = 20 + (hdData.SnesPriorityLevel * 4);
-			if(hdData.IsHighPriority) pixelZ += 2;
-
-			if(!hdData.IsSprite && hdData.SourceLayer >= 0 && hdData.SourceLayer < 4) {
-				for(auto& rule : SnesHdPackLoader::ActivePack->LayerOrders) {
-					if(!rule.MatchesCondition(snesX, snesY, &hdData)) continue;
-					pixelZ = rule.ZIndexBg[hdData.SourceLayer];
-					if(hdData.IsHighPriority) pixelZ += 2;
-					break;
-				}
-			}
-
-			// --- STEP 1.5: INDIVIDUAL MODE 7 TILES (<m7tiles>) WITH ANISOTROPIC FILTERING ---
-			auto renderMode7Tile = [&](const SnesHdPixelData& m7Data, uint8_t targetZ, bool useColorMath) {
+			auto renderMode7Tile = [&](const SnesHdPixelData& m7Data, uint8_t targetZ, bool useColorMath, uint32_t outX, uint32_t outY, uint32_t sdColor) {
 				SnesHdMode7Image* m7Img = SnesHdPackLoader::ActivePack->GetMode7Image(m7Data.M7TileHash);
 				const bool m7TileIgn = ign2dOn && m7Img && m7Img->IsIgnored2D(); // <Ignore2DOverlays> : tile m7tiles entiere
 
@@ -1751,6 +1710,72 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				}
 			};
 
+	// --- ETAPE 2 16:9 : BANDES MODE 7 (<m7tiles>) ---
+	// Colonnes de bande (SD) : [0, wsExt) et [sdTotal - wsExt, sdTotal). Donnees : hdBuffer si la colonne SNES
+	// est dans 0..255, sinon la rangee de bande calculee par la PPU (SnesHdM7BandBase).
+	if(wsExt > 0) {
+		const uint32_t sdTotal = outWidth / scale;
+		for(uint32_t y = 0; y < cropHeight; y++) {
+			if(m7Lines[y].Img) continue; // lignes deja rendues par la passe m7img
+			const uint32_t snesYb = y + srcY;
+			const uint32_t outYb = y + dstY;
+			for(uint32_t bi = 0; bi < 2 * wsExt; bi++) {
+				const uint32_t outXb = (bi < wsExt) ? bi : (sdTotal - 2 * wsExt + bi);
+				const int32_t snesXb = (int32_t)outXb - (int32_t)dstX + (int32_t)srcX;
+				const SnesHdPixelData* px = nullptr;
+				if(snesXb >= 0 && snesXb < 256) px = &hdBuffer[snesYb * _baseFrameInfo.Width + snesXb];
+				else if(snesXb >= -128 && snesXb < 0) px = &hdBuffer[SnesHdM7BandBase + snesYb * 256 + (snesXb + 128)];
+				else if(snesXb >= 256 && snesXb < 384) px = &hdBuffer[SnesHdM7BandBase + snesYb * 256 + (snesXb - 128)];
+				if(!px || !px->IsMode7Tile) continue;
+				uint8_t bandZ = (uint8_t)(20 + px->SnesPriorityLevel * 4);
+				if(px->IsHighPriority) bandZ += 2;
+				renderMode7Tile(*px, bandZ, false, outXb, outYb, 0u);
+			}
+		}
+	}
+
+	const auto tPrep1 = std::chrono::steady_clock::now();
+	for(uint32_t y = 0; y < cropHeight; y++) {
+		uint32_t snesY = y + srcY;
+		uint32_t outY = y + dstY;
+
+		// --- BOUCLE X POUR LES SPRITES ET TUILES DE BASE ---
+		for(uint32_t x = 0; x < cropWidth; x++) {
+			uint32_t snesX = x + srcX;
+			uint32_t outX = x + dstX;
+
+			uint32_t bufferOffset = snesY * _baseFrameInfo.Width + snesX;
+			uint16_t snesPixel = cwPixel(snesY, snesX, ppuOutputBuffer[bufferOffset]);
+
+			SnesHdPixelData hdDataMain = hdBuffer[bufferOffset];
+			SnesHdPixelData hdDataSub = hdSubBuffer[bufferOffset];
+			SnesHdPixelData hdData = hdDataMain;
+
+			bool hasSubScreenHdElement = (hdDataSub.Tile != nullptr && !hdDataSub.Tile->HdTileData.empty());
+			if(hasSubScreenHdElement) {
+				hdData = hdDataSub;
+			}
+
+			if(hdData.IsMode7) continue;
+
+			uint32_t sdColor = SnesHdPackLoader::ActivePack->IsColorMathDisabled
+				? _calculatedPalette[hdData.BaseColor]
+				: _calculatedPalette[snesPixel];
+
+			uint8_t pixelZ = 20 + (hdData.SnesPriorityLevel * 4);
+			if(hdData.IsHighPriority) pixelZ += 2;
+
+			if(!hdData.IsSprite && hdData.SourceLayer >= 0 && hdData.SourceLayer < 4) {
+				for(auto& rule : SnesHdPackLoader::ActivePack->LayerOrders) {
+					if(!rule.MatchesCondition(snesX, snesY, &hdData)) continue;
+					pixelZ = rule.ZIndexBg[hdData.SourceLayer];
+					if(hdData.IsHighPriority) pixelZ += 2;
+					break;
+				}
+			}
+
+			// --- STEP 1.5: INDIVIDUAL MODE 7 TILES (<m7tiles>) WITH ANISOTROPIC FILTERING ---
+
 			// Si une tuile Mode 7 individuelle (<m7tiles>) se trouve sous le sprite (sauvegardée dans hdDataSub),
 			// on la dessine d'abord dans le buffer de sortie afin que le fond ne reste pas noir/transparent sous le sprite.
 			// Lignes rendues par la passe Mode 7 HD : les <m7tiles> y sont deja echantillonnees
@@ -1758,11 +1783,11 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			const bool m7LineDone = (m7Lines[y].Img != nullptr);
 			if(hdDataSub.IsMode7Tile && !m7LineDone) {
 				uint8_t m7PixelZ = 20 + (hdDataSub.SnesPriorityLevel * 4);
-				renderMode7Tile(hdDataSub, m7PixelZ, false);
+				renderMode7Tile(hdDataSub, m7PixelZ, false, outX, outY, sdColor);
 			}
 
 			if(hdData.IsMode7Tile) {
-				if(!m7LineDone) renderMode7Tile(hdData, pixelZ, true);
+				if(!m7LineDone) renderMode7Tile(hdData, pixelZ, true, outX, outY, sdColor);
 				continue;
 			}
 
