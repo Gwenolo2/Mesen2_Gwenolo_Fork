@@ -10,6 +10,7 @@
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/StringUtilities.h"
 #include "Utilities/HexUtilities.h"
+#include "Utilities/HdPackRandomPath.h"
 #include "Utilities/PNGHelper.h"
 #include "Utilities/FastString.h"
 #include "Utilities/magic_enum.hpp"
@@ -176,6 +177,32 @@ void HdPackLoader::ExpandIncludes(const vector<uint8_t>& input, const string& di
 	}
 }
 
+// Remplacement textuel des @Alias dans une ligne : meme algorithme que le SNES (une substitution par passe, 10 passes au maximum)
+static void ApplyAliases(string& line, const std::unordered_map<string, string>& aliases)
+{
+	bool replaced;
+	int passCount = 0;
+	do {
+		replaced = false;
+		size_t atPos = 0;
+		while((atPos = line.find('@', atPos)) != string::npos) {
+			size_t endPos = atPos + 1;
+			while(endPos < line.length() && (std::isalnum(static_cast<unsigned char>(line[endPos])) || line[endPos] == '_')) {
+				endPos++;
+			}
+			string aliasName = line.substr(atPos, endPos - atPos);
+			auto it = aliases.find(aliasName);
+			if(it != aliases.end()) {
+				line.replace(atPos, aliasName.length(), it->second);
+				replaced = true;
+				break;
+			}
+			atPos = endPos;
+		}
+		passCount++;
+	} while(replaced && passCount < 10);
+}
+
 bool HdPackLoader::LoadPack()
 {
 	string lineContent;
@@ -204,6 +231,7 @@ bool HdPackLoader::LoadPack()
 
 		size_t len = hdDefinition.size();
 		size_t pos = 0;
+		std::unordered_map<string, string> aliases; // <alias>Nom,Valeur -> cle "@Nom"
 		while(pos < len) {
 			lineContent.clear();
 
@@ -225,6 +253,21 @@ bool HdPackLoader::LoadPack()
 			while(lineContent.size() > 0 && (lineContent[lineContent.size() - 1] == '\r' || lineContent[lineContent.size() - 1] == '\n')) {
 				lineContent = lineContent.substr(0, lineContent.size() - 1);
 			}
+
+			// <alias>Nom,Valeur : remplacement textuel de @Nom dans les lignes suivantes (comme le SNES)
+			if(lineContent.substr(0, 7) == "<alias>") {
+				string aliasData = lineContent.substr(7);
+				size_t commaPos = aliasData.find(',');
+				if(commaPos != string::npos) {
+					aliases["@" + StringUtilities::Trim(aliasData.substr(0, commaPos))] = StringUtilities::Trim(aliasData.substr(commaPos + 1));
+				} else {
+					logError("Syntax error <alias>. Expected : <alias>AliasName,Value");
+				}
+				continue;
+			}
+
+			// Remplacement des @Alias avant la lecture des conditions et des tags
+			ApplyAliases(lineContent, aliases);
 
 			vector<HdPackCondition*> conditions;
 			if(lineContent.substr(0, 1) == "[") {
@@ -540,6 +583,69 @@ void HdPackLoader::ProcessPatchTag(vector<string> &tokens)
 	}
 }
 
+// Resout un chemin de PNG contenant "Randomize" / "random" (insensible a la casse).
+// Zip : la liste des entrees n'est lue que si le mot-cle est present. Retour false si erreur (journalisee).
+bool HdPackLoader::ResolveRandomPath(const string& path, string& resolved)
+{
+	if(HdPackToLowerAscii(path).find("random") == string::npos) {
+		resolved = path;
+		return true;
+	}
+
+	const vector<string>* entries = nullptr;
+	if(_loadFromZip) {
+		if(_zipEntries.empty()) {
+			_zipEntries = _reader.GetFileList();
+		}
+		entries = &_zipEntries;
+	}
+
+	string randomError;
+	if(HdPackResolveRandomPath(path, _hdPackFolder, resolved, randomError, _randomChoices, entries) < 0) {
+		logError(randomError);
+		return false;
+	}
+	return true;
+}
+
+// Resout l'image d'une <tile> : index d'un <img> (nombre) ou chemin vers un PNG.
+// Un chemin peut contenir "Randomize" / "random" (insensible a la casse), resolu a l'ouverture du pack.
+// Retour : index dans ImageFileData, ou -1 en cas d'erreur (journalisee).
+int HdPackLoader::ResolveTileBitmapIndex(string imageParam)
+{
+	bool isIndex = !imageParam.empty() && std::all_of(imageParam.begin(), imageParam.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; });
+	if(isIndex) {
+		size_t index = std::stoul(imageParam);
+		if(index < _data->ImageFileData.size()) {
+			return (int)index;
+		}
+		logError("Invalid bitmap index: " + imageParam);
+		return -1;
+	}
+
+	string resolved;
+	if(!ResolveRandomPath(imageParam, resolved)) {
+		return -1;
+	}
+
+	// Meme PNG deja charge (par <img> ou par une autre tile) : on reutilise l'entree
+	for(size_t i = 0; i < _data->ImageFileData.size(); i++) {
+		if(_data->ImageFileData[i]->PngName == resolved) {
+			return (int)i;
+		}
+	}
+
+	_data->ImageFileData.push_back(unique_ptr<HdPackBitmapInfo>(new HdPackBitmapInfo()));
+	HdPackBitmapInfo& bitmapInfo = *_data->ImageFileData.back().get();
+	if(!LoadFile(resolved, bitmapInfo.FileData)) {
+		_data->ImageFileData.pop_back();
+		logError("Error loading HDPack: PNG file " + resolved + " could not be read.");
+		return -1;
+	}
+	bitmapInfo.PngName = resolved;
+	return (int)_data->ImageFileData.size() - 1;
+}
+
 void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition*> conditions)
 {
 	HdPackTileInfo *tileInfo = new HdPackTileInfo();
@@ -550,7 +656,14 @@ void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition
 		tileInfo->PaletteColors = std::stoi(tokens[index + 2]) | (std::stoi(tokens[index + 1]) << 8) | (std::stoi(tokens[index]) << 16);
 		index += 3;
 	} else {
-		tileInfo->BitmapIndex = std::stoi(tokens[index++]);
+		// Image : index d'un <img>, ou chemin vers un PNG (avec "Randomize" / "random" possible)
+		string imageParam = StringUtilities::Trim(tokens[index++]);
+		int bitmapIndex = ResolveTileBitmapIndex(imageParam);
+		if(bitmapIndex < 0) {
+			delete tileInfo;
+			return;
+		}
+		tileInfo->BitmapIndex = (uint32_t)bitmapIndex;
 
 		string tileData = tokens[index++];
 		string palData = tokens[index++];
@@ -927,6 +1040,12 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 	checkConstraint(tokens.size() >= 2, "Background tag should contain at least 2 parameters");
 	checkConstraintEx(tokens.size() < 9, "Background tag contains too many parameters");
 	HdPackBitmapInfo* bgFileData = nullptr;
+
+	// Mot-cle "Randomize" / "random" dans le chemin du PNG : tirage unique par pack
+	string randomPath;
+	if(ResolveRandomPath(tokens[0], randomPath)) {
+		tokens[0] = randomPath;
+	}
 
 	auto result = _backgroundsByName.find(tokens[0]);
 	if(result == _backgroundsByName.end()) {

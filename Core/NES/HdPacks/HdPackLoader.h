@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include "pch.h"
 #include "NES/HdPacks/HdData.h"
 #include "Utilities/ZipReader.h"
@@ -24,6 +25,8 @@ private:
 	vector<std::pair<string, int>> _lineOrigins;
 	bool _hasIncludes = false;
 	ZipReader _reader;
+	std::map<string, string> _randomChoices; // tirage Randomize unique par pack
+	vector<string> _zipEntries;             // entrees du zip, lues une fois si besoin
 	string _hdPackDefinitionFile;
 	string _hdPackFolder;
 	unordered_map<string, HdPackCondition*> _conditionsByName;
@@ -48,6 +51,8 @@ private:
 
 	//Video
 	bool ProcessImgTag(string src);
+	int ResolveTileBitmapIndex(string imageParam);
+	bool ResolveRandomPath(const string& path, string& resolved);
 	void ProcessPatchTag(vector<string> &tokens);
 	void ProcessOverscanTag(vector<string> &tokens);
 	void ProcessConditionTag(vector<string> &tokens, bool createInvertedCondition);

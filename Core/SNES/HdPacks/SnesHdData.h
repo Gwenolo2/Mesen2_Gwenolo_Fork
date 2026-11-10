@@ -1,4 +1,5 @@
 #pragma once
+#include <map>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -1627,6 +1628,8 @@ public:
 	// Sprites en format large : 0 = safe (visibles si partiellement dans la zone SNES), 1 = unsafe (aussi dans la bande seule)
 	uint8_t WsObjUnsafe = 0;
 
+	// Tirage Randomize/random unique par pack : dossier parent (minuscules) -> sous-dossier tire
+	std::map<std::string, std::string> RandomFolderChoices;
 	std::vector<std::unique_ptr<SnesHdPackBitmapInfo>> ImageFileData;
 	std::unordered_map<SnesHdTileKey, std::vector<SnesHdPackTileInfo*>> TileByKey;
 

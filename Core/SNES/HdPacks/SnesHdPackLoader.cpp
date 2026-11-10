@@ -9,6 +9,7 @@
 #include "Utilities/StringUtilities.h"
 #include "Utilities/PNGHelper.h"
 #include "Utilities/VirtualFile.h"
+#include "Utilities/HdPackRandomPath.h"
 #include <fstream>
 #include <iostream>
 #include <algorithm>
@@ -534,46 +535,19 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				return; // On sort de la lambda
 			}
 
-			// --- GESTION DU MOT-CLÉ "Randomize" ---
-			std::string randomToken = "Randomize";
-			size_t randPos;
-
-			while((randPos = pngPath.find(randomToken)) != std::string::npos) {
-				std::string parentRelative = pngPath.substr(0, randPos);
-				std::string afterRandomize = pngPath.substr(randPos + randomToken.length());
-				std::string parentFullPath = FolderUtilities::CombinePath(rootFolder, parentRelative);
-
-				std::vector<std::string> subFolders;
-				try {
-					for(const auto& entry : std::filesystem::directory_iterator(parentFullPath)) {
-						if(entry.is_directory()) {
-							subFolders.push_back(entry.path().filename().string());
-						}
-					}
-				} catch(const std::exception& e) {
-					MessageManager::Log("[SnesHDPack] Line " + lineLoc + " - Error reading 'Randomize' Folder : " + parentFullPath);
-					pngPath = "";
-					break;
+			// --- MOT-CLE "Randomize" / "random" (insensible a la casse) : tirage d'un sous-dossier ---
+			{
+				std::string randomized, randomError;
+				if(HdPackResolveRandomPath(pngPath, rootFolder, randomized, randomError, outData->RandomFolderChoices) < 0) {
+					MessageManager::Log("[SnesHDPack] Line " + lineLoc + " - <tile> : " + randomError);
+					return; // On sort de la lambda
 				}
-
-				if(!subFolders.empty()) {
-					static std::random_device rd;
-					static std::mt19937 gen(rd());
-					std::uniform_int_distribution<> distrib(0, subFolders.size() - 1);
-
-					std::string chosenFolder = subFolders[distrib(gen)];
-					pngPath = parentRelative + chosenFolder + afterRandomize;
-				} else {
-					MessageManager::Log("[SnesHDPack] Line " + lineLoc + " - No SubFolder in : " + parentFullPath);
-					pngPath = "";
-					break;
-				}
+				pngPath = randomized;
 			}
 
 			if(pngPath.empty()) {
 				return; // On sort de la lambda
 			}
-
 
 			pngPath = NormalizePath(pngPath);
 
@@ -2594,6 +2568,15 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 				//std::string filename = StringUtilities::Trim(tokens[0]);
 				std::string filename = NormalizePath(tokens[0]);
+				// Mot-cle "Randomize" / "random" (insensible a la casse) : tirage d'un sous-dossier a l'ouverture du pack
+				{
+					std::string randomized, randomError;
+					if(HdPackResolveRandomPath(filename, rootFolder, randomized, randomError, outData->RandomFolderChoices) < 0) {
+						MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <background> : " + randomError);
+					} else {
+						filename = randomized;
+					}
+				}
 				std::string fullPath = FolderUtilities::CombinePath(rootFolder, filename);
 
 				// === DÉTECTION DOSSIER OU FICHIER (ANIMATION) ===
