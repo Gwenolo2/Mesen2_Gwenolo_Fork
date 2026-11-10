@@ -17,6 +17,9 @@ struct HdPackBaseTileCondition : public HdPackCondition
 	int32_t TileIndex = 0;
 	int32_t PixelOffset = 0;
 	bool IgnorePalette = false;
+	// Joker '*' / 'all' / 'any' (tileAtPosition, spriteAtPosition seulement) : toutes les colonnes / lignes de l'ecran
+	bool CheckAnyX = false;
+	bool CheckAnyY = false;
 
 	void Initialize(int32_t x, int32_t y, uint32_t palette, int32_t tileIndex, string tileData, bool ignorePalette)
 	{
@@ -38,8 +41,8 @@ struct HdPackBaseTileCondition : public HdPackCondition
 	{
 		stringstream out;
 		out << "<condition>" << Name << "," << GetConditionName() << ",";
-		out << TileX << ",";
-		out << TileY << ",";
+		out << (CheckAnyX ? std::string("*") : std::to_string(TileX)) << ",";
+		out << (CheckAnyY ? std::string("*") : std::to_string(TileY)) << ",";
 		if(TileIndex >= 0) {
 			out << HexUtilities::ToHex(TileIndex) << ",";
 		} else {
@@ -444,39 +447,76 @@ struct HdPackTileAtPositionCondition : public HdPackBaseTileCondition
 	HdPackConditionType GetConditionType() override { return HdPackConditionType::TileAtPos; }
 	string GetConditionName() override { return "tileAtPosition"; }
 
-	bool InternalCheckCondition(int x, int y, HdPpuTileInfo* tile) override
+	bool MatchTarget(const HdPpuTileInfo& target)
 	{
-		HdPpuTileInfo& target = _screenInfo->ScreenTiles[PixelOffset].Tile;
 		if(TileIndex >= 0) {
 			return (target.PaletteColors == PaletteColors || IgnorePalette) && (target.TileIndex == TileIndex || _hdPack->GetFallbackTile(target.TileIndex) == TileIndex);
+		} else if(IgnorePalette) {
+			return memcmp(&target.TileData, &TileData, sizeof(TileData)) == 0;
 		} else {
-			if(IgnorePalette) {
-				return memcmp(&target.TileData, &TileData, sizeof(TileData)) == 0;
-			} else {
-				return memcmp(&target.PaletteColors, &PaletteColors, sizeof(PaletteColors) + sizeof(TileData)) == 0;
+			return memcmp(&target.PaletteColors, &PaletteColors, sizeof(PaletteColors) + sizeof(TileData)) == 0;
+		}
+	}
+
+	bool InternalCheckCondition(int x, int y, HdPpuTileInfo* tile) override
+	{
+		if(!CheckAnyX && !CheckAnyY) {
+			return MatchTarget(_screenInfo->ScreenTiles[PixelOffset].Tile);
+		}
+
+		//Joker : on cherche sur les colonnes et/ou lignes demandees, dans tout l'ecran NES (256 x 240)
+		int xStart = CheckAnyX ? 0 : TileX, xEnd = CheckAnyX ? 255 : TileX;
+		int yStart = CheckAnyY ? 0 : TileY, yEnd = CheckAnyY ? 239 : TileY;
+		for(int py = yStart; py <= yEnd; py++) {
+			for(int px = xStart; px <= xEnd; px++) {
+				if(MatchTarget(_screenInfo->ScreenTiles[(py << 8) | px].Tile)) {
+					return true;
+				}
 			}
 		}
+		return false;
 	}
 };
 
 struct HdPackSpriteAtPositionCondition : public HdPackBaseTileCondition
 {
-	HdPackSpriteAtPositionCondition() { _useCache = true; }	
+	HdPackSpriteAtPositionCondition() { _useCache = true; }
 	HdPackConditionType GetConditionType() override { return HdPackConditionType::SpriteAtPos; }
 	string GetConditionName() override { return "spriteAtPosition"; }
 
+	bool MatchTarget(const HdPpuTileInfo& target)
+	{
+		if(TileIndex >= 0) {
+			return (target.PaletteColors == PaletteColors || IgnorePalette) && (target.TileIndex == TileIndex || _hdPack->GetFallbackTile(target.TileIndex) == TileIndex);
+		} else if(IgnorePalette) {
+			return memcmp(&target.TileData, &TileData, sizeof(TileData)) == 0;
+		} else {
+			return memcmp(&target.PaletteColors, &PaletteColors, sizeof(PaletteColors) + sizeof(TileData)) == 0;
+		}
+	}
+
+	bool MatchSpritesAt(int pixelIndex)
+	{
+		for(int i = 0, len = _screenInfo->ScreenTiles[pixelIndex].SpriteCount; i < len; i++) {
+			if(MatchTarget(_screenInfo->ScreenTiles[pixelIndex].Sprite[i])) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool InternalCheckCondition(int x, int y, HdPpuTileInfo* tile) override
 	{
-		for(int i = 0, len = _screenInfo->ScreenTiles[PixelOffset].SpriteCount; i < len;  i++) {
-			HdPpuTileInfo& target = _screenInfo->ScreenTiles[PixelOffset].Sprite[i];
-			if(TileIndex >= 0) {
-				if((target.PaletteColors == PaletteColors || IgnorePalette) && (target.TileIndex == TileIndex || _hdPack->GetFallbackTile(target.TileIndex) == TileIndex)) {
-					return true;
-				}
-			} else {
-				if(IgnorePalette && memcmp(&target.TileData, &TileData, sizeof(TileData)) == 0) {
-					return true;
-				} else if(!IgnorePalette && memcmp(&target.PaletteColors, &PaletteColors, sizeof(PaletteColors) + sizeof(TileData)) == 0) {
+		if(!CheckAnyX && !CheckAnyY) {
+			return MatchSpritesAt(PixelOffset);
+		}
+
+		//Joker : on cherche sur les colonnes et/ou lignes demandees, dans tout l'ecran NES (256 x 240)
+		int xStart = CheckAnyX ? 0 : TileX, xEnd = CheckAnyX ? 255 : TileX;
+		int yStart = CheckAnyY ? 0 : TileY, yEnd = CheckAnyY ? 239 : TileY;
+		for(int py = yStart; py <= yEnd; py++) {
+			for(int px = xStart; px <= xEnd; px++) {
+				if(MatchSpritesAt((py << 8) | px)) {
 					return true;
 				}
 			}

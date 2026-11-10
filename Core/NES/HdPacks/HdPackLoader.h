@@ -20,6 +20,9 @@ private:
 	bool _loadFromZip = false;
 	int _currentLine = 0;
 	int _errorCount = 0;
+	// <include> : origine (fichier, ligne) de chaque ligne du hires.txt une fois les inclusions resolues
+	vector<std::pair<string, int>> _lineOrigins;
+	bool _hasIncludes = false;
 	ZipReader _reader;
 	string _hdPackDefinitionFile;
 	string _hdPackFolder;
@@ -33,6 +36,8 @@ private:
 	bool CheckFile(string filename);
 
 	bool LoadPack();
+	void ExpandIncludes(const vector<uint8_t>& input, const string& displayName, vector<uint8_t>& output, vector<string>& includeStack);
+	string GetLineLocation();
 	void InitializeHdPack();
 	void LoadCustomPalette();
 	
@@ -64,6 +69,7 @@ private:
 	/*-------------------------------------------------------------------*/
 
 	void ProcessBgmTag(vector<string> &tokens);
+	void ProcessVideoTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessSfxTag(vector<string> &tokens);
 
 	vector<HdPackCondition*> ParseConditionString(string conditionString);

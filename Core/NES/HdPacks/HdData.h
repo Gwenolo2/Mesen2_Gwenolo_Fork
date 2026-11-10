@@ -6,6 +6,8 @@
 #include "Utilities/HexUtilities.h"
 #include "Utilities/SimpleLock.h"
 #include "Utilities/Timer.h"
+#include "Utilities/VirtualFile.h"
+#include "Shared/pl_mpeg.h"
 
 class BaseHdNesPack;
 
@@ -220,8 +222,8 @@ public:
 	string PngName;
 	vector<uint8_t> FileData;
 	vector<uint32_t> PixelData;
-	uint32_t Width;
-	uint32_t Height;
+	uint32_t Width = 0;
+	uint32_t Height = 0;
 
 	void Init()
 	{
@@ -489,6 +491,54 @@ struct PlayAdditionalSfxAction
 /*-----------------------------------------------------------*/
 
 
+// Video <video> : lecture MPEG-1 (pl_mpeg) superposee a l'image HD NES.
+// Z-index : meme echelle que la priorite des <background> (0 a 39). 99 par defaut = au-dessus de tout.
+// Le rendu NES n'a pas de z-buffer : HdNesPack garde, par pixel NES, le z du dernier element dessine.
+struct NesHdVideoInfo
+{
+	string Filename;
+	bool PauseMode = false;        // lu, pas encore utilise (comme cote SNES)
+	uint16_t SkipButtonsMask = 0;  // lu, pas encore utilise (comme cote SNES)
+	bool PlayOnlyOnce = false;
+	bool MuteAudio = false;
+	bool AlphaEnable = true;       // true : le noir pur (#000000) est transparent
+	bool Stretch = false;          // true : etire sur toute la zone visible
+	int LoopTargetFrame = 0;       // 0 = pas de boucle, -1 = boucle depuis le debut, > 0 = frame de redemarrage
+	int X = 0;
+	int Y = 0;
+	uint8_t ZIndex = 99;
+
+	bool HasPlayed = false;
+	bool IsPlaying = false;
+	double TimeAccumulator = 0.0;
+	vector<uint8_t> CurrentFramePixels;
+	int VideoWidth = 0;
+	int VideoHeight = 0;
+	plm_t* VideoPlayer = nullptr;
+	shared_ptr<vector<uint8_t>> FileData; // precharge par LoadAsync (vide = lecture depuis le disque)
+	vector<HdPackCondition*> Conditions;
+
+	NesHdVideoInfo() = default;
+	NesHdVideoInfo(const NesHdVideoInfo&) = delete;
+	NesHdVideoInfo& operator=(const NesHdVideoInfo&) = delete;
+	~NesHdVideoInfo()
+	{
+		if(VideoPlayer != nullptr) {
+			plm_destroy(VideoPlayer);
+			VideoPlayer = nullptr;
+		}
+	}
+
+	bool MatchesCondition()
+	{
+		if(PlayOnlyOnce && HasPlayed) return false;
+		for(HdPackCondition* cond : Conditions) {
+			if(!cond->CheckCondition(0, 0, nullptr)) return false;
+		}
+		return true;
+	}
+};
+
 struct HdPackData
 {
 private:
@@ -502,6 +552,7 @@ public:
 	vector<unique_ptr<HdPackBitmapInfo>> ImageFileData;
 	vector<unique_ptr<HdPackTileInfo>> Tiles;
 	vector<unique_ptr<HdPackCondition>> Conditions;
+	vector<unique_ptr<NesHdVideoInfo>> Videos;
 
 	/*-------------Added by Gwenolo : v1 useless-------------------*/
 	vector<PlayAdditionalBgmAction> PlayAdditionalBgmActions;
@@ -516,6 +567,8 @@ public:
 	unordered_map<string, string> PatchesByHash;
 	unordered_map<int, BgmTrackInfo> BgmFilesById;
 	unordered_map<int, string> SfxFilesById;
+	// Fichiers OGG precharges en memoire par LoadAsync (cle = meme chemin que BgmFilesById / SfxFilesById)
+	unordered_map<string, shared_ptr<vector<uint8_t>>> OggCache;
 	vector<uint32_t> Palette;
 
 	bool HasOverscanConfig = false;
@@ -531,8 +584,14 @@ public:
 	HdPackData(const HdPackData&) = delete;
 	HdPackData& operator=(const HdPackData&) = delete;
 
-	void LoadAsync()
+	// Prechargement complet du pack, appele AVANT le debut de l'emulation (appel bloquant dans NesConsole::LoadHdPack) :
+	// 1. decodage des PNG (<background> et <img>), 2. decoupage de toutes les tiles HD, 3. lecture des OGG en memoire.
+	// Plus aucun acces disque ni decodage PNG pendant le jeu.
+	void LoadAsync(bool preloadAudio = true)
 	{
+		Timer timer;
+
+		// 1. PNG
 		for(auto& bitmap : BackgroundFileData) {
 			bitmap->Init();
 			if(_cancelLoad) {
@@ -545,6 +604,84 @@ public:
 				return;
 			}
 		}
+
+		// 2. Tiles HD (sinon decoupees a leur premiere apparition a l'ecran)
+		size_t tileCount = 0;
+		for(auto& tile : Tiles) {
+			if(_cancelLoad) {
+				return;
+			}
+			if(tile && tile->Bitmap && tile->NeedInit()) {
+				tile->Init();
+				tileCount++;
+			}
+		}
+
+		// 3. Audio OGG (<bgm> et <sfx>)
+		size_t oggCount = 0;
+		size_t oggBytes = 0;
+		if(preloadAudio) {
+			auto preloadOgg = [&](const string& filename) {
+				if(filename.empty() || OggCache.find(filename) != OggCache.end()) {
+					return;
+				}
+				auto fileData = std::make_shared<vector<uint8_t>>();
+				VirtualFile file = filename;
+				if(file.ReadFile(*fileData) && !fileData->empty()) {
+					oggBytes += fileData->size();
+					oggCount++;
+					OggCache[filename] = fileData;
+				} else {
+					MessageManager::Log("[HDPack] Audio preload failed: " + filename);
+				}
+			};
+
+			for(auto& bgm : BgmFilesById) {
+				if(_cancelLoad) {
+					return;
+				}
+				preloadOgg(bgm.second.Filename);
+			}
+			for(auto& sfx : SfxFilesById) {
+				if(_cancelLoad) {
+					return;
+				}
+				preloadOgg(sfx.second);
+			}
+		}
+
+		// 4. Videos <video> : fichier en memoire (512 Mo max). Au-dela, le fichier reste lu depuis le disque.
+		if(preloadAudio) {
+			for(auto& video : Videos) {
+				if(_cancelLoad) {
+					return;
+				}
+				if(!video || video->Filename.empty()) {
+					continue;
+				}
+				VirtualFile file = video->Filename;
+				if(!file.IsValid() || file.GetSize() > (size_t)512 * 1024 * 1024) {
+					continue;
+				}
+				auto data = std::make_shared<vector<uint8_t>>();
+				if(file.ReadFile(*data) && !data->empty()) {
+					video->FileData = data;
+				}
+			}
+		}
+
+		MessageManager::Log("[HDPack] Preload done: " +
+			std::to_string(BackgroundFileData.size() + ImageFileData.size()) + " PNG, " +
+			std::to_string(tileCount) + " tiles, " +
+			std::to_string(oggCount) + " OGG (" + std::to_string(oggBytes / (1024 * 1024)) + " MB) in " +
+			std::to_string((int)timer.GetElapsedMS()) + " ms");
+	}
+
+	// Donnees OGG prechargees pour ce fichier, ou nullptr (lecture depuis le disque)
+	shared_ptr<vector<uint8_t>> GetPreloadedAudio(const string& filename)
+	{
+		auto result = OggCache.find(filename);
+		return result != OggCache.end() ? result->second : nullptr;
 	}
 
 	void CancelLoad()

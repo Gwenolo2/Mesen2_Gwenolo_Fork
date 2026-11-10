@@ -52,5 +52,6 @@ void HdVideoFilter::ApplyFilter(uint16_t *ppuOutputBuffer)
 	}
 
 	OverscanDimensions overscan = GetOverscan();
+	_hdNesPack->SetVideoAudioSink(_emu->GetSoundMixer());
 	_hdNesPack->Process((HdScreenInfo*)_frameData, GetOutputBuffer(), overscan);
 }

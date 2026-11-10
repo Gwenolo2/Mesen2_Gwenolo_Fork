@@ -71,7 +71,12 @@ bool HdAudioDevice::PlayBgmTrack(int trackId, uint32_t startOffset)
 {
 	auto result = _hdData->BgmFilesById.find(trackId);
 	if(result != _hdData->BgmFilesById.end()) {
-		if(_oggMixer->Play(result->second.Filename, false, startOffset, result->second.LoopPosition)) {
+		// OGG precharge en memoire si disponible, sinon lecture du fichier
+		shared_ptr<vector<uint8_t>> preloaded = _hdData->GetPreloadedAudio(result->second.Filename);
+		bool started = preloaded
+			? _oggMixer->Play(preloaded, false, startOffset, result->second.LoopPosition)
+			: _oggMixer->Play(result->second.Filename, false, startOffset, result->second.LoopPosition);
+		if(started) {
 			_lastBgmTrack = trackId;
 			return true;
 		}
@@ -86,6 +91,10 @@ bool HdAudioDevice::PlaySfx(uint8_t sfxNumber)
 {
 	auto result = _hdData->SfxFilesById.find(_album * 256 + sfxNumber);
 	if(result != _hdData->SfxFilesById.end()) {
+		shared_ptr<vector<uint8_t>> preloaded = _hdData->GetPreloadedAudio(result->second);
+		if(preloaded) {
+			return !_oggMixer->Play(preloaded, true, 0, 0);
+		}
 		return !_oggMixer->Play(result->second, true, 0, 0);
 	} else {
 		MessageManager::Log("[HDPack] Invalid album+sfx number combination: " + std::to_string(_album) + ":" + std::to_string(sfxNumber));

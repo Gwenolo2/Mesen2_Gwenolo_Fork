@@ -8,6 +8,7 @@
 #include "NES/NesDefaultVideoFilter.h"
 #include "Shared/MessageManager.h"
 #include "Shared/EmuSettings.h"
+#include "Shared/Audio/SoundMixer.h"
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/PNGHelper.h"
 
@@ -24,6 +25,7 @@ HdNesPack<scale>::HdNesPack(NesConsole* console, EmuSettings* settings, HdPackDa
 	_pool.Start(std::clamp((int)std::thread::hardware_concurrency() - 2, 1, 8));
 	_resolvedBg.resize(NesConstants::ScreenPixelCount, nullptr);
 	_resolvedSprites.resize(NesConstants::ScreenPixelCount * 4, nullptr);
+	_zNes.assign(NesConstants::ScreenPixelCount, 0);
 
 	InitializeFallbackTiles();
 	CleanupInvalidRules();
@@ -524,6 +526,8 @@ void HdNesPack<scale>::DrawBackgroundLayer(const HdBgConfig& bgConfig, uint32_t 
 {
 	if((int32_t)x >= bgConfig.BgMinX && (int32_t)x <= bgConfig.BgMaxX) {
 		HdBackgroundInfo& bgInfo = _hdData->BackgroundsByPriority[bgConfig.BgPriority][bgConfig.BackgroundIndex];
+		// Z-index : ce fond est le dernier element dessine sur ce pixel (si un <video> existe)
+		if(_zEnabled) _zNes[(y << 8) | x] = (uint8_t)bgConfig.BgPriority;
 		switch(bgInfo.BlendMode) {
 			case HdPackBlendMode::Alpha: DrawCustomBackground<HdPackBlendMode::Alpha>(bgInfo, outputBuffer, x + bgConfig.BgScrollX, y + bgConfig.BgScrollY, screenWidth); break;
 			case HdPackBlendMode::Add: DrawCustomBackground<HdPackBlendMode::Add>(bgInfo, outputBuffer, x + bgConfig.BgScrollX, y + bgConfig.BgScrollY, screenWidth); break;
@@ -586,6 +590,12 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 		opaqueBgTile = renderOriginalTiles && pixelInfo.Tile.BgColorIndex != 0;
 	}
 
+	//Z-index : le z est celui de l'element dessine en dernier. Les groupes de fond vont par priorite croissante,
+	//donc chaque tuile prend le z le plus haut de la couche qui la precede (voir HdNesPack::PriorityLevelsPerLayer).
+	auto markZ = [&](uint8_t z) {
+		if(_zEnabled) _zNes[pixelIndex] = z;
+	};
+
 	int lowestBgSprite = 999;
 	
 	if(!opaqueBgTile) {
@@ -607,8 +617,10 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 					hdPackSpriteInfo = sprites[k];
 					if(hdPackSpriteInfo) {
 						DrawTile(pixelInfo.Sprite[k], *hdPackSpriteInfo, outputBuffer, screenWidth);
+						markZ(HdNesPack::BehindBgPriority - 1);
 					} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
 						DrawColor(_palette[pixelInfo.Sprite[k].SpriteColor], outputBuffer, screenWidth);
+						markZ(HdNesPack::BehindBgPriority - 1);
 					}
 				}
 			}
@@ -623,10 +635,12 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 	
 	if(hdPackTileInfo) {
 		DrawTile(pixelInfo.Tile, *hdPackTileInfo, outputBuffer, screenWidth);
+		markZ(HdNesPack::BehindFgSpritesPriority - 1);
 	} else if(renderOriginalTiles) {
 		//Draw regular SD background tile
 		if(pixelInfo.Tile.BgColorIndex != 0) {
 			DrawColor(_palette[pixelInfo.Tile.BgColor], outputBuffer, screenWidth);
+			markZ(HdNesPack::BehindFgSpritesPriority - 1);
 		}
 	}
 
@@ -640,8 +654,10 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 				hdPackSpriteInfo = sprites[k];
 				if(hdPackSpriteInfo) {
 					DrawTile(pixelInfo.Sprite[k], *hdPackSpriteInfo, outputBuffer, screenWidth);
+					markZ(HdNesPack::ForegroundPriority - 1);
 				} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
 					DrawColor(_palette[pixelInfo.Sprite[k].SpriteColor], outputBuffer, screenWidth);
+					markZ(HdNesPack::ForegroundPriority - 1);
 				}
 			}
 		}
@@ -662,6 +678,12 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	const uint32_t xStart = overscan.Left, xEnd = 256 - overscan.Right;
 
 	OnBeforeApplyFilter();
+
+	//Z-index par pixel : calcule seulement si le pack contient un <video>
+	_zEnabled = !_hdData->Videos.empty();
+	if(_zEnabled) {
+		std::fill(_zNes.begin(), _zNes.end(), (uint8_t)0);
+	}
 
 	//Passe 1 (sequentielle) : quelle tile HD pour chaque pixel (fond + sprites)
 	for(uint32_t i = yStart; i < yEnd; i++) {
@@ -697,6 +719,147 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 				drawLine(i);
 			}
 		});
+	}
+
+	//Videos : appliquees en dernier (apres grayscale/emphasis), sequentiellement
+	if(_zEnabled) {
+		ProcessVideos(outputBuffer, screenWidth, overscan);
+	}
+}
+
+// Lecture des <video> et composition sur l'image HD. Appelee apres la passe de dessin, donc sans concurrence.
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessVideos(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan)
+{
+	const uint32_t hdHeight = (240 - overscan.Top - overscan.Bottom) * scale;
+	if(screenWidth == 0 || hdHeight == 0) {
+		return;
+	}
+	const uint32_t xStart = overscan.Left;
+	const uint32_t yStart = overscan.Top;
+
+	for(auto& video : _hdData->Videos) {
+		if(!video || !video->MatchesCondition()) {
+			continue;
+		}
+
+		if(!video->IsPlaying && !video->HasPlayed) {
+			// Memoire si precharge par LoadAsync, sinon depuis le disque
+			if(video->FileData && !video->FileData->empty()) {
+				video->VideoPlayer = plm_create_with_memory(video->FileData->data(), video->FileData->size(), 0);
+			} else {
+				video->VideoPlayer = plm_create_with_filename(video->Filename.c_str());
+			}
+			if(video->VideoPlayer == nullptr) {
+				video->HasPlayed = true;
+				continue;
+			}
+
+			video->VideoWidth = plm_get_width(video->VideoPlayer);
+			video->VideoHeight = plm_get_height(video->VideoPlayer);
+			if(video->VideoWidth <= 0 || video->VideoHeight <= 0) {
+				plm_destroy(video->VideoPlayer);
+				video->VideoPlayer = nullptr;
+				video->HasPlayed = true;
+				continue;
+			}
+
+			video->IsPlaying = true;
+			video->TimeAccumulator = 0.0;
+			plm_set_audio_enabled(video->VideoPlayer, !video->MuteAudio);
+			plm_set_audio_decode_callback(video->VideoPlayer, [](plm_t* mpeg, plm_samples_t* samples, void* user) {
+				SoundMixer* audioMixer = static_cast<SoundMixer*>(user);
+				if(audioMixer == nullptr) return;
+
+				int totalValues = samples->count * 2;
+				std::vector<int16_t> intSamples(totalValues);
+				for(int i = 0; i < totalValues; i++) {
+					float f = std::clamp(samples->interleaved[i], -1.0f, 1.0f);
+					intSamples[i] = static_cast<int16_t>(f * 32767.0f);
+				}
+				audioMixer->PlayAudioBuffer(intSamples.data(), (uint32_t)samples->count, (uint32_t)plm_get_samplerate(mpeg));
+			}, _videoAudio);
+
+			video->CurrentFramePixels.resize((size_t)video->VideoWidth * video->VideoHeight * 4, 0);
+		}
+
+		// Lecture et synchronisation (une mise a jour par frame de l'emulateur, comme cote SNES)
+		if(video->IsPlaying && video->VideoPlayer != nullptr) {
+			double fps = plm_get_framerate(video->VideoPlayer);
+			if(fps <= 0.0) fps = 30.0;
+			double frameTime = 1.0 / fps;
+			video->TimeAccumulator += 1.0 / 60.0;
+
+			bool newFrameDecoded = false;
+			plm_frame_t* frame = nullptr;
+			while(video->TimeAccumulator >= frameTime) {
+				frame = plm_decode_video(video->VideoPlayer);
+				video->TimeAccumulator -= frameTime;
+				newFrameDecoded = true;
+			}
+			if(newFrameDecoded && frame != nullptr) {
+				plm_frame_to_bgra(frame, video->CurrentFramePixels.data(), video->VideoWidth * 4);
+			}
+
+			if(plm_has_ended(video->VideoPlayer)) {
+				if(video->LoopTargetFrame != 0) {
+					if(video->LoopTargetFrame > 0) {
+						plm_seek(video->VideoPlayer, (double)video->LoopTargetFrame / fps, 0);
+					} else {
+						plm_rewind(video->VideoPlayer);
+					}
+					frame = plm_decode_video(video->VideoPlayer);
+					if(frame != nullptr) {
+						plm_frame_to_bgra(frame, video->CurrentFramePixels.data(), video->VideoWidth * 4);
+					}
+				} else {
+					video->IsPlaying = false;
+					video->HasPlayed = true;
+					plm_destroy(video->VideoPlayer);
+					video->VideoPlayer = nullptr;
+					video->CurrentFramePixels.clear();
+					continue;
+				}
+			}
+		}
+
+		if(video->CurrentFramePixels.empty() || video->VideoWidth <= 0 || video->VideoHeight <= 0) {
+			continue;
+		}
+
+		const uint32_t* videoPixels = reinterpret_cast<const uint32_t*>(video->CurrentFramePixels.data());
+
+		// Pixel HD (sx, sy) -> pixel NES (xStart + sx/scale, yStart + sy/scale) : test de z comme cote SNES
+		auto plot = [&](uint32_t sx, uint32_t sy, uint32_t pixel) {
+			if(video->AlphaEnable && (pixel & 0x00FFFFFF) == 0) return;
+			uint32_t nesIdx = ((yStart + sy / scale) << 8) | (xStart + sx / scale);
+			if(video->ZIndex >= _zNes[nesIdx]) {
+				outputBuffer[sy * screenWidth + sx] = pixel | 0xFF000000;
+				_zNes[nesIdx] = video->ZIndex;
+			}
+		};
+
+		if(video->Stretch) {
+			for(uint32_t sy = 0; sy < hdHeight; sy++) {
+				uint32_t vy = (uint32_t)((uint64_t)sy * video->VideoHeight / hdHeight);
+				const uint32_t* row = videoPixels + (size_t)vy * video->VideoWidth;
+				for(uint32_t sx = 0; sx < screenWidth; sx++) {
+					uint32_t vx = (uint32_t)((uint64_t)sx * video->VideoWidth / screenWidth);
+					plot(sx, sy, row[vx]);
+				}
+			}
+		} else {
+			int maxW = std::min(video->VideoWidth, (int)screenWidth - video->X);
+			int maxH = std::min(video->VideoHeight, (int)hdHeight - video->Y);
+			for(int y = 0; y < maxH; y++) {
+				for(int x = 0; x < maxW; x++) {
+					int sx = video->X + x;
+					int sy = video->Y + y;
+					if(sx < 0 || sy < 0) continue;
+					plot((uint32_t)sx, (uint32_t)sy, videoPixels[(size_t)y * video->VideoWidth + x]);
+				}
+			}
+		}
 	}
 }
 

@@ -17,7 +17,7 @@
 #include <iostream>
 #include <string>
 
-#define logError(y) MessageManager::Log("[HDPack - Line " + std::to_string(_currentLine) + "] " + (y)); _errorCount++;
+#define logError(y) MessageManager::Log("[HDPack - " + GetLineLocation() + "] " + (y)); _errorCount++;
 #define checkConstraint(x, y) if(!(x)) { logError(y); return; }
 #define checkConstraintEx(x, y) if(_data->Version >= 109) { checkConstraint(x, y); } else { if(!(x)) { logError(y); } }
 
@@ -105,6 +105,77 @@ bool HdPackLoader::LoadFile(string filename, vector<uint8_t> &fileData)
 	return false;
 }
 
+// Position de la ligne en cours pour les messages d'erreur.
+// Sans <include> : "Line N" (comme avant). Avec <include> : "fichier - Line N" (ligne dans le fichier d'origine).
+string HdPackLoader::GetLineLocation()
+{
+	if(_hasIncludes && _currentLine >= 1 && _currentLine <= (int)_lineOrigins.size()) {
+		const std::pair<string, int>& origin = _lineOrigins[_currentLine - 1];
+		return origin.first + " - Line " + std::to_string(origin.second);
+	}
+	return "Line " + std::to_string(_currentLine);
+}
+
+// Resolution des tags <include>fichier.txt : le contenu du fichier remplace la ligne, a l'endroit ou elle se trouve.
+// Le chemin est relatif a la racine du pack (dossier ou zip), comme pour les PNG. Les inclusions imbriquees sont acceptees.
+void HdPackLoader::ExpandIncludes(const vector<uint8_t>& input, const string& displayName, vector<uint8_t>& output, vector<string>& includeStack)
+{
+	size_t len = input.size();
+	size_t pos = 0;
+	int lineNumber = 0;
+
+	//Ignore un eventuel BOM UTF-8 en debut de fichier inclus
+	if(includeStack.size() > 1 && len >= 3 && input[0] == 0xEF && input[1] == 0xBB && input[2] == 0xBF) {
+		pos = 3;
+	}
+
+	while(pos < len) {
+		size_t start = pos;
+		while(pos < len && input[pos] != '\n') {
+			pos++;
+		}
+		string line((const char*)input.data() + start, pos - start);
+		if(pos < len) {
+			pos++; //saute le '\n'
+		}
+		lineNumber++;
+
+		string trimmed = StringUtilities::Trim(line);
+		while(trimmed.size() > 0 && trimmed[trimmed.size() - 1] == '\r') {
+			trimmed = trimmed.substr(0, trimmed.size() - 1);
+		}
+
+		if(trimmed.size() >= 9 && StringUtilities::ToLower(trimmed.substr(0, 9)) == "<include>") {
+			_hasIncludes = true;
+			string includeFile = StringUtilities::Trim(trimmed.substr(9));
+
+			//Meme position pour les erreurs ci-dessous que pour une ligne normale
+			_lineOrigins.push_back({ displayName, lineNumber });
+			_currentLine = (int)_lineOrigins.size();
+			output.push_back('\n'); //ligne vide a la place du tag : garde la correspondance des numeros de ligne
+
+			vector<uint8_t> includeData;
+			if(includeFile.empty()) {
+				logError("Include tag requires a file name");
+			} else if(includeStack.size() > 20) {
+				logError("Include depth limit reached: " + includeFile);
+			} else if(std::find(includeStack.begin(), includeStack.end(), StringUtilities::ToLower(includeFile)) != includeStack.end()) {
+				logError("Circular include ignored: " + includeFile);
+			} else if(!LoadFile(includeFile, includeData)) {
+				logError("Included file not found: " + includeFile);
+			} else {
+				includeStack.push_back(StringUtilities::ToLower(includeFile));
+				ExpandIncludes(includeData, includeFile, output, includeStack);
+				includeStack.pop_back();
+			}
+		} else {
+			output.insert(output.end(), line.begin(), line.end());
+			output.push_back('\n');
+			_lineOrigins.push_back({ displayName, lineNumber });
+		}
+	}
+}
+
 bool HdPackLoader::LoadPack()
 {
 	string lineContent;
@@ -114,6 +185,19 @@ bool HdPackLoader::LoadPack()
 		vector<uint8_t> hdDefinition;
 		if(!LoadFile("hires.txt", hdDefinition)) {
 			return false;
+		}
+
+		{
+			//Resolution des <include> avant la lecture : la suite voit un seul fichier a plat
+			vector<uint8_t> expanded;
+			vector<string> includeStack = { "hires.txt" };
+			_lineOrigins.clear();
+			_hasIncludes = false;
+			ExpandIncludes(hdDefinition, "hires.txt", expanded, includeStack);
+			if(_hasIncludes) {
+				hdDefinition = std::move(expanded);
+			}
+			_currentLine = 0;
 		}
 
 		InitializeGlobalConditions();
@@ -184,6 +268,9 @@ bool HdPackLoader::LoadPack()
 			} else if(lineContent.substr(0, 5) == "<sfx>") {
 				tokens = StringUtilities::Split(lineContent.substr(5), ',');
 				ProcessSfxTag(tokens);
+			} else if(lineContent.substr(0, 7) == "<video>") {
+				tokens = StringUtilities::Split(lineContent.substr(7), ',');
+				ProcessVideoTag(tokens, conditions);
 			} else if(lineContent.substr(0, 5) == "<ver>") {
 				_data->Version = stoi(lineContent.substr(5));
 				if(_data->Version > BaseHdNesPack::CurrentVersion) {
@@ -555,6 +642,18 @@ void HdPackLoader::ProcessOptionTag(vector<string> &tokens)
 	}
 }
 
+// Coordonnee d'une condition : nombre, ou joker '*' / 'all' / 'any' (toutes les colonnes ou lignes).
+// Le joker n'est accepte que par tileAtPosition et spriteAtPosition (verifie dans ProcessConditionTag).
+static int ParseConditionCoordinate(const string& token, bool& isAny)
+{
+	string t = StringUtilities::Trim(token);
+	if(t == "*" || t == "all" || t == "any") {
+		isAny = true;
+		return 0;
+	}
+	return std::stoi(t);
+}
+
 void HdPackLoader::ProcessConditionTag(vector<string> &tokens, bool createInvertedCondition)
 {
 	checkConstraint(tokens.size() >= 4, "Condition tag should contain at least 4 parameters");
@@ -606,8 +705,14 @@ void HdPackLoader::ProcessConditionTag(vector<string> &tokens, bool createInvert
 			checkConstraint(tokens.size() >= 6, "Condition tag should contain at least 6 parameters");
 			checkConstraintEx(tokens.size() < 9, "Condition tag contains too many parameters");
 
-			int x = std::stoi(tokens[index++]);
-			int y = std::stoi(tokens[index++]);
+			bool anyX = false, anyY = false;
+			int x = ParseConditionCoordinate(tokens[index++], anyX);
+			int y = ParseConditionCoordinate(tokens[index++], anyY);
+			bool isAtPosition = condition->GetConditionType() == HdPackConditionType::TileAtPos || condition->GetConditionType() == HdPackConditionType::SpriteAtPos;
+			if((anyX || anyY) && !isAtPosition) {
+				logError("Joker '*' is only supported by tileAtPosition and spriteAtPosition");
+				return;
+			}
 			string token = tokens[index++];
 			int32_t tileIndex = -1;
 			string tileData;
@@ -632,6 +737,8 @@ void HdPackLoader::ProcessConditionTag(vector<string> &tokens, bool createInvert
 			}
 
 			((HdPackBaseTileCondition*)condition.get())->Initialize(x, y, palette, tileIndex, tileData, ignorePalette);
+			((HdPackBaseTileCondition*)condition.get())->CheckAnyX = anyX;
+			((HdPackBaseTileCondition*)condition.get())->CheckAnyY = anyY;
 			break;
 		}
 
@@ -962,6 +1069,109 @@ int HdPackLoader::ProcessSoundTrack(string albumString, string trackString, stri
 
 
 
+
+// Booleens du tag <video> : Y/true/yes/1 = vrai (le reste des tags NES utilise Y/N)
+static bool ParseVideoBool(const string& value)
+{
+	string v = StringUtilities::ToLower(StringUtilities::Trim(value));
+	return v == "y" || v == "true" || v == "yes" || v == "1";
+}
+
+// <video>fichier,mode,skip,once,mute,loop,X,Y,Z,alpha,stretch : meme format que cote SNES.
+// Z : meme echelle que la priorite des <background> (0 a 39), 99 = au-dessus de tout (defaut).
+// mode (pause) et skip sont lus mais pas encore utilises, comme cote SNES.
+void HdPackLoader::ProcessVideoTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	checkConstraint(tokens.size() >= 4, "Video tag should contain at least 4 parameters");
+
+	string fileName = StringUtilities::Trim(tokens[0]);
+	if(!CheckFile(fileName)) {
+		logError("Video file not found: " + fileName);
+		return;
+	}
+
+	auto video = std::make_unique<NesHdVideoInfo>();
+	if(_loadFromZip) {
+		video->Filename = std::string(VirtualFile(_hdPackFolder, fileName));
+	} else {
+		video->Filename = FolderUtilities::CombinePath(_hdPackFolder, fileName);
+	}
+
+	video->PauseMode = StringUtilities::ToLower(StringUtilities::Trim(tokens[1])) == "pause";
+
+	std::string skipStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[2]));
+	if(skipStr.find("start") != string::npos) video->SkipButtonsMask |= 0x1000;
+	if(skipStr.find("a") != string::npos)     video->SkipButtonsMask |= 0x0080;
+	if(skipStr.find("b") != string::npos)     video->SkipButtonsMask |= 0x8000;
+
+	video->PlayOnlyOnce = ParseVideoBool(tokens[3]);
+
+	if(tokens.size() >= 5) {
+		video->MuteAudio = ParseVideoBool(tokens[4]);
+	}
+
+	if(tokens.size() >= 6) {
+		std::string loopStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[5]));
+		if(loopStr == "false" || loopStr == "0" || loopStr == "no" || loopStr == "n") {
+			video->LoopTargetFrame = 0;
+		} else if(loopStr == "true" || loopStr == "yes" || loopStr == "y" || loopStr == "1") {
+			video->LoopTargetFrame = -1;
+		} else {
+			try {
+				video->LoopTargetFrame = std::stoi(loopStr);
+			} catch(...) {
+				video->LoopTargetFrame = -1;
+			}
+		}
+	}
+
+	if(tokens.size() >= 8) {
+		try {
+			video->X = std::stoi(StringUtilities::Trim(tokens[6]));
+			video->Y = std::stoi(StringUtilities::Trim(tokens[7]));
+		} catch(...) {
+			video->X = 0;
+			video->Y = 0;
+		}
+	}
+
+	if(tokens.size() >= 9) {
+		try {
+			int z = std::stoi(StringUtilities::Trim(tokens[8]));
+			video->ZIndex = (uint8_t)std::clamp(z, 0, 255);
+		} catch(...) {
+			video->ZIndex = 99;
+		}
+	}
+
+	if(tokens.size() >= 10) {
+		std::string alphaStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[9]));
+		video->AlphaEnable = !(alphaStr == "false" || alphaStr == "0" || alphaStr == "no" || alphaStr == "n");
+	}
+
+	if(tokens.size() >= 11) {
+		video->Stretch = ParseVideoBool(tokens[10]);
+	}
+
+	// Memes conditions que <background> (les autres ne sont pas evaluables sans pixel)
+	for(HdPackCondition* condition : conditions) {
+		switch(condition->GetConditionType()) {
+			case HdPackConditionType::TileAtPos:
+			case HdPackConditionType::SpriteAtPos:
+			case HdPackConditionType::MemoryCheck:
+			case HdPackConditionType::MemoryCheckConstant:
+			case HdPackConditionType::FrameRange:
+				video->Conditions.push_back(condition);
+				break;
+
+			default:
+				logError("Invalid condition type for video: " + fileName);
+				break;
+		}
+	}
+
+	_data->Videos.push_back(std::move(video));
+}
 
 void HdPackLoader::ProcessBgmTag(vector<string> &tokens)
 {

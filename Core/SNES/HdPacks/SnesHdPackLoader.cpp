@@ -1193,7 +1193,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 						// 1. Parsing de la Colonne (X) avec gestion du Joker '*'
 						std::string strX = StringUtilities::Trim(tokens[2]);
 						int tCol = 0;
-						if(strX == "*" || strX == "all") {
+						if(strX == "*" || strX == "all" || strX == "any") {
 							tileCond->CheckAnyX = true;
 						} else {
 							tCol = std::stoi(strX);
@@ -1202,7 +1202,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 						// 2. Parsing de la Ligne (Y) avec gestion du Joker '*'
 						std::string strY = StringUtilities::Trim(tokens[3]);
 						int tRow = 0;
-						if(strY == "*" || strY == "all") {
+						if(strY == "*" || strY == "all" || strY == "any") {
 							tileCond->CheckAnyY = true;
 						} else {
 							tRow = std::stoi(strY);
@@ -1313,7 +1313,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 						// 1. Parsing du X avec gestion du Joker '*'
 						std::string strX = StringUtilities::Trim(tokens[2]);
 						int tX = 0;
-						if(strX == "*" || strX == "all") {
+						if(strX == "*" || strX == "all" || strX == "any") {
 							spriteCond->CheckAnyX = true;
 						} else {
 							tX = std::stoi(strX) * 8;
@@ -1322,7 +1322,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 						// 2. Parsing du Y avec gestion du Joker '*'
 						std::string strY = StringUtilities::Trim(tokens[3]);
 						int tY = 0;
-						if(strY == "*" || strY == "all") {
+						if(strY == "*" || strY == "all" || strY == "any") {
 							spriteCond->CheckAnyY = true;
 						} else {
 							tY = std::stoi(strY) * 8;

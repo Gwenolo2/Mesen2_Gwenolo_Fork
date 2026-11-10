@@ -24,6 +24,8 @@ public:
 	
 	void Reset(uint32_t sampleRate);
 	bool Play(string filename, bool isSfx, uint32_t startOffset, uint32_t loopPosition);
+	// Lecture depuis un fichier OGG deja en memoire (precharge par HdPackData::LoadAsync)
+	bool Play(shared_ptr<vector<uint8_t>> audioData, bool isSfx, uint32_t startOffset, uint32_t loopPosition);
 	void SetPlaybackOptions(uint8_t options);
 	void SetPausedFlag(bool paused);
 	void StopBgm();

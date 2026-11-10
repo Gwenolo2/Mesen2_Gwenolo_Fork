@@ -33,7 +33,7 @@ HdPackBuilder::HdPackBuilder(Emulator* emu, PpuModel ppuModel, bool isChrRam, Hd
 	string existingPackDefinition = FolderUtilities::CombinePath(_saveFolder, "hires.txt");
 	if(ifstream(existingPackDefinition)) {
 		HdPackLoader::LoadHdNesPack(existingPackDefinition, _hdData);
-		_hdData.LoadAsync();
+		_hdData.LoadAsync(false);
 		for(auto& tile : _hdData.Tiles) {
 			tile->Init();
 		}

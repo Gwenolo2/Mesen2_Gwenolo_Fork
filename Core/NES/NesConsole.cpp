@@ -227,12 +227,13 @@ void NesConsole::LoadHdPack(VirtualFile& romFile)
 				romFile.ApplyPatch(patchFile);
 			}
 
+			// Prechargement bloquant (PNG, tiles HD, OGG) avant le debut de l'emulation, comme pour les packs SNES.
+			// Avant : thread detache, les PNG pouvaient encore etre en cours de decodage pendant le jeu.
 			shared_ptr<HdPackData> data = _hdData.lock();
 			if(data) {
-				thread asyncLoadData([data]() {
-					data->LoadAsync();
-				});
-				asyncLoadData.detach();
+				MessageManager::DisplayMessage("HD Pack", "LOADING HD PACK... PLEASE WAIT");
+				data->LoadAsync();
+				MessageManager::DisplayMessage("HD Pack", "HD PACK LOADED !");
 			}
 		}
 	}

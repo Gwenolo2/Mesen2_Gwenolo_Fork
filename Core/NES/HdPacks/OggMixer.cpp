@@ -102,6 +102,21 @@ bool OggMixer::Play(string filename, bool isSfx, uint32_t startOffset, uint32_t 
 	return false;
 }
 
+bool OggMixer::Play(shared_ptr<vector<uint8_t>> audioData, bool isSfx, uint32_t startOffset, uint32_t loopPosition)
+{
+	shared_ptr<OggReader> reader(new OggReader());
+	bool loop = !isSfx && (_options & (int)OggPlaybackOptions::Loop) != 0;
+	if(reader->Init(audioData, loop, _sampleRate, startOffset, loopPosition)) {
+		if(isSfx) {
+			_sfx.push_back(reader);
+		} else {
+			_bgm = reader;
+		}
+		return true;
+	}
+	return false;
+}
+
 int OggMixer::GetBgmOffset()
 {
 	if(_bgm) {

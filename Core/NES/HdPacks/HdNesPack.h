@@ -5,6 +5,7 @@
 
 class NesConsole;
 class EmuSettings;
+class SoundMixer;
 
 
 
@@ -13,6 +14,7 @@ class BaseHdNesPack
 protected:
 	unordered_map<int32_t, int32_t> _fallbackTiles;
 	HdScreenInfo* _hdScreenInfo = nullptr;
+	SoundMixer* _videoAudio = nullptr; // sortie audio des <video>
 
 public:
 	static constexpr uint32_t CurrentVersion = 109;
@@ -31,6 +33,7 @@ public:
 	}
 
 	virtual void Process(HdScreenInfo* hdScreenInfo, uint32_t* outputBuffer, OverscanDimensions& overscan) = 0;
+	virtual void SetVideoAudioSink(SoundMixer* mixer) { _videoAudio = mixer; }
 
 	virtual ~BaseHdNesPack() {}
 };
@@ -72,6 +75,9 @@ private:
 	SnesHdThreadPool _pool;
 	vector<HdPackTileInfo*> _resolvedBg;      // 1 entree par pixel NES (tile de fond HD ou nullptr)
 	vector<HdPackTileInfo*> _resolvedSprites; // 4 entrees par pixel NES (sprites HD ou nullptr)
+	// Z-index par pixel NES (256x240), utilise seulement si le pack contient un <video>
+	vector<uint8_t> _zNes;
+	bool _zEnabled = false;
 	
 	unordered_map<HdTileKey, vector<HdPackAdditionalSpriteInfo>> _additionalTilesByKey;
 
@@ -92,6 +98,7 @@ private:
 
 	void OnLineStart(HdPpuPixelInfo &lineFirstPixel);
 	void ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8_t y, HdBgConfig* lineCfg);
+	void ProcessVideos(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
 	int32_t GetLayerIndex(uint8_t priority);
 	void OnBeforeApplyFilter();
 
