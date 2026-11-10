@@ -285,6 +285,10 @@ public:
 	vector<HdPackCondition*> Conditions;
 	bool ForceDisableCache;
 
+	// Variante miroir (<tile_hflip>, <tile_vflip>, <tile_hvflip>) : l'image du pack est deja retournee, pas de miroir a l'affichage
+	bool IsHFlip = false;
+	bool IsVFlip = false;
+
 	// <Ignore2DOverlays> : ensembles de conditions (un par bloc / ligne) ; la tile reste nette pendant la distorsion si l'un est vrai
 	vector<vector<HdPackCondition*>> Ignore2DSets;
 	bool IsIgnored2D(int x, int y, HdPpuTileInfo* tile)
@@ -449,6 +453,15 @@ struct HdBackgroundInfo
 	uint32_t Top;
 
 	HdPackBlendMode BlendMode;
+
+	// <background> etendu (NES) : repetition, animation par dossier, operateur de defilement
+	bool TileX = false;
+	bool TileY = false;
+	int FramesBetweenSteps = 0;
+	bool ReverseAnim = false;
+	vector<HdPackBitmapInfo*> AnimFrames;
+	enum class ScrollOperator { Multiply, Divide, Plus, Minus };
+	ScrollOperator Operator = ScrollOperator::Multiply;
 
 	uint32_t* data()
 	{

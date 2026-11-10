@@ -59,7 +59,7 @@ private:
 	void ProcessOverscanTag(vector<string> &tokens);
 	void ProcessConditionTag(vector<string> &tokens, bool createInvertedCondition);
 	HdPackConditionOperator ParseConditionOperator(string& opString);
-	void ProcessTileTag(vector<string> &tokens, vector<HdPackCondition*> conditions);
+	void ProcessTileTag(vector<string> &tokens, vector<HdPackCondition*> conditions, bool hFlip = false, bool vFlip = false);
 	void ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCondition*> conditions);
 	void ProcessIgnore2DTag(vector<string> &tokens, vector<HdPackCondition*> conditions);
 	void ProcessAdditionTag(vector<string>& tokens);

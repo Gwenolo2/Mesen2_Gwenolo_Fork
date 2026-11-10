@@ -168,7 +168,17 @@ template<HdPackBlendMode blendMode>
 void HdNesPack<scale>::DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *outputBuffer, uint32_t x, uint32_t y, uint32_t screenWidth)
 {
 	uint32_t width = bgInfo.Data->Width;
-	uint32_t *pngData = bgInfo.data() + ((bgInfo.Top + y) * scale * width) + ((bgInfo.Left + x) * scale);
+	// <background> : tileX / tileY repetent l'image (modulo de sa taille en pixels NES)
+	int32_t px = (int32_t)bgInfo.Left + (int32_t)x;
+	int32_t py = (int32_t)bgInfo.Top + (int32_t)y;
+	if(bgInfo.TileX || bgInfo.TileY) {
+		auto posMod = [](int32_t a, int32_t m) { int32_t r = a % m; return r < 0 ? r + m : r; };
+		int32_t pngW = (int32_t)(width / scale);
+		int32_t pngH = (int32_t)(bgInfo.Data->Height / scale);
+		if(bgInfo.TileX && pngW > 0) px = posMod(px, pngW);
+		if(bgInfo.TileY && pngH > 0) py = posMod(py, pngH);
+	}
+	uint32_t *pngData = bgInfo.data() + ((uint32_t)py * scale * width) + ((uint32_t)px * scale);
 
 	if(bgInfo.Brightness == 255) {
 		for(uint32_t i = 0; i < scale; i++) {
@@ -214,20 +224,23 @@ void HdNesPack<scale>::DrawTile(HdPpuTileInfo &tileInfo, HdPackTileInfo &hdPackT
 		return;
 	}
 
+	// Miroir effectif : celui de la tuile PPU, annule si l'image du pack est deja retournee (<tile_hflip> / <tile_vflip>)
+	const bool hMirror = tileInfo.HorizontalMirroring != hdPackTileInfo.IsHFlip;
+	const bool vMirror = tileInfo.VerticalMirroring != hdPackTileInfo.IsVFlip;
 	uint32_t *bitmapData = hdPackTileInfo.HdTileData.data();
 	uint32_t tileWidth = 8 * scale;
-	uint8_t tileOffsetX = tileInfo.HorizontalMirroring ? 7 - tileInfo.OffsetX : tileInfo.OffsetX;
+	uint8_t tileOffsetX = hMirror ? 7 - tileInfo.OffsetX : tileInfo.OffsetX;
 	uint32_t bitmapOffset = (tileInfo.OffsetY * scale) * tileWidth + tileOffsetX * scale;
 	int32_t bitmapSmallInc = 1;
 	int32_t bitmapLargeInc = tileWidth - scale;
-	if(tileInfo.HorizontalMirroring) {
+	if(hMirror) {
 		bitmapOffset += scale - 1;
 		bitmapSmallInc = -1;
 		bitmapLargeInc = tileWidth + scale;
 	}
-	if(tileInfo.VerticalMirroring) {
+	if(vMirror) {
 		bitmapOffset += tileWidth * (scale - 1);
-		bitmapLargeInc = (tileInfo.HorizontalMirroring ? (int32_t)scale : -(int32_t)scale) - (int32_t)tileWidth;
+		bitmapLargeInc = (hMirror ? (int32_t)scale : -(int32_t)scale) - (int32_t)tileWidth;
 	}
 
 	uint32_t rgbValue;
@@ -813,11 +826,39 @@ void HdNesPack<scale>::ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8
 			if(cfg.BackgroundIndex >= 0) {
 				HdBackgroundInfo& bgInfo = _hdData->BackgroundsByPriority[cfg.BgPriority][cfg.BackgroundIndex];
 
-				cfg.BgScrollX = (int32_t)(scrollX * bgInfo.HorizontalScrollRatio);
-				cfg.BgScrollY = (int32_t)(scrollY * bgInfo.VerticalScrollRatio);
-				if(y >= -cfg.BgScrollY && (y + bgInfo.Top + cfg.BgScrollY + 1) * scale <= bgInfo.Data->Height) {
-					cfg.BgMinX = -cfg.BgScrollX;
-					cfg.BgMaxX = bgInfo.Data->Width / scale - bgInfo.Left - cfg.BgScrollX - 1;
+				// Operateur de defilement (comme SNES) : multiplication par defaut
+				const float rx = bgInfo.HorizontalScrollRatio;
+				const float ry = bgInfo.VerticalScrollRatio;
+				const float frame = (float)_hdScreenInfo->FrameNumber;
+				switch(bgInfo.Operator) {
+					case HdBackgroundInfo::ScrollOperator::Divide:
+						cfg.BgScrollX = rx != 0.0f ? (int32_t)(scrollX / rx) : scrollX;
+						cfg.BgScrollY = ry != 0.0f ? (int32_t)(scrollY / ry) : scrollY;
+						break;
+					case HdBackgroundInfo::ScrollOperator::Plus:
+						cfg.BgScrollX = scrollX + (int32_t)(rx * frame);
+						cfg.BgScrollY = scrollY + (int32_t)(ry * frame);
+						break;
+					case HdBackgroundInfo::ScrollOperator::Minus:
+						cfg.BgScrollX = scrollX - (int32_t)(rx * frame);
+						cfg.BgScrollY = scrollY - (int32_t)(ry * frame);
+						break;
+					case HdBackgroundInfo::ScrollOperator::Multiply:
+					default:
+						cfg.BgScrollX = (int32_t)(scrollX * rx);
+						cfg.BgScrollY = (int32_t)(scrollY * ry);
+						break;
+				}
+				// tileY : pas de bornes verticales (le PNG se repete) ; tileX : pas de bornes horizontales
+				const bool yOk = bgInfo.TileY || (y >= -cfg.BgScrollY && (y + bgInfo.Top + cfg.BgScrollY + 1) * scale <= bgInfo.Data->Height);
+				if(yOk) {
+					if(bgInfo.TileX) {
+						cfg.BgMinX = -30000;
+						cfg.BgMaxX = 30000;
+					} else {
+						cfg.BgMinX = -cfg.BgScrollX;
+						cfg.BgMaxX = bgInfo.Data->Width / scale - bgInfo.Left - cfg.BgScrollX - 1;
+					}
 				}
 			}
 			lineCfg[cfgIndex] = cfg;
@@ -1029,16 +1070,29 @@ HdPackTileInfo* HdNesPack<scale>::GetMatchingTile(uint32_t x, uint32_t y, HdPpuT
 	}
 
 	if(hdTile != _hdData->TileByKey.end()) {
-		for(HdPackTileInfo* hdPackTile : hdTile->second) {
-			if(disableCache != nullptr && hdPackTile->ForceDisableCache) {
-				*disableCache = true;
-			}
-
-			if(hdPackTile->MatchesCondition(x, y, tile)) {
-				if(hdPackTile->NeedInit()) {
-					hdPackTile->Init();
+		// Passe 0 : variantes miroir (<tile_hflip> etc.) dont les miroirs correspondent a la tuile PPU
+		// Passe 1 : entrees normales (le miroir est alors fait a l'affichage)
+		for(int pass = 0; pass < 2; pass++) {
+			for(HdPackTileInfo* hdPackTile : hdTile->second) {
+				const bool isVariant = hdPackTile->IsHFlip || hdPackTile->IsVFlip;
+				if(pass == 0) {
+					if(!isVariant || hdPackTile->IsHFlip != tile->HorizontalMirroring || hdPackTile->IsVFlip != tile->VerticalMirroring) {
+						continue;
+					}
+				} else if(isVariant) {
+					continue;
 				}
-				return hdPackTile;
+
+				if(disableCache != nullptr && hdPackTile->ForceDisableCache) {
+					*disableCache = true;
+				}
+
+				if(hdPackTile->MatchesCondition(x, y, tile)) {
+					if(hdPackTile->NeedInit()) {
+						hdPackTile->Init();
+					}
+					return hdPackTile;
+				}
 			}
 		}
 	}
@@ -1216,6 +1270,21 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 }
 
 template<uint32_t scale>
+void HdNesPack<scale>::UpdateBackgroundFrames(HdScreenInfo* hdScreenInfo)
+{
+	// Fond anime (dossier) : image = (frame / framesBetweenSteps) % nombre d'images, comme SNES.
+	// Appele avant les passes paralleles : seul ce thread modifie bg.Data.
+	for(int p = 0; p < HdPackData::BgLayerCount; p++) {
+		for(auto& bg : _hdData->BackgroundsByPriority[p]) {
+			if(bg.AnimFrames.empty() || bg.FramesBetweenSteps <= 0) continue;
+			size_t idx = (size_t)((hdScreenInfo->FrameNumber / (uint32_t)bg.FramesBetweenSteps) % bg.AnimFrames.size());
+			bg.Data = bg.AnimFrames[idx];
+			bg.Data->Init();
+		}
+	}
+}
+
+template<uint32_t scale>
 void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffer, OverscanDimensions &overscan)
 {
 	_hdScreenInfo = hdScreenInfo;
@@ -1225,6 +1294,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	const uint32_t xStart = overscan.Left, xEnd = 256 - overscan.Right;
 
 	OnBeforeApplyFilter();
+	UpdateBackgroundFrames(hdScreenInfo);
 
 	//Z-index par pixel : calcule seulement si le pack contient un <video>
 	SimulateOverlays(hdScreenInfo);

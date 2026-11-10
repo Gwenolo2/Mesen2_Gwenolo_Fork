@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <algorithm>
+#include <filesystem>
 #include <unordered_map>
 #include "NES/HdPacks/HdPackLoader.h"
 #include "NES/HdPacks/HdPackConditions.h"
@@ -308,6 +309,15 @@ bool HdPackLoader::LoadPack()
 			if(lineContent.substr(0, 6) == "<tile>") {
 				tokens = StringUtilities::Split(lineContent.substr(6), ',');
 				ProcessTileTag(tokens, conditions);
+			} else if(lineContent.substr(0, 12) == "<tile_hflip>") {
+				tokens = StringUtilities::Split(lineContent.substr(12), ',');
+				ProcessTileTag(tokens, conditions, true, false);
+			} else if(lineContent.substr(0, 12) == "<tile_vflip>") {
+				tokens = StringUtilities::Split(lineContent.substr(12), ',');
+				ProcessTileTag(tokens, conditions, false, true);
+			} else if(lineContent.substr(0, 13) == "<tile_hvflip>") {
+				tokens = StringUtilities::Split(lineContent.substr(13), ',');
+				ProcessTileTag(tokens, conditions, true, true);
 			} else if(lineContent.substr(0, 12) == "<background>") {
 				tokens = StringUtilities::Split(lineContent.substr(12), ',');
 				ProcessBackgroundTag(tokens, conditions);
@@ -673,7 +683,7 @@ int HdPackLoader::ResolveTileBitmapIndex(string imageParam)
 	return (int)_data->ImageFileData.size() - 1;
 }
 
-void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition*> conditions)
+void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition*> conditions, bool hFlip, bool vFlip)
 {
 	HdPackTileInfo *tileInfo = new HdPackTileInfo();
 	size_t index = 0;
@@ -699,6 +709,8 @@ void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition
 	tileInfo->X = std::stoi(tokens[index++]);
 	tileInfo->Y = std::stoi(tokens[index++]);
 	tileInfo->Conditions = conditions;
+	tileInfo->IsHFlip = hFlip;
+	tileInfo->IsVFlip = vFlip;
 	if(!_ign2dBlockStack.empty()) {
 		tileInfo->Ignore2DSets.push_back(_ign2dBlockStack.back());
 	}
@@ -1068,7 +1080,7 @@ HdPackConditionOperator HdPackLoader::ParseConditionOperator(string& opString)
 void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCondition*> conditions)
 {
 	checkConstraint(tokens.size() >= 2, "Background tag should contain at least 2 parameters");
-	checkConstraintEx(tokens.size() < 9, "Background tag contains too many parameters");
+	checkConstraintEx(tokens.size() < 14, "Background tag contains too many parameters");
 	HdPackBitmapInfo* bgFileData = nullptr;
 
 	// Mot-cle "Randomize" / "random" dans le chemin du PNG : tirage unique par pack
@@ -1077,8 +1089,38 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 		tokens[0] = randomPath;
 	}
 
+	// Dossier = animation : une image par PNG du dossier, triees par nom (inversees si reverse)
+	const bool reverseAnim = tokens.size() > 11 && ParseBooleanValue(tokens[11]);
+	vector<HdPackBitmapInfo*> animFrames;
+	const string folderPath = FolderUtilities::CombinePath(_hdPackFolder, tokens[0]);
+	if(std::filesystem::is_directory(folderPath)) {
+		vector<string> pngFiles;
+		for(const auto& entry : std::filesystem::directory_iterator(folderPath)) {
+			if(entry.path().extension() == ".png") {
+				pngFiles.push_back(entry.path().filename().string());
+			}
+		}
+		std::sort(pngFiles.begin(), pngFiles.end());
+		if(reverseAnim) {
+			std::reverse(pngFiles.begin(), pngFiles.end());
+		}
+		for(const string& frameFile : pngFiles) {
+			string frameRelPath = FolderUtilities::CombinePath(tokens[0], frameFile);
+			_data->BackgroundFileData.push_back(unique_ptr<HdPackBitmapInfo>(new HdPackBitmapInfo()));
+			HdPackBitmapInfo* frame = _data->BackgroundFileData.back().get();
+			frame->PngName = frameRelPath;
+			if(LoadFile(frameRelPath, frame->FileData)) {
+				animFrames.push_back(frame);
+			} else {
+				_data->BackgroundFileData.pop_back();
+			}
+		}
+	}
+
 	auto result = _backgroundsByName.find(tokens[0]);
-	if(result == _backgroundsByName.end()) {
+	if(!animFrames.empty()) {
+		bgFileData = animFrames[0];
+	} else if(result == _backgroundsByName.end()) {
 		_data->BackgroundFileData.push_back(unique_ptr<HdPackBitmapInfo>(new HdPackBitmapInfo()));
 		bgFileData = _data->BackgroundFileData.back().get();
 		bgFileData->PngName = tokens[0];
@@ -1096,6 +1138,8 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 	HdBackgroundInfo backgroundInfo;
 	if(bgFileData) {
 		backgroundInfo.Data = bgFileData;
+        backgroundInfo.AnimFrames = animFrames;
+        backgroundInfo.ReverseAnim = reverseAnim;
 		if (_data->Version >= 105) {
 			backgroundInfo.Brightness = (int)(std::stof(tokens[1]) * 255);
 		} else {
@@ -1158,6 +1202,32 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 				} else {
 					logError("Invalid blend mode: " + tokens[7]);
 				}
+			}
+		}
+
+		// Champs etendus (NES) : tileX, tileY, framesBetweenSteps, reverse (deja lu), operator
+		if(tokens.size() > 8) {
+			checkConstraintEx(_data->Version >= 107, "Background tileX/tileY fields require version 107+ of HD Packs");
+			backgroundInfo.TileX = ParseBooleanValue(tokens[8]);
+		}
+		if(tokens.size() > 9) {
+			backgroundInfo.TileY = ParseBooleanValue(tokens[9]);
+		}
+		if(tokens.size() > 10) {
+			backgroundInfo.FramesBetweenSteps = std::max(0, std::stoi(tokens[10]));
+		}
+		if(tokens.size() > 12) {
+			string op = StringUtilities::ToLower(tokens[12]);
+			if(op == "*" || op == "multiply") {
+				backgroundInfo.Operator = HdBackgroundInfo::ScrollOperator::Multiply;
+			} else if(op == "/" || op == "divide") {
+				backgroundInfo.Operator = HdBackgroundInfo::ScrollOperator::Divide;
+			} else if(op == "+" || op == "plus") {
+				backgroundInfo.Operator = HdBackgroundInfo::ScrollOperator::Plus;
+			} else if(op == "-" || op == "minus") {
+				backgroundInfo.Operator = HdBackgroundInfo::ScrollOperator::Minus;
+			} else {
+				logError("Invalid background operator: " + tokens[12]);
 			}
 		}
 
