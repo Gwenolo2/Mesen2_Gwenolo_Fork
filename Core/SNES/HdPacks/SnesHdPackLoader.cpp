@@ -10,6 +10,7 @@
 #include "Utilities/PNGHelper.h"
 #include "Utilities/VirtualFile.h"
 #include "Utilities/HdPackRandomPath.h"
+#include "Utilities/HdFlatJson.h"
 #include <fstream>
 #include <iostream>
 #include <algorithm>
@@ -153,41 +154,6 @@ static bool SnesHdParseMotionKey(SnesHdM7ModelInfo& md, const std::string& k, co
 		else return false;
 	} catch(...) {}
 	return true;
-}
-
-static std::unordered_map<std::string, std::string> ParseFlatJson(const std::string& s)
-{
-	std::unordered_map<std::string, std::string> out;
-	size_t i = 0, n = s.size();
-	auto readString = [&]() -> std::string {
-		std::string r;
-		i++; // guillemet ouvrant
-		while(i < n && s[i] != '"') {
-			if(s[i] == '\\' && i + 1 < n && (s[i + 1] == '\\' || s[i + 1] == '"')) { i++; }
-			r += s[i++];
-		}
-		if(i < n) i++; // guillemet fermant
-		return r;
-	};
-	while(i < n) {
-		char c = s[i];
-		if(c == '/' && i + 1 < n && s[i + 1] == '/') { while(i < n && s[i] != '\n') i++; continue; }
-		if(c != '"') { i++; continue; }
-		std::string key = readString();
-		while(i < n && s[i] != ':' && s[i] != ',' && s[i] != '}') i++;
-		if(i >= n || s[i] != ':') continue;
-		i++;
-		while(i < n && std::isspace((unsigned char)s[i])) i++;
-		std::string val;
-		if(i < n && s[i] == '"') {
-			val = readString();
-		} else {
-			while(i < n && s[i] != ',' && s[i] != '}' && s[i] != '\n' && s[i] != '\r') val += s[i++];
-			val = StringUtilities::Trim(val);
-		}
-		out[StringUtilities::ToLower(StringUtilities::Trim(key))] = val;
-	}
-	return out;
 }
 
 //---------------------------------------------------------------------------------------------------------------
@@ -2968,7 +2934,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 		else if(lineContent.rfind("<disableColorMathWindow>", 0) == 0) {
 			std::string hashStr = StringUtilities::Trim(lineContent.substr(24));
 			if(hashStr.empty()) {
-				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <disableColorMathWindow> : hash manquant.");
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <disableColorMathWindow> : missing hash.");
 			} else {
 				SnesHdDisableColorWindowRule rule;
 				rule.Hash = (uint32_t)HexUtilities::FromHex(hashStr);
@@ -3165,7 +3131,7 @@ bool ApplyRomPatch(const std::string& patchPath, std::vector<uint8_t>& romData)
 	} else if(ext == ".bps") {
 		success = BpsPatcher::PatchBuffer(patchPath, romData, patchedOutput);
 	} else {
-		MessageManager::Log("[SnesHDPack] Format de patch non supporté : " + ext);
+		MessageManager::Log("[SnesHDPack] Patch format non supported : " + ext);
 		return false;
 	}
 

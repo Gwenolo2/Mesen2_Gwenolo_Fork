@@ -285,6 +285,20 @@ public:
 	vector<HdPackCondition*> Conditions;
 	bool ForceDisableCache;
 
+	// <Ignore2DOverlays> : ensembles de conditions (un par bloc / ligne) ; la tile reste nette pendant la distorsion si l'un est vrai
+	vector<vector<HdPackCondition*>> Ignore2DSets;
+	bool IsIgnored2D(int x, int y, HdPpuTileInfo* tile)
+	{
+		for(auto& set : Ignore2DSets) {
+			bool ok = true;
+			for(HdPackCondition* c : set) {
+				if(!c->CheckCondition(x, y, tile)) { ok = false; break; }
+			}
+			if(ok) return true;
+		}
+		return false;
+	}
+
 	bool MatchesCondition(int x, int y, HdPpuTileInfo* tile)
 	{
 		for(HdPackCondition* condition : Conditions) {
@@ -415,6 +429,19 @@ struct HdBackgroundInfo
 	int Brightness;
 	vector<HdPackCondition*> Conditions;
 	float HorizontalScrollRatio;
+	// <Ignore2DOverlays> : voir HdPackTileInfo::Ignore2DSets
+	vector<vector<HdPackCondition*>> Ignore2DSets;
+	bool IsIgnored2D(int x, int y, HdPpuTileInfo* tile)
+	{
+		for(auto& set : Ignore2DSets) {
+			bool ok = true;
+			for(HdPackCondition* c : set) {
+				if(!c->CheckCondition(x, y, tile)) { ok = false; break; }
+			}
+			if(ok) return true;
+		}
+		return false;
+	}
 	float VerticalScrollRatio;
 	uint8_t Priority;
 
@@ -539,13 +566,119 @@ struct NesHdVideoInfo
 	}
 };
 
+// <2DOverlay> NES : particules 2D. Unites : pixels NES (256 x 240), vitesses en pixels NES / s, angles en degres (0 = droite, 90 = bas).
+// Voir claude/09_2DOverlay.md (portage NES, claude/18_Architecture_PPU_NES.md pour le scroll).
+struct NesHdParticle
+{
+	float X = 0, Y = 0;       // position dans le champ (pixels NES)
+	float VX = 0, VY = 0;     // vitesse propre
+	float Age = 0, Life = 1;  // secondes
+	float Size = 1;           // multiplicateur de taille propre (aleatoire)
+	float Rot = 0, Spin = 0;  // radians, radians / s
+	float Seed1 = 0, Seed2 = 0;
+};
+
+struct NesHdOverlayInfo
+{
+	string JsonFile;
+	vector<HdPackCondition*> Conditions;
+
+	// Parametres de la balise (valeurs par defaut, puis JSON, puis balise)
+	int ZIndex = 39;                    // echelle des <background> NES (0 a 39), 39 = au-dessus de tout
+	int Layer = 0;                      // 0 = fixe a l'ecran, 1 = suit le defilement du PPU
+	float SpeedX = 1.0f, SpeedY = 1.0f; // ratio de defilement (s'ajoute au mouvement propre)
+	float Alpha = 1.0f;
+	float FieldW = 1.0f, FieldH = 1.0f;
+
+	// Particules (JSON)
+	HdPackBitmapInfo* Texture = nullptr; // PNG de la particule (dessine en pixels HD) ; nullptr = point doux
+	bool Additive = false;
+	int MaxParticles = 300;
+	float Rate = 60.0f;
+	float LifeMin = 2.0f, LifeMax = 4.0f;
+	float SpawnX = 0, SpawnY = 0, SpawnW = 1, SpawnH = 1;
+	float SpeedMin = 20, SpeedMax = 40;
+	float AngleMin = 80, AngleMax = 100;
+	float GravityX = 0, GravityY = 0;
+	float WindX = 0, WindY = 0;
+	float Turbulence = 0, TurbulenceFreq = 0.5f;
+	float RotationMin = 0, RotationMax = 0; // degres
+	float SpinMin = 0, SpinMax = 0;         // degres / s
+	float SizeStart = 1, SizeEnd = 1, SizeRandom = 0;
+	float AlphaStart = 1, AlphaEnd = 1, FadeIn = 0.1f, FadeOut = 0.2f;
+	uint32_t ColorStart = 0xFFFFFF, ColorEnd = 0xFFFFFF;
+	float DotSize = 2.0f;                   // diametre du point doux (pixels NES) si pas de texture
+	bool Prewarm = true;
+
+	// Ecrans (type=plainscreen, type=ellipse) : passe finale sur l'image, zone en fractions de l'image
+	bool IsPlainScreen = false, IsEllipse = false;
+	float ZoneX0 = 0, ZoneX1 = 1, ZoneY0 = 0, ZoneY1 = 1;
+	uint32_t FxColor = 0x000000;
+	float FxEllipseX = 128.0f, FxEllipseY = 120.0f;   // centre (pixels NES, cadre complet 256 x 240)
+	float FxRadiusX = 32.0f, FxRadiusY = 16.0f;       // rayons (pixels NES)
+	bool FxNegative = false;                          // true : tout l'ecran est couvert sauf l'ellipse
+
+	// Ombres, nuages, brouillard (bruit qui derive) : IsNoise, NoiseKind 0 = ombres, 1 = nuages, 2 = brouillard
+	bool IsNoise = false;
+	int NoiseKind = 0;
+	float FxSize = 48.0f;               // taille des motifs (pixels NES)
+	float FxSpeed = 8.0f, FxDirection = 0.0f; // vitesse (pixels NES / s) et direction (degres)
+	float FxCoverage = 0.5f;            // part de l'ecran couverte (0 a 1)
+	int FxSeed = 1;
+
+	// Rayons de lumiere (type=rays) : faisceaux additifs partant d'un point (RayX/RayY en fractions de l'image)
+	bool IsRays = false;
+	float RayX = 0.5f, RayY = 0.0f;
+	int RayCount = 8;
+	float RayAngle = 90.0f, RaySpread = 60.0f;   // degres (0 = droite, 90 = bas)
+	float RayWidth = 4.0f, RayLength = 0.8f;     // largeur angulaire (degres), longueur (fraction de la diagonale)
+	float RaySpeed = 0.2f, RayWobble = 3.0f;
+	uint32_t RayColor = 0xFFE8A0;
+
+	// Distorsion (type=distortion) : deformation horizontale sinusoidale de l'image finale (zone = ZoneX0..ZoneY1)
+	bool IsDistortion = false;
+	float DistAmp1 = 0, DistWave1 = 32, DistSpeed1 = 0.5f, DistPhase1 = 0;  // amplitude (px NES), longueur d'onde (lignes NES), vitesse (cycles/s), phase (degres)
+	float DistAmp2 = 0, DistWave2 = 17, DistSpeed2 = 0.3f, DistPhase2 = 0;  // 2e sinusoide, combinee a la 1re
+
+	// Etat d'execution (filtre HD)
+	vector<NesHdParticle> Particles;
+	float Time = 0;                     // temps d'activite (bruit : derive)
+	bool Initialized = false;
+	bool Active = false;
+	float SpawnAcc = 0;
+	float OffsetX = 0, OffsetY = 0;         // decalage d'ancrage accumule (pixels NES)
+	int LastScrollX = 0, LastScrollY = 0;
+	bool HaveScroll = false;
+	uint32_t Rng = 0x12345678;
+
+	bool MatchesCondition()
+	{
+		for(HdPackCondition* cond : Conditions) {
+			if(!cond->CheckCondition(0, 0, nullptr)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	float Rand() { Rng ^= Rng << 13; Rng ^= Rng >> 17; Rng ^= Rng << 5; return (float)(Rng & 0xFFFFFF) / 16777216.0f; }
+	float RandRange(float a, float b) { return a + (b - a) * Rand(); }
+};
+
+// <Ignore2DOverlays>tuile[,palette] : regle ligne seule (appliquee aux tiles de meme cle)
+struct HdIgnore2DRule
+{
+	HdTileKey Key;
+	bool AnyPalette = false;
+	vector<HdPackCondition*> Conditions;
+};
+
 struct HdPackData
 {
 private:
 	bool _cancelLoad = false;
 
 public:
-	static constexpr int BgLayerCount = 40;
+	static constexpr int BgLayerCount = 50;
 
 	vector<HdBackgroundInfo> BackgroundsByPriority[HdPackData::BgLayerCount];
 	vector<unique_ptr<HdPackBitmapInfo>> BackgroundFileData;
@@ -553,6 +686,11 @@ public:
 	vector<unique_ptr<HdPackTileInfo>> Tiles;
 	vector<unique_ptr<HdPackCondition>> Conditions;
 	vector<unique_ptr<NesHdVideoInfo>> Videos;
+	vector<unique_ptr<NesHdOverlayInfo>> Overlays;
+
+	// <Ignore2DOverlays> : regles ligne seule, et drapeau si un bloc ou une regle existe dans le pack
+	vector<unique_ptr<HdIgnore2DRule>> Ignore2DRules;
+	bool HasIgnore2D = false;
 
 	/*-------------Added by Gwenolo : v1 useless-------------------*/
 	vector<PlayAdditionalBgmAction> PlayAdditionalBgmActions;

@@ -11,6 +11,7 @@
 #include "Utilities/StringUtilities.h"
 #include "Utilities/HexUtilities.h"
 #include "Utilities/HdPackRandomPath.h"
+#include "Utilities/HdFlatJson.h"
 #include "Utilities/PNGHelper.h"
 #include "Utilities/FastString.h"
 #include "Utilities/magic_enum.hpp"
@@ -280,6 +281,26 @@ bool HdPackLoader::LoadPack()
 				lineContent = lineContent.substr(endOfCondition + 1);
 			}
 
+			// Blocs <Ignore2DOverlays>{ ... } : les tiles et fonds du bloc restent nets pendant la distorsion <2DOverlay>
+			{
+				string trimmed = StringUtilities::Trim(lineContent);
+				if(trimmed == "}") {
+					if(_ign2dBlockStack.empty()) {
+						logError("'}' closing without any corresponding <Ignore2DOverlays>{ block.");
+					} else {
+						_ign2dBlockStack.pop_back();
+					}
+					continue;
+				}
+				if(trimmed.size() >= 18 && StringUtilities::ToLower(trimmed.substr(0, 18)) == "<ignore2doverlays>" && StringUtilities::Trim(trimmed.substr(18)).substr(0, 1) == "{") {
+					vector<HdPackCondition*> merged = _ign2dBlockStack.empty() ? vector<HdPackCondition*>() : _ign2dBlockStack.back();
+					merged.insert(merged.end(), conditions.begin(), conditions.end());
+					_ign2dBlockStack.push_back(merged);
+					_data->HasIgnore2D = true;
+					continue;
+				}
+			}
+
 			vector<string> tokens;
 
 			int conditional_bgm_counter = 0;
@@ -314,6 +335,12 @@ bool HdPackLoader::LoadPack()
 			} else if(lineContent.substr(0, 7) == "<video>") {
 				tokens = StringUtilities::Split(lineContent.substr(7), ',');
 				ProcessVideoTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 18)) == "<ignore2doverlays>") {
+				tokens = StringUtilities::Split(lineContent.substr(18), ',');
+				ProcessIgnore2DTag(tokens, conditions);
+			} else if(lineContent.substr(0, 11) == "<2DOverlay>") {
+				tokens = StringUtilities::Split(lineContent.substr(11), ',');
+				ProcessOverlayTag(tokens, conditions);
 			} else if(lineContent.substr(0, 5) == "<ver>") {
 				_data->Version = stoi(lineContent.substr(5));
 				if(_data->Version > BaseHdNesPack::CurrentVersion) {
@@ -672,6 +699,9 @@ void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition
 	tileInfo->X = std::stoi(tokens[index++]);
 	tileInfo->Y = std::stoi(tokens[index++]);
 	tileInfo->Conditions = conditions;
+	if(!_ign2dBlockStack.empty()) {
+		tileInfo->Ignore2DSets.push_back(_ign2dBlockStack.back());
+	}
 	tileInfo->ForceDisableCache = false;
 	for(HdPackCondition* condition : conditions) {
 		HdPackConditionType type = condition->GetConditionType();
@@ -1078,6 +1108,9 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 		backgroundInfo.Top = 0;
 		backgroundInfo.Conditions.reserve(conditions.size());
 		backgroundInfo.BlendMode = HdPackBlendMode::Alpha;
+		if(!_ign2dBlockStack.empty()) {
+			backgroundInfo.Ignore2DSets.push_back(_ign2dBlockStack.back());
+		}
 
 		for(HdPackCondition* condition : conditions) {
 			switch(condition->GetConditionType()) {
@@ -1106,7 +1139,7 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 				checkConstraint(_data->Version >= 102, "This feature requires version 102+ of HD Packs");
 				if(_data->Version >= 106) {
 					backgroundInfo.Priority = std::stoi(tokens[4]);
-					checkConstraint(backgroundInfo.Priority >= 0 && backgroundInfo.Priority < 40, "Invalid background priority value");
+					checkConstraint(backgroundInfo.Priority >= 0 && backgroundInfo.Priority < 50, "Invalid background priority value (0 to 49)");
 				} else {
 					backgroundInfo.Priority = ParseBooleanValue(tokens[4]) ? 0 : 10;
 				}
@@ -1199,6 +1232,195 @@ static bool ParseVideoBool(const string& value)
 // <video>fichier,mode,skip,once,mute,loop,X,Y,Z,alpha,stretch : meme format que cote SNES.
 // Z : meme echelle que la priorite des <background> (0 a 39), 99 = au-dessus de tout (defaut).
 // mode (pause) et skip sont lus mais pas encore utilises, comme cote SNES.
+// <2DOverlay> : particules 2D. Syntaxe : [cond]<2DOverlay>fichier.json,Cle=valeur,...
+// Les parametres de la balise remplacent ceux du JSON (meme format que le SNES, voir claude/09_2DOverlay.md).
+void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.empty()) {
+		logError("2DOverlay tag should contain a JSON file name");
+		return;
+	}
+
+	string jsonName = StringUtilities::Trim(tokens[0]);
+	if(!CheckFile(jsonName)) {
+		logError("2DOverlay file not found: " + jsonName);
+		return;
+	}
+	vector<uint8_t> raw;
+	if(!LoadFile(jsonName, raw)) {
+		logError("2DOverlay file could not be read: " + jsonName);
+		return;
+	}
+
+	std::unordered_map<std::string, std::string> cfg = ParseFlatJson(std::string(raw.begin(), raw.end()));
+	for(size_t t = 1; t < tokens.size(); t++) {
+		string tok = StringUtilities::Trim(tokens[t]);
+		size_t eq = tok.find('=');
+		if(eq == string::npos) {
+			continue;
+		}
+		cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+	}
+
+	auto str = [&](const char* k) -> string {
+		auto it = cfg.find(k);
+		return it == cfg.end() ? string() : it->second;
+	};
+	auto num = [&](const char* k, float def) -> float {
+		string v = str(k);
+		if(v.empty()) return def;
+		try { return std::stof(v); } catch(...) { return def; }
+	};
+	auto boolean = [&](const char* k, bool def) -> bool {
+		string v = StringUtilities::ToLower(str(k));
+		if(v.empty()) return def;
+		return v == "true" || v == "1" || v == "yes";
+	};
+	auto color = [&](const char* k, uint32_t def) -> uint32_t {
+		string v = StringUtilities::Trim(str(k));
+		if(v.empty()) return def;
+		if(v[0] == '#') v = v.substr(1);
+		try { return (uint32_t)std::stoul(v, nullptr, 16) & 0xFFFFFF; } catch(...) { return def; }
+	};
+
+	string type = StringUtilities::ToLower(str("type"));
+	if(!type.empty() && type != "particles" && type != "plainscreen" && type != "ellipse" && type != "shadows" && type != "clouds" && type != "fog" && type != "rays" && type != "distortion") {
+		logError("2DOverlay type '" + type + "' is not supported on NES yet (particles, plainscreen, ellipse, shadows, clouds, fog, rays, distortion)");
+		return;
+	}
+
+	auto overlay = std::make_unique<NesHdOverlayInfo>();
+	overlay->JsonFile = jsonName;
+	overlay->Conditions = conditions;
+	overlay->ZIndex = std::clamp((int)num("z", num("zindex", 39.0f)), 0, 255);
+	overlay->Layer = std::clamp((int)num("layer", 0.0f), 0, 1);
+	overlay->SpeedX = num("speedx", 1.0f);
+	overlay->SpeedY = num("speedy", 1.0f);
+	overlay->Alpha = std::clamp(num("alpha", 1.0f), 0.0f, 1.0f);
+	overlay->FieldW = std::max(0.25f, num("fieldw", 1.0f));
+	overlay->FieldH = std::max(0.25f, num("fieldh", 1.0f));
+
+	string blend = StringUtilities::ToLower(str("blend"));
+	overlay->Additive = (blend == "additive" || blend == "add");
+	overlay->MaxParticles = std::clamp((int)num("maxparticles", 300.0f), 1, 20000);
+	overlay->Rate = std::max(0.0f, num("rate", 60.0f));
+	overlay->LifeMin = std::max(0.05f, num("lifemin", 2.0f));
+	overlay->LifeMax = std::max(overlay->LifeMin, num("lifemax", 4.0f));
+	overlay->SpawnX = num("spawnx", 0.0f);
+	overlay->SpawnY = num("spawny", 0.0f);
+	overlay->SpawnW = num("spawnw", 1.0f);
+	overlay->SpawnH = num("spawnh", 1.0f);
+	overlay->SpeedMin = num("speedmin", 20.0f);
+	overlay->SpeedMax = num("speedmax", 40.0f);
+	overlay->AngleMin = num("anglemin", 80.0f);
+	overlay->AngleMax = num("anglemax", 100.0f);
+	overlay->GravityX = num("gravityx", 0.0f);
+	overlay->GravityY = num("gravityy", 0.0f);
+	overlay->WindX = num("windx", 0.0f);
+	overlay->WindY = num("windy", 0.0f);
+	overlay->Turbulence = num("turbulence", 0.0f);
+	overlay->TurbulenceFreq = num("turbulencefreq", 0.5f);
+	overlay->RotationMin = num("rotationmin", 0.0f);
+	overlay->RotationMax = num("rotationmax", 0.0f);
+	overlay->SpinMin = num("spinmin", 0.0f);
+	overlay->SpinMax = num("spinmax", 0.0f);
+	overlay->SizeStart = num("sizestart", 1.0f);
+	overlay->SizeEnd = num("sizeend", overlay->SizeStart);
+	overlay->SizeRandom = std::clamp(num("sizerandom", 0.0f), 0.0f, 0.95f);
+	overlay->AlphaStart = num("alphastart", 1.0f);
+	overlay->AlphaEnd = num("alphaend", overlay->AlphaStart);
+	overlay->FadeIn = std::clamp(num("fadein", 0.1f), 0.0f, 1.0f);
+	overlay->FadeOut = std::clamp(num("fadeout", 0.2f), 0.0f, 1.0f);
+	overlay->ColorStart = color("colorstart", 0xFFFFFF);
+	overlay->ColorEnd = color("colorend", overlay->ColorStart);
+	overlay->DotSize = std::max(0.25f, num("dotsize", 2.0f));
+	overlay->Prewarm = boolean("prewarm", true);
+
+	overlay->IsPlainScreen = (type == "plainscreen");
+	overlay->IsEllipse = (type == "ellipse");
+	overlay->IsNoise = (type == "shadows" || type == "clouds" || type == "fog");
+	overlay->NoiseKind = (type == "clouds") ? 1 : ((type == "fog") ? 2 : 0);
+	overlay->IsRays = (type == "rays");
+	overlay->IsDistortion = (type == "distortion");
+	if(overlay->IsDistortion) {
+		// distorsion : amplitude en px NES, longueur d'onde en lignes NES, vitesse en cycles/s, phase en degres
+		overlay->DistAmp1 = num("amp1", 0.0f); overlay->DistWave1 = std::max(1.0f, num("wave1", 32.0f));
+		overlay->DistSpeed1 = num("speed1", 0.5f); overlay->DistPhase1 = num("phase1", 0.0f);
+		overlay->DistAmp2 = num("amp2", 0.0f); overlay->DistWave2 = std::max(1.0f, num("wave2", 17.0f));
+		overlay->DistSpeed2 = num("speed2", 0.3f); overlay->DistPhase2 = num("phase2", 0.0f);
+		overlay->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f); overlay->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
+		overlay->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f); overlay->ZoneY1 = std::clamp(num("ymax", 1.0f), 0.0f, 1.0f);
+	}
+	if(overlay->IsPlainScreen || overlay->IsEllipse || overlay->IsNoise || overlay->IsRays) {
+		overlay->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f);
+		overlay->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
+		overlay->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f);
+		overlay->ZoneY1 = std::clamp(num("ymax", 1.0f), 0.0f, 1.0f);
+		overlay->FxNegative = boolean("negative", false);
+		auto namedColor = [&](const char* k, uint32_t def) -> uint32_t {
+			string v = StringUtilities::ToLower(StringUtilities::Trim(str(k)));
+			if(v.empty()) return def;
+			if(v == "black" || v == "noir") return 0x000000;
+			if(v == "white" || v == "blanc") return 0xFFFFFF;
+			if(v == "yellow" || v == "jaune") return 0xFFFF00;
+			if(v == "green" || v == "vert") return 0x00FF00;
+			if(v == "bleue" || v == "bleu" || v == "blue") return 0x0000FF;
+			if(v == "red" || v == "rouge") return 0xFF0000;
+			return color(k, def);
+		};
+		const uint32_t defCol = overlay->IsEllipse ? (overlay->FxNegative ? 0x000000 : 0xFFFFFF) : (type == "fog" ? 0xA8B8C8 : (type == "clouds" ? 0xFFFFFF : 0x000000));
+		overlay->FxColor = namedColor("color", defCol);
+		if(overlay->IsEllipse) {
+			overlay->FxEllipseX = num("x", 128.0f);
+			overlay->FxEllipseY = num("y", 120.0f);
+			overlay->FxRadiusX = std::max(0.5f, num("radiusx", 32.0f));
+			overlay->FxRadiusY = std::max(0.5f, num("radiusy", 16.0f));
+		}
+		if(overlay->IsRays) {
+			overlay->RayX = std::clamp(num("rayx", 0.5f), 0.0f, 1.0f);
+			overlay->RayY = std::clamp(num("rayy", 0.0f), 0.0f, 1.0f);
+			overlay->RayCount = std::clamp((int)num("raycount", 8.0f), 1, 64);
+			overlay->RayAngle = num("rayangle", 90.0f);
+			overlay->RaySpread = std::clamp(num("rayspread", 60.0f), 0.0f, 360.0f);
+			overlay->RayWidth = std::max(0.1f, num("raywidth", 4.0f));
+			overlay->RayLength = std::max(0.01f, num("raylength", 0.8f));
+			overlay->RaySpeed = num("rayspeed", 0.2f);
+			overlay->RayWobble = num("raywobble", 3.0f);
+			overlay->RayColor = namedColor("raycolor", 0xFFE8A0);
+		}
+		if(overlay->IsNoise) {
+			overlay->FxSize = std::max(4.0f, num("size", 48.0f));
+			overlay->FxSpeed = num("speed", 8.0f);
+			overlay->FxDirection = num("direction", 0.0f);
+			overlay->FxCoverage = std::clamp(num("coverage", 0.5f), 0.0f, 1.0f);
+			overlay->FxSeed = (int)num("seed", 1.0f);
+		}
+	}
+
+	string tex = StringUtilities::Trim(str("texture"));
+	if(!tex.empty()) {
+		HdPackBitmapInfo* found = nullptr;
+		for(auto& bitmap : _data->ImageFileData) {
+			if(bitmap->PngName == tex) {
+				found = bitmap.get();
+				break;
+			}
+		}
+		if(found == nullptr) {
+			_data->ImageFileData.push_back(unique_ptr<HdPackBitmapInfo>(new HdPackBitmapInfo()));
+			HdPackBitmapInfo* bitmapInfo = _data->ImageFileData.back().get();
+			bitmapInfo->PngName = tex;
+			if(!LoadFile(tex, bitmapInfo->FileData)) {
+				logError("2DOverlay texture not found: " + tex);
+			}
+			found = bitmapInfo;
+		}
+		overlay->Texture = found;
+	}
+
+	_data->Overlays.push_back(std::move(overlay));
+}
+
 void HdPackLoader::ProcessVideoTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
 {
 	checkConstraint(tokens.size() >= 4, "Video tag should contain at least 4 parameters");
@@ -1385,8 +1607,44 @@ void HdPackLoader::LoadCustomPalette()
 	}
 }
 
+// <Ignore2DOverlays>tuile[,palette] : rattache l'ensemble de conditions de la regle aux tiles de meme cle
+void HdPackLoader::ProcessIgnore2DTag(vector<string> &tokens, vector<HdPackCondition*> conditions)
+{
+	checkConstraint(!tokens.empty(), "Ignore2DOverlays tag needs a tile");
+	auto rule = std::make_unique<HdIgnore2DRule>();
+	string tileData = StringUtilities::Trim(tokens[0]);
+	string palData = tokens.size() >= 2 ? StringUtilities::Trim(tokens[1]) : string("");
+	string palLower = StringUtilities::ToLower(palData);
+	rule->AnyPalette = palData.empty() || palLower == "*" || palLower == "all";
+	if(rule->AnyPalette) {
+		palData = "00000000";
+	}
+	ReadTileData(rule->Key, tileData, palData);
+	rule->Conditions = conditions;
+	_data->Ignore2DRules.push_back(std::move(rule));
+	_data->HasIgnore2D = true;
+}
+
 void HdPackLoader::InitializeHdPack()
 {
+	// Regles ligne seule : rattachement aux tiles de meme cle (tuile, palette)
+	for(auto& rule : _data->Ignore2DRules) {
+		for(unique_ptr<HdPackTileInfo> &tileInfo : _data->Tiles) {
+			bool same = (tileInfo->IsChrRamTile == rule->Key.IsChrRamTile);
+			if(same) {
+				same = tileInfo->IsChrRamTile
+					? std::equal(tileInfo->TileData, tileInfo->TileData + 16, rule->Key.TileData)
+					: (tileInfo->TileIndex == rule->Key.TileIndex);
+			}
+			if(same && !rule->AnyPalette) {
+				same = (tileInfo->PaletteColors == rule->Key.PaletteColors);
+			}
+			if(same) {
+				tileInfo->Ignore2DSets.push_back(rule->Conditions);
+			}
+		}
+	}
+
 	for(unique_ptr<HdPackTileInfo> &tileInfo : _data->Tiles) {
 		auto tiles = _data->TileByKey.find(tileInfo->GetKey(false));
 		if(tiles == _data->TileByKey.end()) {

@@ -57,13 +57,15 @@ private:
 	static constexpr uint8_t BehindBgPriority = 1 * PriorityLevelsPerLayer;
 	static constexpr uint8_t BehindFgSpritesPriority = 2 * PriorityLevelsPerLayer;
 	static constexpr uint8_t ForegroundPriority = 3 * PriorityLevelsPerLayer;
+	// Cinquieme bande (40 a 49) : au-dessus du premier plan
+	static constexpr uint8_t TopPriority = 4 * PriorityLevelsPerLayer;
 
 	NesConsole* _console = nullptr;
 	EmuSettings* _settings = nullptr;
 	HdPackData* _hdData = nullptr;
 
-	uint8_t _activeBgCount[4] = {};
-	HdBgConfig _bgConfig[40] = {};
+	uint8_t _activeBgCount[5] = {};
+	HdBgConfig _bgConfig[50] = {};
 
 	uint32_t _palette[512] = {};
 	HdPackTileInfo* _cachedTile = nullptr;
@@ -77,6 +79,7 @@ private:
 	vector<HdPackTileInfo*> _resolvedSprites; // 4 entrees par pixel NES (sprites HD ou nullptr)
 	// Z-index par pixel NES (256x240), utilise seulement si le pack contient un <video>
 	vector<uint8_t> _zNes;
+	vector<uint8_t> _ignNes;                  // 1 par pixel NES : pixel net pendant la distorsion (<Ignore2DOverlays>)
 	bool _zEnabled = false;
 	
 	unordered_map<HdTileKey, vector<HdPackAdditionalSpriteInfo>> _additionalTilesByKey;
@@ -99,6 +102,10 @@ private:
 	void OnLineStart(HdPpuPixelInfo &lineFirstPixel);
 	void ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8_t y, HdBgConfig* lineCfg);
 	void ProcessVideos(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
+	void SimulateOverlays(HdScreenInfo* hdScreenInfo);
+	void ProcessOverlays(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
+	void ProcessScreenLayers(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
+	void ProcessDistortions(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
 	int32_t GetLayerIndex(uint8_t priority);
 	void OnBeforeApplyFilter();
 

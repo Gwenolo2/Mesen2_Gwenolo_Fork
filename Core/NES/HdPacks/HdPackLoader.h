@@ -31,6 +31,8 @@ private:
 	string _hdPackFolder;
 	unordered_map<string, HdPackCondition*> _conditionsByName;
 	unordered_map<string, HdPackBitmapInfo*> _backgroundsByName;
+	// Pile des blocs <Ignore2DOverlays>{ ... } ouverts : chaque entree = conditions du bloc (heritees)
+	vector<vector<HdPackCondition*>> _ign2dBlockStack;
 
 	HdPackLoader();
 
@@ -59,6 +61,7 @@ private:
 	HdPackConditionOperator ParseConditionOperator(string& opString);
 	void ProcessTileTag(vector<string> &tokens, vector<HdPackCondition*> conditions);
 	void ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCondition*> conditions);
+	void ProcessIgnore2DTag(vector<string> &tokens, vector<HdPackCondition*> conditions);
 	void ProcessAdditionTag(vector<string>& tokens);
 	void ProcessFallbackTag(vector<string>& tokens);
 	void ProcessOptionTag(vector<string>& tokens);
@@ -75,6 +78,7 @@ private:
 
 	void ProcessBgmTag(vector<string> &tokens);
 	void ProcessVideoTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessSfxTag(vector<string> &tokens);
 
 	vector<HdPackCondition*> ParseConditionString(string conditionString);

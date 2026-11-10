@@ -99,6 +99,8 @@ fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 7px }
       <h2>Type d'effet</h2>
       <label class="inline" for="etype">Effet
         <select id="etype"><option value="particles">Particules</option><option value="distortion">Chaleur (distorsion)</option><option value="rays">Rayons de lumière</option><option value="plainscreen">Écran coloré (plainscreen)</option><option value="ellipse">Ellipse / fenêtre</option><option value="shadows">Ombres de nuages</option><option value="clouds">Nuages</option><option value="fog">Brouillard (nappes)</option></select></label>
+      <label class="inline" for="syntax">Syntaxe de la balise
+        <select id="syntax"><option value="snes">SNES</option><option value="nes">NES</option></select></label>
       <p class="hint">Chaque type produit son propre JSON (<code>"type"</code>) et son aperçu. Les réglages de « Balise et ancrage » valent pour tous les types.</p>
     </div>
     <div class="card">
@@ -357,6 +359,29 @@ function selectPreset(id) {
   buildPresetBar(); syncInputs(); applyType(); changed(true);
 }
 $('etype').onchange = () => { S.type = $('etype').value; activePreset = null; applyType(); buildPresetBar(); changed(true); };
+
+// ---------- Syntaxe SNES / NES (plages et valeur par défaut de Z et Layer) ----------
+// SNES : Z 0-255 (défaut 95), Layer 0-4. NES : Z 0-49 (défaut 39, échelle des <background>, 40-49 = cinquième bande au-dessus du premier plan), Layer 0-1.
+let SYNTAX = 'snes';
+const RANGES = { snes: { Z: 255, Layer: 4 }, nes: { Z: 49, Layer: 1 } };
+function applySyntax() {
+  $('syntax').value = SYNTAX;
+  for (const k of ['Z', 'Layer']) {
+    const max = RANGES[SYNTAX][k];
+    $('r-' + k).max = max; $('p-' + k).max = max;
+    if (S[k] > max) S[k] = max;
+  }
+  syncInputs();
+}
+$('syntax').onchange = () => {
+  const previous = SYNTAX;
+  SYNTAX = $('syntax').value;
+  // Valeur par défaut de Z : on la remplace seulement si elle n'a pas été modifiée (95 <-> 39)
+  if (SYNTAX === 'nes' && S.Z === 95) S.Z = 39;
+  else if (SYNTAX === 'snes' && previous === 'nes' && S.Z === 39) S.Z = 95;
+  applySyntax();
+  changed();
+};
 
 // Ajouter / supprimer un préréglage personnel
 $('addPreset').onclick = () => {
