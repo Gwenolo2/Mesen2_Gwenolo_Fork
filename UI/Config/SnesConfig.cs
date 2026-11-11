@@ -73,7 +73,7 @@ namespace Mesen.Config
 		[Reactive] public TimeSpan BsxCustomTime { get; set; } = TimeSpan.Zero;
 
 		// added by Gwenolo toenable HD packs for SNES
-		public bool EnableHdPacks { get; set; } = false;
+		[Reactive] public bool EnableHdPacks { get; set; } = true;
 
 		public void ApplyConfig()
 		{
@@ -127,7 +127,8 @@ namespace Mesen.Config
 				GsuClockSpeed = this.GsuClockSpeed,
 				RamPowerOnState = this.RamPowerOnState,
 				SpcClockSpeedAdjustment = this.SpcClockSpeedAdjustment,
-				BsxCustomDate = BsxUseCustomTime ? (this.BsxCustomDate.ToUnixTimeSeconds() + (long)this.BsxCustomTime.TotalSeconds) : -1
+				BsxCustomDate = BsxUseCustomTime ? (this.BsxCustomDate.ToUnixTimeSeconds() + (long)this.BsxCustomTime.TotalSeconds) : -1,
+				EnableHdPacks = EnableHdPacks
 			});
 		}
 
@@ -188,6 +189,8 @@ namespace Mesen.Config
 		public UInt32 GsuClockSpeed;
 
 		public long BsxCustomDate;
+
+		[MarshalAs(UnmanagedType.I1)] public bool EnableHdPacks;
 	}
 
 	public enum DspInterpolationType

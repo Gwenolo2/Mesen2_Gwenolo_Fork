@@ -302,7 +302,7 @@ BaseVideoFilter* SnesConsole::GetVideoFilter(bool getDefaultFilter)
 
 	// ---> FOR HD PACK <---
   // ON FORCE LE PASSAGE : Si le pack est actif, on met le filtre HD !
-	if(packOk) {
+	if(hdOption && packOk) {
 		MessageManager::Log("[HD TRACE 4] VICTOIRE : SnesHdVideoFilter est envoye a l'ecran !");
 		return new SnesHdVideoFilter(_emu);
 	}
@@ -655,7 +655,7 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
 	SnesHdPackLoader::ActivePack = nullptr;
 	this->_hdPackData = nullptr;
 
-	bool optionActivee = true;
+	bool optionActivee = _settings->GetSnesConfig().EnableHdPacks;
 	MessageManager::Log("[HD TRACE 0] EnableHdPacks value is: " + std::string(optionActivee ? "TRUE" : "FALSE"));
 
 	if(optionActivee) {
