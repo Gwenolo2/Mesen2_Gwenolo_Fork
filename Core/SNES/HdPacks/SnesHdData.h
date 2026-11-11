@@ -687,6 +687,39 @@ struct SnesHdParticle
 	float Seed1 = 0, Seed2 = 0;
 };
 
+// <2DPerspective> (SNES) : plan incline (sol) a partir d'un PNG. Etape 2 : mode=floor, sans ancrage
+struct SnesHdPerspectiveInfo
+{
+	std::vector<SnesHdPackCondition*> Conditions;
+	bool Active = false;
+	float Horizon = 112.0f;               // ligne SNES de l'horizon
+	float Depth = 64.0f;                  // distance (lignes SNES) sous l'horizon ou la texture est a 1:1
+	float Repeat = 0.0f;                  // repeat=N : nombre de repetitions de la texture entre la limite et le bas de l'ecran (0 = 1:1 a Depth)
+	float LimitOffset = 0.0f;             // limit=+N : premiere ligne dessinee = Horizon + N
+	float FogRange = 0.0f;                // lignes du fondu vers la couleur de brouillard (0 = coupure)
+	uint32_t Fog = 0x000000;              // couleur du brouillard
+	float Alpha = 1.0f;                   // opacite de la texture
+	bool TileX = true, TileY = true;      // repetition de la texture
+	float SpeedX = 0.0f, SpeedY = 0.0f;   // ratios de defilement (etape 3 : ancrage)
+	int AnchorLayer = 0;                  // layer= : couche d'ancrage SNES 1 a 4 (etape 3)
+	// Ancrage par ligne SNES (240 lignes) : decalage cumule en texels, dernier defilement lu
+	std::vector<float> OffX, OffY;
+	std::vector<int> LastSX, LastSY;
+	bool HaveScroll = false;
+	int ZIndex = 20;                      // Z sur l'echelle SNES, comme <background>
+	SnesHdPackBitmapInfo* Texture = nullptr;
+
+	bool MatchesCondition()
+	{
+		for(SnesHdPackCondition* cond : Conditions) {
+			if(!cond->CheckCondition(0, 0, nullptr)) {
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
 // <2DLiquid> (SNES) : nappe de liquide, meme format que NES. view=side (profil, surface + bulles) ou view=top (zone + ondulations)
 struct SnesHdLiquidBubble
 {
@@ -1777,6 +1810,7 @@ public:
 
 	// Nappes <2DLiquid> (phase 2 SNES)
 	std::vector<std::unique_ptr<SnesHdLiquidInfo>> Liquids;
+	std::vector<std::unique_ptr<SnesHdPerspectiveInfo>> Perspectives; // <2DPerspective> (SNES)
 
 	// Effets <3DParticles> (particules dans le monde Mode 7)
 	std::vector<std::unique_ptr<SnesHdParticles3DInfo>> Particles3D;

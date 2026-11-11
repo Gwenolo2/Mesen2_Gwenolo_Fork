@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <thread>
 #include <chrono>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include "SNES/HdPacks/SnesHdVideoFilter.h"
@@ -242,9 +243,13 @@ void BuildMode7TileMips(SnesHdMode7Image* img)
 	}
 }
 
+static std::atomic<uint32_t> SnesHdPerspectiveDrawn{0}; // diagnostic <2DPerspective>
+
 void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 {
 	_framePack = SnesHdSnapshotActivePack();
+	static bool buildLogged = false;
+	if(!buildLogged) { buildLogged = true; MessageManager::Log("[HD-BUILD] SnesHdVideoFilter compile : " __DATE__ " " __TIME__); }
 	static bool filterLog = false;
 	SnesHdFrameTimer frameTm(_filterMs, _idleMs, _lastEnd, _hasLastEnd);
 	const auto tPrep0 = std::chrono::steady_clock::now();
@@ -2091,6 +2096,33 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	}
 
+	// <2DPerspective> : ancrage par ligne SNES (etape 3). Delta de defilement de la couche, cumule (saut > 64 ignore), comme <2DOverlay>
+	for(auto& ppPtr : _framePack->Perspectives) {
+		SnesHdPerspectiveInfo& pp = *ppPtr;
+		if(pp.AnchorLayer < 1 || pp.AnchorLayer > 4) continue;
+		const int li = pp.AnchorLayer - 1;
+		if(pp.OffX.size() != 240) { pp.OffX.assign(240, 0.0f); pp.OffY.assign(240, 0.0f); pp.LastSX.assign(240, 0); pp.LastSY.assign(240, 0); pp.HaveScroll = false; }
+		for(int L = 0; L < 240; L++) {
+			const int scx = _framePack->ScreenInfo.ScanlineHScroll[L][li];
+			const int scy = _framePack->ScreenInfo.ScanlineVScroll[L][li];
+			if(pp.HaveScroll) {
+				const int dx = (((scx - pp.LastSX[L]) % 1024) + 1536) % 1024 - 512; // registres de scroll sur 10 bits
+				const int dy = (((scy - pp.LastSY[L]) % 1024) + 1536) % 1024 - 512;
+				if(std::abs(dx) <= 64) pp.OffX[L] += (float)dx * pp.SpeedX;
+				if(std::abs(dy) <= 64) pp.OffY[L] += (float)dy * pp.SpeedY;
+				pp.OffX[L] = std::fmod(pp.OffX[L], 1024.0f);
+				pp.OffY[L] = std::fmod(pp.OffY[L], 1024.0f);
+			}
+			pp.LastSX[L] = scx;
+			pp.LastSY[L] = scy;
+		}
+		pp.HaveScroll = true;
+		static uint32_t anchDiagFrame = 0;
+		if((anchDiagFrame++ % 300) == 0 && pp.OffX.size() == 240) {
+			MessageManager::Log("[2DPerspective] ancrage layer " + std::to_string(pp.AnchorLayer) + " : scroll X ligne 150 = " + std::to_string(pp.LastSX[150]) + ", decalage X = " + std::to_string(pp.OffX[150]) + ", decalage Y = " + std::to_string(pp.OffY[150]) + ", speedX = " + std::to_string(pp.SpeedX) + ".");
+		}
+	}
+
 	// <2DLiquid> : etat par image (activite, temps, zone, surface par colonne, bulles). Dessin par bande (tache type 9).
 	auto liqHash = [](uint32_t v) -> uint32_t { v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; v ^= v >> 16; return v; };
 	for(auto& liqPtr : _framePack->Liquids) {
@@ -2154,6 +2186,83 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			liq.Bubbles.push_back(bub);
 		}
 	}
+
+	// <2DPerspective> : dessin d'une bande de lignes HD (tache type 10, triee par ZIndex). Etape 2 : sol, sans ancrage
+	auto renderPerspectiveBand = [&](size_t ppIndex, uint32_t bandY0, uint32_t bandY1) {
+		const SnesHdPerspectiveInfo& pp = *_framePack->Perspectives[ppIndex];
+		const SnesHdPackBitmapInfo* tex = pp.Texture;
+		if(!tex || tex->Width == 0 || tex->Height == 0 || tex->PixelData.size() < (size_t)tex->Width * tex->Height) {
+			static bool ppBadLogged = false;
+			if(!ppBadLogged) { ppBadLogged = true; MessageManager::Log("[2DPerspective] texture invalide ou vide : " + std::string(tex ? "pixels " + std::to_string(tex->PixelData.size()) : "aucune image") + "."); }
+			return;
+		}
+		const int texW = (int)tex->Width, texH = (int)tex->Height;
+		const float S = (float)scale;
+		const uint8_t z = (uint8_t)std::clamp(pp.ZIndex, 0, 255);
+		const float cx = (float)outWidth / (2.0f * S);     // centre horizontal (lignes SNES)
+		const float limitY = pp.Horizon + pp.LimitOffset;  // premiere ligne dessinee (lignes SNES)
+		const uint32_t r0 = std::max(bandY0, (uint32_t)std::max(0.0f, std::ceil(limitY * S)));
+		const uint32_t r1 = bandY1;
+		if(r0 >= r1) return;
+		// repeat=N : echelle commune (carres conserves) pour que N repetitions tiennent entre la limite et le bas de l'ecran
+		float sScale = 1.0f;
+		if(pp.Repeat > 0.0f) {
+			const float kBottom = pp.Depth / std::max(1.0f, (float)hdHeight / S - pp.Horizon);
+			const float kLimit = pp.Depth / std::max(1.0f, limitY - pp.Horizon);
+			if(kLimit > kBottom) sScale = pp.Repeat * (float)texH / (kLimit - kBottom);
+		}
+		const float fogR = (float)((pp.Fog >> 16) & 0xFF);
+		const float fogG = (float)((pp.Fog >> 8) & 0xFF);
+		const float fogB = (float)(pp.Fog & 0xFF);
+		uint32_t ppDrawnBand = 0;
+		auto pack = [](float r, float g, float b) -> uint32_t {
+			const uint32_t R = (uint32_t)std::clamp(r + 0.5f, 0.0f, 255.0f);
+			const uint32_t G = (uint32_t)std::clamp(g + 0.5f, 0.0f, 255.0f);
+			const uint32_t B = (uint32_t)std::clamp(b + 0.5f, 0.0f, 255.0f);
+			return 0xFF000000u | (R << 16) | (G << 8) | B;
+		};
+		for(uint32_t r = r0; r < r1; r++) {
+			const float yN = ((float)r + 0.5f) / S;   // centre de la ligne HD, en lignes SNES
+			if(yN < limitY) continue;
+			const float dy = yN - pp.Horizon;
+			if(dy <= 0.0f) continue;
+			const float kX = pp.Depth / dy;           // facteur de profondeur (1 a la distance Depth) : largeur
+			const float k = kX * sScale;              // profondeur : x echelle repeat (seule la hauteur est repetee)
+			const int line = std::clamp((int)yN, 0, 239);
+			const bool anchored = pp.AnchorLayer >= 1 && pp.OffX.size() == 240;
+			const float offU = anchored ? pp.OffX[line] : 0.0f; // defilement horizontal (texels)
+			const float offV = anchored ? pp.OffY[line] : 0.0f; // defilement vertical (texels)
+			// Fondu : couleur du brouillard a limit, texture pure a limit + FogRange
+			float fogF = 0.0f;
+			if(pp.FogRange > 0.0f) fogF = std::clamp(1.0f - (yN - limitY) / pp.FogRange, 0.0f, 1.0f);
+			int ty = (int)std::floor(k + offV);
+			if(pp.TileY) { ty %= texH; if(ty < 0) ty += texH; }
+			else if(ty < 0 || ty >= texH) continue;
+			uint32_t* row = out + (size_t)r * outWidth;
+			for(uint32_t x = 0; x < outWidth; x++) {
+				if(z < _zBuffer[(size_t)r * outWidth + x]) continue;
+				const float xN = ((float)x + 0.5f) / S;
+				int tx = (int)std::floor((xN - cx) * kX + offU);
+				if(pp.TileX) { tx %= texW; if(tx < 0) tx += texW; }
+				else if(tx < 0 || tx >= texW) continue;
+				const uint32_t c = tex->PixelData[(size_t)ty * texW + tx];
+				const float a = ((float)((c >> 24) & 0xFF) / 255.0f) * pp.Alpha;
+				if(a <= 0.0f) continue;
+				float sr = (float)((c >> 16) & 0xFF), sg = (float)((c >> 8) & 0xFF), sb = (float)(c & 0xFF);
+				if(fogF > 0.0f) {
+					sr += (fogR - sr) * fogF;
+					sg += (fogG - sg) * fogF;
+					sb += (fogB - sb) * fogF;
+				}
+				const uint32_t dst = row[x];
+				const float dr = (float)((dst >> 16) & 0xFF), dg = (float)((dst >> 8) & 0xFF), db = (float)(dst & 0xFF);
+				row[x] = pack(dr + (sr - dr) * a, dg + (sg - dg) * a, db + (sb - db) * a);
+				ppDrawnBand++;
+				if(a >= 0.5f) _zBuffer[(size_t)r * outWidth + x] = z;
+			}
+		}
+		SnesHdPerspectiveDrawn += ppDrawnBand;
+	};
 
 	// <2DLiquid> : dessin d'une bande de lignes HD (tache type 9, triee par ZIndex comme les overlays)
 	auto renderLiquidBand = [&](size_t liqIndex, uint32_t bandY0, uint32_t bandY1) {
@@ -3567,6 +3676,15 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	for(size_t i = 0; i < _framePack->Liquids.size(); i++) {
 		if(_framePack->Liquids[i]->Active) tasks.push_back({ _framePack->Liquids[i]->ZIndex, 9, 0, i });
 	}
+	for(size_t i = 0; i < _framePack->Perspectives.size(); i++) {
+		SnesHdPerspectiveInfo& pp = *_framePack->Perspectives[i];
+		pp.Active = pp.MatchesCondition();
+		if(pp.Active) tasks.push_back({ pp.ZIndex, 10, 0, i });
+		static uint32_t ppDiagFrame = 0;
+		if(pp.Active && (ppDiagFrame++ % 300) == 0) {
+			MessageManager::Log("[2DPerspective] actif : z " + std::to_string(pp.ZIndex) + ", horizon " + std::to_string((int)pp.Horizon) + ", limit +" + std::to_string((int)pp.LimitOffset) + ", texture " + (pp.Texture ? std::to_string(pp.Texture->Width) + "x" + std::to_string(pp.Texture->Height) : std::string("absente")) + ", pixels dessines (300 images) : " + std::to_string(SnesHdPerspectiveDrawn.exchange(0)) + ".");
+		}
+	}
 	for(size_t i = 0; i < p3Draws.size(); i++) {
 		if(!p3Draws[i].empty()) tasks.push_back({ hdParts3D[i / 2]->ZIndex, 3, 0, i });
 	}
@@ -3634,6 +3752,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	for(const auto& task : tasks) {
 		if(task.type == 9) {
 			renderLiquidBand(task.index, bandY0, bandY1);
+			continue;
+		}
+		if(task.type == 10) {
+			renderPerspectiveBand(task.index, bandY0, bandY1);
 			continue;
 		}
 		if(task.type == 2) {

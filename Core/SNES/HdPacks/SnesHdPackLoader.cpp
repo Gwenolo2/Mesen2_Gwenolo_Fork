@@ -604,6 +604,8 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 	// ====================================================================
 	// 2. PARCOURS DE TES LIGNES (BOUCLE PRINCIPALE)
 	// ====================================================================
+	// [HD-BUILD] : date et heure de compilation de ce fichier (preuve que l'executable est a jour)
+	MessageManager::Log("[HD-BUILD] SnesHdPackLoader compile : " __DATE__ " " __TIME__ " - " + std::to_string(parsedLines.size()) + " lignes lues.");
 	for(const auto& lineInfo : parsedLines) {
 		lineContent = lineInfo.Content;
 
@@ -619,6 +621,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 		lineContent.erase(0, lineContent.find_first_not_of(" \t"));
 
 		if(lineContent.empty()) continue;
+		if(lineContent.size() >= 3 && lineContent.substr(0, 3) == "<2D") MessageManager::Log("[2DDBG] " + lineLocation + " : " + lineContent.substr(0, 40));
 
 		// ====================================================================
 		// --- ALIAS Management --- (text replacement with @AliasName)
@@ -2636,6 +2639,86 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DLiquid> " + view + " enregistre (z " + std::to_string(liquid->ZIndex) + ").");
 				outData->Liquids.push_back(std::move(liquid));
+			}
+		}
+
+		/// PARSING <2DPerspective> (SNES) : plan incline (sol) a partir d'un PNG. Etape 2 : mode=floor, sans ancrage
+		// [conditions]<2DPerspective>fichier.png,Z,tileX,tileY,alpha,speedX,speedY[,mode=floor][,horizon=112][,depth=64][,limit=+0][,fog=RRGGBB][,fogrange=0][,layer=K]
+		else if(lineContent.substr(0, 15) == "<2DPerspective>") {
+			std::vector<std::string> pos; // champs positionnels, dans l'ordre
+			std::unordered_map<std::string, std::string> cfg;
+			for(const std::string& raw : StringUtilities::Split(lineContent.substr(15), ',')) {
+				std::string tok = StringUtilities::Trim(raw);
+				if(tok.empty()) continue;
+				size_t eq = tok.find('=');
+				if(eq == std::string::npos) {
+					pos.push_back(tok);
+				} else {
+					cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+				}
+			}
+			auto cfgStr = [&](const char* k) -> std::string { auto it = cfg.find(k); return it == cfg.end() ? std::string() : it->second; };
+			auto numOf = [&](const std::string& v, const char* what, float def) -> float {
+				if(v.empty()) return def;
+				try { return std::stof(v); } catch(...) { MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : valeur invalide pour " + std::string(what) + " : " + v); return def; }
+			};
+			auto posNum = [&](size_t i, float def) -> float { return numOf(i < pos.size() ? pos[i] : std::string(), "champ positionnel", def); };
+			auto cfgNum = [&](const char* k, float def) -> float { return numOf(cfgStr(k), k, def); };
+
+			std::string mode = StringUtilities::ToLower(cfgStr("mode"));
+			if(mode.empty()) mode = "floor";
+			if(pos.empty()) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : fichier PNG manquant.");
+			} else if(mode != "floor") {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : mode=" + mode + " pas encore gere (floor seulement).");
+			} else {
+				auto pp = std::make_unique<SnesHdPerspectiveInfo>();
+				pp->Conditions = currentConditions;
+				pp->ZIndex = std::clamp((int)posNum(1, 20.0f), 0, 255);
+				pp->TileX = posNum(2, 1.0f) != 0.0f;
+				pp->TileY = posNum(3, 1.0f) != 0.0f;
+				pp->Alpha = std::clamp(posNum(4, 1.0f), 0.0f, 1.0f);
+				pp->SpeedX = posNum(5, 0.0f);
+				pp->SpeedY = posNum(6, 0.0f);
+				pp->SpeedX = cfgNum("speedx", pp->SpeedX); // speedX=/speedY= nommes : prioritaires sur la position
+				pp->SpeedY = cfgNum("speedy", pp->SpeedY);
+				pp->Horizon = std::clamp(cfgNum("horizon", 112.0f), 0.0f, 240.0f);
+				pp->Depth = std::max(1.0f, cfgNum("depth", 64.0f));
+				pp->Repeat = std::max(0.0f, cfgNum("repeat", 0.0f));
+				std::string lim = cfgStr("limit");
+				if(lim.empty() || lim[0] == '+') {
+					pp->LimitOffset = std::max(0.0f, cfgNum("limit", 0.0f));
+				} else {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : limit doit etre ecrit +N (relatif a l'horizon), ignore : " + lim);
+				}
+				pp->FogRange = std::max(0.0f, cfgNum("fogrange", 0.0f));
+				pp->AnchorLayer = std::clamp((int)cfgNum("layer", 0.0f), 0, 4);
+				std::string fog = StringUtilities::Trim(cfgStr("fog"));
+				if(!fog.empty()) {
+					if(fog[0] == '#') fog = fog.substr(1);
+					try { pp->Fog = (uint32_t)std::stoul(fog, nullptr, 16) & 0xFFFFFF; } catch(...) { MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : fog invalide : " + fog); }
+				}
+
+				std::string filename = NormalizePath(pos[0]);
+				auto itBmp = loadedBitmaps.find(filename);
+				if(itBmp != loadedBitmaps.end()) {
+					pp->Texture = itBmp->second;
+				} else {
+					auto bitmap = std::make_unique<SnesHdPackBitmapInfo>();
+					bitmap->PngName = filename;
+					VirtualFile pngFile(FolderUtilities::CombinePath(rootFolder, filename));
+					if(pngFile.IsValid()) {
+						pngFile.ReadFile(bitmap->FileData);
+					} else {
+						MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : texture introuvable : " + filename);
+					}
+					pp->Texture = bitmap.get();
+					loadedBitmaps[filename] = bitmap.get();
+					outData->ImageFileData.push_back(std::move(bitmap));
+				}
+
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> floor enregistre (z " + std::to_string(pp->ZIndex) + ", horizon " + std::to_string((int)pp->Horizon) + ").");
+				outData->Perspectives.push_back(std::move(pp));
 			}
 		}
 
