@@ -838,6 +838,13 @@ struct SnesHdOverlayInfo
 	float FxCoverage = 0.5f;            // part de l'image couverte (0 = rien, 1 = tout)
 	int FxSeed = 1;
 	bool FxNegative = false;            // ellipse negative : tout l'ecran est couvert sauf l'ellipse (fenetre de jeu)                   // zone touchee (fractions de l'image)
+	// Torche (type=torchlight) : halo doux. dark=1 : hors du halo, obscurite opaque (alpha) ; dark=0 : lumiere additive
+	bool IsTorch = false;
+	float TorchX = 128.0f, TorchY = 112.0f;   // centre de depart (pixels SNES), decale par l'ancrage Layer
+	float TorchRadius = 48.0f;                // rayon du halo (pixels SNES)
+	float TorchSoft = 0.5f;                   // largeur du bord doux (fraction du rayon)
+	bool TorchDark = true;                    // true : tout ce qui est hors du halo est assombri
+	float TorchGlow = 0.15f;                  // intensite de la teinte ajoutee au centre (dark=1)
 
 	// Etat d'execution (filtre HD)
 	std::vector<SnesHdParticle> Particles;

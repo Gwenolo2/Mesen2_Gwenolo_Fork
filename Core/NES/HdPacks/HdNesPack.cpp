@@ -434,7 +434,7 @@ void HdNesPack<scale>::SimulateOverlays(HdScreenInfo* hdScreenInfo)
 			ov.Time += dt;
 			continue;
 		}
-		if(ov.IsPlainScreen || ov.IsEllipse) {
+		if(ov.IsPlainScreen || ov.IsEllipse || ov.IsTorch) {
 			continue;
 		}
 		if(!ov.Initialized) {
@@ -476,7 +476,7 @@ void HdNesPack<scale>::ProcessScreenLayersLayout(uint32_t* outputBuffer, uint32_
 
 	for(auto& ovPtr : _hdData->Overlays) {
 		NesHdOverlayInfo& ov = *ovPtr;
-		if(!ov.Active || !(ov.IsPlainScreen || ov.IsEllipse || ov.IsNoise || ov.IsRays || ov.IsAurora)) {
+		if(!ov.Active || !(ov.IsPlainScreen || ov.IsEllipse || ov.IsTorch || ov.IsNoise || ov.IsRays || ov.IsAurora)) {
 			continue;
 		}
 		const int zx0 = (int)std::clamp(ov.ZoneX0 * visW, 0.0f, visW);
@@ -524,6 +524,41 @@ void HdNesPack<scale>::ProcessScreenLayersLayout(uint32_t* outputBuffer, uint32_
 					if(inside != ov.FxNegative) {
 						blend(row[x], 1.0f);
 					}
+				}
+			});
+		} else if(ov.IsTorch) {
+			// torche : halo doux ; le centre suit le scroll PPU (decalage d'ancrage, periodes 512 x 480), copie a chaque periode
+			const float rad = std::max(1.0f, ov.TorchRadius * fScale);
+			const float soft = std::clamp(ov.TorchSoft, 0.01f, 1.0f);
+			auto wrapN = [](float v, float per) { v = std::fmod(v, per); return v < 0.0f ? v + per : v; };
+			const float bxNes = wrapN(ov.TorchX - ov.OffsetX, 512.0f), byNes = wrapN(ov.TorchY - ov.OffsetY, 480.0f);
+			const float bx = (bxNes - originNes) * fScale, by = (byNes - (float)oTop) * fScale;
+			const float tcx[2] = { bx, bx - 512.0f * fScale }, tcy[2] = { by, by - 480.0f * fScale };
+			const bool dark = ov.TorchDark;
+			const float glow = ov.TorchGlow;
+			forRows(zy0, zy1, [&](int y) {
+				uint32_t* row = outputBuffer + (size_t)y * screenWidth;
+				const float py = (float)y + 0.5f;
+				for(int x = zx0; x < zx1; x++) {
+					const float px = (float)x + 0.5f;
+					float L = 0.0f;
+					for(int i = 0; i < 2; i++) {
+						for(int j = 0; j < 2; j++) {
+							const float ddx = px - tcx[i], ddy = py - tcy[j];
+							const float rr = std::sqrt(ddx * ddx + ddy * ddy) / rad;
+							L = std::max(L, std::clamp((1.0f - rr) / soft, 0.0f, 1.0f));
+						}
+					}
+					const uint32_t d = row[x];
+					const float dr = (float)((d >> 16) & 0xFF), dg = (float)((d >> 8) & 0xFF), db = (float)(d & 0xFF);
+					float nr, ng, nb;
+					if(dark) {
+						const float keep = 1.0f - a * (1.0f - L);
+						nr = dr * keep + cr * glow * L * a; ng = dg * keep + cg * glow * L * a; nb = db * keep + cb * glow * L * a;
+					} else {
+						nr = dr + cr * L * a; ng = dg + cg * L * a; nb = db + cb * L * a;
+					}
+					row[x] = 0xFF000000u | ((uint32_t)std::clamp(nr + 0.5f, 0.0f, 255.0f) << 16) | ((uint32_t)std::clamp(ng + 0.5f, 0.0f, 255.0f) << 8) | (uint32_t)std::clamp(nb + 0.5f, 0.0f, 255.0f);
 				}
 			});
 		} else if(ov.IsRays) {

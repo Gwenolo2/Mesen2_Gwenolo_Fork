@@ -1395,7 +1395,7 @@ void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondit
 	};
 
 	string type = StringUtilities::ToLower(str("type"));
-	if(!type.empty() && type != "particles" && type != "plainscreen" && type != "ellipse" && type != "shadows" && type != "clouds" && type != "fog" && type != "rays" && type != "distortion" && type != "aurora") {
+	if(!type.empty() && type != "particles" && type != "plainscreen" && type != "ellipse" && type != "shadows" && type != "clouds" && type != "fog" && type != "rays" && type != "distortion" && type != "aurora" && type != "torchlight") {
 		logError("2DOverlay type '" + type + "' is not supported on NES yet (particles, plainscreen, ellipse, shadows, clouds, fog, rays, distortion, aurora)");
 		return;
 	}
@@ -1453,6 +1453,7 @@ void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondit
 	overlay->NoiseKind = (type == "clouds") ? 1 : ((type == "fog") ? 2 : 0);
 	overlay->IsRays = (type == "rays");
 	overlay->IsAurora = (type == "aurora");
+	overlay->IsTorch = (type == "torchlight");
 	overlay->IsDistortion = (type == "distortion");
 	if(overlay->IsDistortion) {
 		// distorsion : amplitude en px NES, longueur d'onde en lignes NES, vitesse en cycles/s, phase en degres
@@ -1463,7 +1464,7 @@ void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondit
 		overlay->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f); overlay->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
 		overlay->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f); overlay->ZoneY1 = std::clamp(num("ymax", 1.0f), 0.0f, 1.0f);
 	}
-	if(overlay->IsPlainScreen || overlay->IsEllipse || overlay->IsNoise || overlay->IsRays || overlay->IsAurora) {
+	if(overlay->IsPlainScreen || overlay->IsEllipse || overlay->IsTorch || overlay->IsNoise || overlay->IsRays || overlay->IsAurora) {
 		overlay->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f);
 		overlay->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
 		overlay->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f);
@@ -1480,8 +1481,16 @@ void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondit
 			if(v == "red" || v == "rouge") return 0xFF0000;
 			return color(k, def);
 		};
-		const uint32_t defCol = overlay->IsEllipse ? (overlay->FxNegative ? 0x000000 : 0xFFFFFF) : (type == "fog" ? 0xA8B8C8 : (type == "clouds" ? 0xFFFFFF : 0x000000));
+		const uint32_t defCol = overlay->IsTorch ? 0xFFE0A0u : overlay->IsEllipse ? (overlay->FxNegative ? 0x000000 : 0xFFFFFF) : (type == "fog" ? 0xA8B8C8 : (type == "clouds" ? 0xFFFFFF : 0x000000));
 		overlay->FxColor = namedColor("color", defCol);
+		if(overlay->IsTorch) {
+			overlay->TorchX = num("x", 128.0f);
+			overlay->TorchY = num("y", 120.0f);
+			overlay->TorchRadius = std::max(1.0f, num("radius", 48.0f));
+			overlay->TorchSoft = std::clamp(num("softness", 0.5f), 0.01f, 1.0f);
+			overlay->TorchDark = boolean("dark", true);
+			overlay->TorchGlow = std::clamp(num("glow", 0.15f), 0.0f, 1.0f);
+		}
 		if(overlay->IsEllipse) {
 			overlay->FxEllipseX = num("x", 128.0f);
 			overlay->FxEllipseY = num("y", 120.0f);

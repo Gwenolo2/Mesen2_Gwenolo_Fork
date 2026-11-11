@@ -647,6 +647,14 @@ struct NesHdOverlayInfo
 	float FxRadiusX = 32.0f, FxRadiusY = 16.0f;       // rayons (pixels NES)
 	bool FxNegative = false;                          // true : tout l'ecran est couvert sauf l'ellipse
 
+	// Torche (type=torchlight) : halo doux. dark=1 : hors du halo, obscurite opaque (alpha) ; dark=0 : lumiere additive
+	bool IsTorch = false;
+	float TorchX = 128.0f, TorchY = 120.0f;   // centre de depart (pixels NES, cadre complet), decale par l'ancrage Layer
+	float TorchRadius = 48.0f;                // rayon du halo (pixels NES)
+	float TorchSoft = 0.5f;                   // largeur du bord doux (fraction du rayon)
+	bool TorchDark = true;                    // true : tout ce qui est hors du halo est assombri
+	float TorchGlow = 0.15f;                  // intensite de la teinte ajoutee au centre (dark=1)
+
 	// Ombres, nuages, brouillard (bruit qui derive) : IsNoise, NoiseKind 0 = ombres, 1 = nuages, 2 = brouillard
 	bool IsNoise = false;
 	int NoiseKind = 0;

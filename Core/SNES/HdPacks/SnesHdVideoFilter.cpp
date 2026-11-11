@@ -2058,6 +2058,25 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			SnesHdOverlayInfo& ov = *hdOverlays[i];
 			ov.Active = ov.MatchesCondition();
 			if(!ov.Active) continue; // effet fige tant que sa condition est fausse
+			if(ov.IsTorch) { // torche : ancrage propre (periode 1024), pas de particules
+				ov.Time += 1.0f / 60.0f;
+				if(ov.Layer >= 1 && ov.Layer <= 4) {
+					const int li = ov.Layer - 1;
+					const uint32_t tl = std::min<uint32_t>((uint32_t)std::max(0.0f, ov.TorchY), 239u);
+					const int scx = _framePack->ScreenInfo.ScanlineHScroll[tl][li];
+					const int scy = _framePack->ScreenInfo.ScanlineVScroll[tl][li];
+					if(ov.HaveScroll) {
+						const int dx = (((scx - ov.LastScrollX) % 1024) + 1536) % 1024 - 512;
+						const int dy = (((scy - ov.LastScrollY) % 1024) + 1536) % 1024 - 512;
+						if(std::abs(dx) <= 64) ov.OffsetX += (float)dx * ov.SpeedX;
+						if(std::abs(dy) <= 64) ov.OffsetY += (float)dy * ov.SpeedY;
+						ov.OffsetX = std::fmod(ov.OffsetX, 1024.0f);
+						ov.OffsetY = std::fmod(ov.OffsetY, 1024.0f);
+					}
+					ov.LastScrollX = scx; ov.LastScrollY = scy; ov.HaveScroll = true;
+				}
+				continue;
+			}
 			if(ov.IsDistortion || ov.IsRays || ov.IsAurora || ov.IsPlainScreen || ov.IsEllipse || ov.IsNoise) { ov.Time += 1.0f / 60.0f; continue; } // distorsion : appliquee plus tard sur l'image finale, pas de particules
 			ovActive[i] = 1;
 			ov.FieldWidthPx = (float)cropWidth * ov.FieldW;
@@ -5054,7 +5073,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		const float degToRad = 3.14159265f / 180.0f;
 		for(size_t i = 0; i < hdOverlays.size(); i++) {
 			const SnesHdOverlayInfo& ov = *hdOverlays[i];
-			if(!ov.Active || !(ov.IsPlainScreen || ov.IsEllipse || ov.IsNoise)) continue;
+			if(!ov.Active || !(ov.IsPlainScreen || ov.IsEllipse || ov.IsTorch || ov.IsNoise)) continue;
 			const uint32_t zy0 = (uint32_t)std::clamp(ov.ZoneY0 * (float)hdHeight, 0.0f, (float)hdHeight);
 			const uint32_t zy1 = (uint32_t)std::clamp(ov.ZoneY1 * (float)hdHeight, 0.0f, (float)hdHeight);
 			const uint32_t zx0 = (uint32_t)std::clamp(ov.ZoneX0 * (float)outWidth, 0.0f, (float)outWidth);
@@ -5089,6 +5108,46 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 							const bool inside = dx * dx + dy * dy < 1.0f;
 							// normal : l'ellipse est teintee ; negatif : tout sauf l'ellipse est couvert (fenetre de jeu)
 							if(inside != neg) row[x] = fxBlend(row[x], col, a);
+						}
+					}
+				});
+			} else if(ov.IsTorch) {
+				// torche : halo doux ; le centre suit le defilement de la couche (position - decalage), copie a la periode 1024
+				const float span = 1024.0f * S;
+				const float soft = std::clamp(ov.TorchSoft, 0.01f, 1.0f);
+				const float rad = std::max(1.0f, ov.TorchRadius * S);
+				auto wrapP = [span](float v) { v = std::fmod(v, span); return v < 0.0f ? v + span : v; };
+				const float bx = wrapP(ov.TorchX * S - ov.OffsetX * S), by = wrapP(ov.TorchY * S - ov.OffsetY * S);
+				const float tcx[2] = { bx, bx - span }, tcy[2] = { by, by - span };
+				const float cr = (float)((col >> 16) & 0xFF), cg = (float)((col >> 8) & 0xFF), cb = (float)(col & 0xFF);
+				const bool dark = ov.TorchDark;
+				const float glow = ov.TorchGlow;
+				_pool.Run(nT, [&](int tt) {
+					for(uint32_t r = zy0 + (uint32_t)tt; r < zy1; r += (uint32_t)nT) {
+						uint32_t* row = out + (size_t)r * outWidth;
+						const uint8_t* ign = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr;
+						const float py = (float)r + 0.5f;
+						for(uint32_t x = zx0; x < zx1; x++) {
+							if(ign && ign[x]) continue;
+							const float px = (float)x + 0.5f;
+							float L = 0.0f;
+							for(int i = 0; i < 2; i++) {
+								for(int j = 0; j < 2; j++) {
+									const float ddx = px - tcx[i], ddy = py - tcy[j];
+									const float rr = std::sqrt(ddx * ddx + ddy * ddy) / rad;
+									L = std::max(L, std::clamp((1.0f - rr) / soft, 0.0f, 1.0f));
+								}
+							}
+							const uint32_t d = row[x];
+							const float dr = (float)((d >> 16) & 0xFF), dg = (float)((d >> 8) & 0xFF), db = (float)(d & 0xFF);
+							float nr, ng, nb;
+							if(dark) {
+								const float keep = 1.0f - a * (1.0f - L);
+								nr = dr * keep + cr * glow * L * a; ng = dg * keep + cg * glow * L * a; nb = db * keep + cb * glow * L * a;
+							} else {
+								nr = dr + cr * L * a; ng = dg + cg * L * a; nb = db + cb * L * a;
+							}
+							row[x] = 0xFF000000u | ((uint32_t)std::clamp(nr + 0.5f, 0.0f, 255.0f) << 16) | ((uint32_t)std::clamp(ng + 0.5f, 0.0f, 255.0f) << 8) | (uint32_t)std::clamp(nb + 0.5f, 0.0f, 255.0f);
 						}
 					}
 				});

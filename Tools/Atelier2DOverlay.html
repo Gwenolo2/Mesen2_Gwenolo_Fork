@@ -98,7 +98,7 @@ fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 7px }
     <div class="card">
       <h2>Type d'effet</h2>
       <label class="inline" for="etype">Effet
-        <select id="etype"><option value="particles">Particules</option><option value="distortion">Chaleur (distorsion)</option><option value="rays">Rayons de lumière</option><option value="plainscreen">Écran coloré (plainscreen)</option><option value="ellipse">Ellipse / fenêtre</option><option value="shadows">Ombres de nuages</option><option value="clouds">Nuages</option><option value="fog">Brouillard (nappes)</option><option value="aurora">Aurore boréale</option></select></label>
+        <select id="etype"><option value="particles">Particules</option><option value="distortion">Chaleur (distorsion)</option><option value="rays">Rayons de lumière</option><option value="plainscreen">Écran coloré (plainscreen)</option><option value="ellipse">Ellipse / fenêtre</option><option value="shadows">Ombres de nuages</option><option value="clouds">Nuages</option><option value="fog">Brouillard (nappes)</option><option value="aurora">Aurore boréale</option><option value="torchlight">Torche (halo)</option></select></label>
       <label class="inline" for="syntax">Syntaxe de la balise
         <select id="syntax"><option value="snes">SNES</option><option value="nes">NES</option></select></label>
       <p class="hint">Chaque type produit son propre JSON (<code>"type"</code>) et son aperçu. Les réglages de « Balise et ancrage » valent pour tous les types.</p>
@@ -125,16 +125,18 @@ fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 7px }
     <div class="card" data-kind="particles"><h2>Apparence</h2><fieldset id="g-look"></fieldset></div>
     <div class="card" data-kind="distortion"><h2>Chaleur : deux ondes</h2><fieldset id="g-heat"></fieldset>
       <p class="hint">Amplitude en px SNES, longueur d'onde en lignes SNES, vitesse en cycles/s, phase en degrés. Les deux ondes s'ajoutent.</p></div>
-    <div class="card" data-kind="distortion rays plainscreen ellipse shadows clouds fog aurora"><h2>Zone d'effet</h2><fieldset id="g-zone"></fieldset>
+    <div class="card" data-kind="distortion rays plainscreen ellipse shadows clouds fog aurora torchlight"><h2>Zone d'effet</h2><fieldset id="g-zone"></fieldset>
       <p class="hint">Fractions de l'écran : X de 0 (gauche) à 1 (droite), Y de 0 (haut) à 1 (bas).</p></div>
     <div class="card" data-kind="rays"><h2>Rayons de lumière</h2><fieldset id="g-ray"></fieldset>
       <p class="hint">L'origine (rayx, rayy) est une fraction de l'écran : 0,0 = coin haut-gauche. Angles : 0 = droite, 90 = bas. Pour un rayon oblique dans un coin, mettez l'origine à 0 / 0 et un angle entre 0 et 90 (ex. 45).</p></div>
     <div class="card" data-kind="aurora"><h2>Aurore boréale</h2><fieldset id="g-aur"></fieldset>
       <p class="hint">Rideaux qui dérivent. Le bas de la zone est le plus lumineux : placez « Y max » à l'endroit où la lumière doit s'arrêter. Tailles en px SNES (la passe NES utilise les px NES).</p></div>
-    <div class="card" data-kind="plainscreen ellipse shadows clouds fog"><h2>Couleur</h2><fieldset id="g-fx"></fieldset>
+    <div class="card" data-kind="plainscreen ellipse shadows clouds fog torchlight"><h2>Couleur</h2><fieldset id="g-fx"></fieldset>
       <p class="hint">Couleur du calque (hexa ou sélecteur). L'opacité est l'« Alpha global » de la carte Balise.</p></div>
     <div class="card" data-kind="ellipse"><h2>Ellipse</h2><fieldset id="g-ell"></fieldset>
       <p class="hint">Coordonnées SNES. Avec « Négatif », tout l'écran est couvert sauf l'ellipse, qui montre la fenêtre de jeu.</p></div>
+    <div class="card" data-kind="torchlight"><h2>Torche (halo)</h2><fieldset id="g-torch"></fieldset>
+      <p class="hint">Halo doux autour du centre. Avec « Obscurité hors du halo » (dark=1), tout ce qui est hors du halo est couvert avec l'« Alpha global » : 1 = noir opaque, comme un souterrain de Zelda 3. Avec dark=0, le halo s'ajoute à l'image. Layer 1 à 4 : le centre suit le défilement simulé de la couche.</p></div>
     <div class="card" data-kind="shadows clouds fog"><h2>Ombres, nuages, brouillard</h2><fieldset id="g-noise"></fieldset>
       <p class="hint">Direction : 0 = droite, 90 = bas. Couverture : 0 = rien, 1 = tout l'écran.</p></div>
     <div class="card"><h2>Balise et ancrage</h2><fieldset id="g-tag"></fieldset>
@@ -222,6 +224,12 @@ const P = [
   ['ell','erx','Rayon X (px SNES)',0.5,256,1,40],
   ['ell','ery','Rayon Y (px SNES)',0.5,224,1,30],
   ['ell','eneg','Négatif (écran noir, fenêtre)','bool',false],
+  ['torch','tx','Centre X (px SNES)',0,256,1,128],
+  ['torch','ty','Centre Y (px SNES)',0,224,1,112],
+  ['torch','trad','Rayon du halo (px SNES)',1,256,1,48],
+  ['torch','tsoft','Bord doux (fraction du rayon)',0.01,1,0.01,0.5],
+  ['torch','tdark','Obscurité hors du halo (dark=1)','bool',true],
+  ['torch','tglow','Teinte au centre (mode sombre)',0,1,0.01,0.15],
   ['noise','nsize','Taille des motifs (px SNES)',4,256,1,64],
   ['noise','nspeed','Vitesse (px SNES / s)',-200,200,1,10],
   ['noise','ndir','Direction (°)',0,360,1,20],
@@ -242,13 +250,13 @@ for (const d of P) { const [g,k,label,a] = d; META[k] = d;
   DEF[k] = (a==='bool'||a==='tex'||a==='color'||a==='blend') ? d[4] : d[6]; }
 DEF.type = 'particles';
 // noms JSON (C++) des clés dont l'identifiant de l'atelier diffère
-const JSON_ALIAS = { fxColor:'color', ex:'x', ey:'y', erx:'radiusx', ery:'radiusy', eneg:'negative', nsize:'size', nspeed:'speed', ndir:'direction', ncov:'coverage', nseed:'seed', asize:'size', aspeed:'speed', acov:'coverage', afall:'fall', awave:'wave', acolor1:'color1', acolor2:'color2' };
+const JSON_ALIAS = { tx:'x', ty:'y', trad:'radius', tsoft:'softness', tdark:'dark', tglow:'glow', fxColor:'color', ex:'x', ey:'y', erx:'radiusx', ery:'radiusy', eneg:'negative', nsize:'size', nspeed:'speed', ndir:'direction', ncov:'coverage', nseed:'seed', asize:'size', aspeed:'speed', acov:'coverage', afall:'fall', awave:'wave', acolor1:'color1', acolor2:'color2' };
 const LOWER = {}; for (const k in DEF) LOWER[k.toLowerCase()] = k; LOWER['zindex'] = 'Z';
 for (const k in JSON_ALIAS) LOWER[JSON_ALIAS[k].toLowerCase()] = k;
 const TAGKEYS = ['Z','Layer','SpeedX','SpeedY','Alpha','FieldW','FieldH','scrollX','scrollY'];
 // groupes exportés par type d'effet (les autres groupes sont masqués)
 const EXPORT_GROUPS = { particles: ['spawn','move','look'], distortion: ['heat','zone'], rays: ['ray','zone'],
-  plainscreen: ['fx','zone'], ellipse: ['fx','ell','zone'], shadows: ['fx','noise','zone'], clouds: ['fx','noise','zone'], fog: ['fx','noise','zone'], aurora: ['aur','zone'] };
+  plainscreen: ['fx','zone'], ellipse: ['fx','ell','zone'], shadows: ['fx','noise','zone'], clouds: ['fx','noise','zone'], fog: ['fx','noise','zone'], aurora: ['aur','zone'], torchlight: ['fx','torch','zone'] };
 let S = { ...DEF };
 let texImg = null; // {w,h,px:Uint32Array ARGB, name}
 let activePreset = null; // 'Neige' ou 'u:NomPerso'
@@ -279,6 +287,7 @@ const PRESETS = {
   'Ombres': { type:'shadows', nsize:64, nspeed:10, ndir:20, ncov:0.45, fxColor:'#000000', Alpha:0.35 },
   'Nuages': { type:'clouds', nsize:56, nspeed:12, ndir:0, ncov:0.5, fxColor:'#FFFFFF', Alpha:0.8 },
   'Brouillard': { type:'fog', nsize:120, nspeed:4, ndir:0, ncov:0.5, fxColor:'#A8B8C8', Alpha:0.4 },
+  'Torche': { type:'torchlight', tx:128, ty:112, trad:48, tsoft:0.5, tdark:true, tglow:0.15, fxColor:'#FFE0A0', Alpha:1 },
   'Aurore': { type:'aurora', ymin:0, ymax:0.5, asize:40, aspeed:6, acov:0.45, afall:0.7, awave:6, acolor1:'#3CFF8C', acolor2:'#8C4BFF', Alpha:0.6 },
 };
 
@@ -478,7 +487,7 @@ $('doImp').onclick = () => {
   while ((m = re.exec(txt))) {
     const low = m[1].trim().toLowerCase();
     let v = m[2].trim(); if (v[0] === '"') v = v.slice(1, -1).replace(/\\(["\\])/g, '$1');
-    if (low === 'type') { const tv = v.toLowerCase(); if (['particles','distortion','rays','plainscreen','ellipse','shadows','clouds','fog','aurora'].includes(tv)) next.type = tv; n++; continue; }
+    if (low === 'type') { const tv = v.toLowerCase(); if (['particles','distortion','rays','plainscreen','ellipse','shadows','clouds','fog','aurora','torchlight'].includes(tv)) next.type = tv; n++; continue; }
     const key = keyFor(low, hint); if (!key) continue;
     const a = META[key][3];
     if (a === 'bool') next[key] = /^(true|1|yes)$/i.test(v);
@@ -527,7 +536,8 @@ function step() {
     k++;
   }
   // ancrage : le défilement simulé de la couche, multiplié par SpeedX/Y, s'ajoute
-  if (S.Layer >= 1) { sim.offX = (sim.offX + S.scrollX * DT * S.SpeedX) % sim.fw; sim.offY = (sim.offY + S.scrollY * DT * S.SpeedY) % sim.fh; }
+  if (S.Layer >= 1) { sim.offX = (sim.offX + S.scrollX * DT * S.SpeedX) % sim.fw; sim.offY = (sim.offY + S.scrollY * DT * S.SpeedY) % sim.fh;
+    sim.tOffX = (sim.tOffX || 0) + S.scrollX * DT * S.SpeedX; sim.tOffY = (sim.tOffY || 0) + S.scrollY * DT * S.SpeedY; }
 }
 
 // ---------- Fond ----------
@@ -746,6 +756,25 @@ function drawFx(out, W, H) {
       for (let x = z.x0; x < z.x1; x++) {
         const dx = (x + 0.5 - cx) / rx, inside = dx * dx + dy * dy < 1;
         if (inside !== S.eneg) put((r * W + x) * 4, a);
+      }
+    }
+  } else if (S.type === 'torchlight') {
+    const span = 1024 * sc, soft = Math.min(1, Math.max(0.01, S.tsoft)), rad = Math.max(1, S.trad) * sc;
+    const wrapP = v => { v = v % span; return v < 0 ? v + span : v; };
+    const bx = wrapP(S.tx * sc - (sim.tOffX || 0) * sc), by = wrapP(S.ty * sc - (sim.tOffY || 0) * sc);
+    const cxs = [bx, bx - span], cys = [by, by - span];
+    for (let r = z.y0; r < z.y1; r++) {
+      const py = r + 0.5;
+      for (let x = z.x0; x < z.x1; x++) {
+        const px = x + 0.5; let L = 0;
+        for (const cx of cxs) for (const cy of cys) {
+          const dx = px - cx, dy = py - cy, rr = Math.sqrt(dx * dx + dy * dy) / rad;
+          L = Math.max(L, clamp01((1 - rr) / soft));
+        }
+        const i = (r * W + x) * 4;
+        if (S.tdark) { const keep = 1 - a * (1 - L), g = S.tglow * L * a;
+          out[i] = out[i] * keep + cR * g; out[i + 1] = out[i + 1] * keep + cG * g; out[i + 2] = out[i + 2] * keep + cB * g; }
+        else { const g = L * a; out[i] += cR * g; out[i + 1] += cG * g; out[i + 2] += cB * g; }
       }
     }
   } else {

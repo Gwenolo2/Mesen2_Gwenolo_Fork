@@ -2437,9 +2437,10 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				ov->IsAurora = (type == "aurora");
 				ov->IsPlainScreen = (type == "plainscreen");
 				ov->IsEllipse = (type == "ellipse");
+				ov->IsTorch = (type == "torchlight");
 				ov->IsNoise = (type == "shadows" || type == "clouds" || type == "fog");
 				ov->NoiseKind = (type == "clouds") ? 1 : ((type == "fog") ? 2 : 0);
-				if(!type.empty() && type != "particles" && !ov->IsDistortion && !ov->IsRays && !ov->IsAurora && !ov->IsPlainScreen && !ov->IsEllipse && !ov->IsNoise) {
+				if(!type.empty() && type != "particles" && !ov->IsDistortion && !ov->IsRays && !ov->IsAurora && !ov->IsPlainScreen && !ov->IsEllipse && !ov->IsTorch && !ov->IsNoise) {
 					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> : type '" + type + "' pas encore gere (particles, distortion, rays, aurora, plainscreen, ellipse, shadows, clouds, fog).");
 				}
 				if(ov->IsDistortion) {
@@ -2474,12 +2475,19 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 					if(v == "red" || v == "rouge") return 0xFF0000;
 					return color(k, def);
 				};
-				if(ov->IsPlainScreen || ov->IsEllipse || ov->IsNoise) {
+				if(ov->IsPlainScreen || ov->IsEllipse || ov->IsTorch || ov->IsNoise) {
 					// calques : zone (fractions de l'image) et couleur (hexa ou alias black/white/yellow/green/bleue/red)
 					ov->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f); ov->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
 					ov->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f); ov->ZoneY1 = std::clamp(num("ymax", 1.0f), 0.0f, 1.0f);
-					const uint32_t defCol = ov->IsEllipse ? (boolean("negative", false) ? 0x000000 : 0xFFFFFF) : (type == "fog" ? 0xA8B8C8 : (type == "clouds" ? 0xFFFFFF : 0x000000));
+					const uint32_t defCol = ov->IsTorch ? 0xFFE0A0u : ov->IsEllipse ? (boolean("negative", false) ? 0x000000 : 0xFFFFFF) : (type == "fog" ? 0xA8B8C8 : (type == "clouds" ? 0xFFFFFF : 0x000000));
 					ov->FxColor = fxColor("color", defCol);
+				}
+				if(ov->IsTorch) {
+					ov->TorchX = num("x", 128.0f); ov->TorchY = num("y", 112.0f);
+					ov->TorchRadius = std::max(1.0f, num("radius", 48.0f));
+					ov->TorchSoft = std::clamp(num("softness", 0.5f), 0.01f, 1.0f);
+					ov->TorchDark = boolean("dark", true);
+					ov->TorchGlow = std::clamp(num("glow", 0.15f), 0.0f, 1.0f);
 				}
 				if(ov->IsEllipse) {
 					ov->FxEllipseX = num("x", 128.0f); ov->FxEllipseY = num("y", 112.0f);
