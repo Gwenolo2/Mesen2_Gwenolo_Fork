@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Shared/HdLoadingScreen.h"
 #include "Shared/Video/VideoRenderer.h"
 #include "Shared/Video/VideoDecoder.h"
 #include "Shared/Interfaces/IRenderingDevice.h"
@@ -85,6 +86,19 @@ void VideoRenderer::RenderThread()
 				_rendererHud->ClearScreen();
 			}
 
+			if(HdLoadingScreen::IsActive()) {
+				// Ecran de chargement des packs HD (LoadAsync) : remplace le calque HUD pendant le chargement
+				HdLoadingScreen::Compose(_emuHudSurface.Buffer, size.Width, size.Height);
+				_emuHudSurface.IsDirty = true;
+				_loadingScreenShown = true;
+				_renderer->Render(_emuHudSurface, _scriptHudSurface);
+				continue;
+			}
+			if(_loadingScreenShown) {
+				_loadingScreenShown = false;
+				_rendererHud->ClearScreen();
+				_emuHudSurface.IsDirty = true;
+			}
 			RenderedFrame frame;
 			{
 				auto lock = _frameLock.AcquireSafe();

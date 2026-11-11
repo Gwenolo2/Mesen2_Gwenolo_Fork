@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atelier MESEN 2D Liquid</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Silkscreen&display=swap">
+<style>
+:root {
+  --bg: #F1F2F6; --panel: #FFFFFF; --line: #DADCE5; --fg: #1B1E2B; --muted: #5C6273;
+  --accent: #4F43AE; --accent-soft: #E7E5F7; --field: #F7F8FB;
+  --f-display: "Silkscreen", "Courier New", monospace;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #14151C; --panel: #1D1F29; --line: #2E3140; --fg: #E6E7EE; --muted: #9A9FB2;
+  --accent: #A59CFF; --accent-soft: #2A2750; --field: #171922; color-scheme: dark } }
+* { box-sizing: border-box }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 14px; line-height: 1.45; padding: 16px }
+h1 { font-family: var(--f-display); font-weight: 400; font-size: 18px; margin: 0 0 4px }
+.sub { color: var(--muted); margin: 0 0 14px; font-size: 13px }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start }
+@media (max-width: 880px) { .layout { grid-template-columns: 1fr } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px }
+.preview { position: sticky; top: 12px }
+canvas { width: 100%; height: auto; image-rendering: pixelated; display: block; border-radius: 6px; background: #000 }
+.row { display: grid; grid-template-columns: 1fr 64px; gap: 6px 10px; align-items: center; margin-bottom: 8px }
+.row label { font-size: 13px; color: var(--muted) }
+.row output { font-family: var(--f-mono); font-size: 12px; text-align: right }
+input[type=range] { width: 100%; grid-column: 1 / -1 }
+select, input[type=color] { font: inherit; background: var(--field); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px }
+input[type=color] { width: 100%; height: 30px; padding: 2px }
+h2 { font-family: var(--f-display); font-weight: 400; font-size: 13px; margin: 14px 0 8px; color: var(--accent) }
+textarea { width: 100%; min-height: 110px; font-family: var(--f-mono); font-size: 12px; background: var(--field); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; resize: vertical }
+button { font: inherit; background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 12px; cursor: pointer; margin-top: 8px }
+button.ghost { background: var(--accent-soft); color: var(--accent) }
+.note { color: var(--muted); font-size: 12px; margin-top: 10px }
+</style>
+</head>
+<body>
+<h1>Atelier MESEN 2D Liquid</h1>
+<p class="sub">Aperçu approximatif de <code>&lt;2DLiquid&gt;</code> (SNES et NES). Le moteur reste la référence : pas de textures ni de réfraction ici.</p>
+
+<div class="layout">
+  <div class="card preview">
+    <canvas id="cv"></canvas>
+    <p class="note" id="info"></p>
+  </div>
+
+  <div class="card">
+    <h2>Plateforme</h2>
+    <div class="row"><label for="plat">Console</label><select id="plat"><option value="snes">SNES (prio = Z, défaut 95)</option><option value="nes">NES (prio = bande, défaut 40)</option></select></div>
+    <div class="row"><label for="view">Vue</label><select id="view"><option value="side">side (profil)</option><option value="top">top (zone)</option></select></div>
+    <div id="controls"></div>
+    <h2>Balise</h2>
+    <textarea id="out" readonly></textarea>
+    <button id="copy">Copier la balise</button>
+    <button id="reset" class="ghost">Réinitialiser</button>
+  </div>
+</div>
+
+<script>
+// Réglages : clé, libellé, bornes, défaut. Les défauts correspondent au moteur (voir doc 20 et 19).
+const FIELDS = [
+  { k: "level",      l: "Niveau (lignes, profil)",   min: 0,  max: 240, step: 1,    d: 176, side: true },
+  { k: "depth",      l: "Profondeur (lignes)",       min: 1,  max: 120, step: 1,    d: 64,  side: true },
+  { k: "xmin",       l: "X min (px)",                min: 0,  max: 256, step: 1,    d: 0 },
+  { k: "xmax",       l: "X max (px)",                min: 0,  max: 256, step: 1,    d: 256 },
+  { k: "ymin",       l: "Y min (lignes, zone)",      min: 0,  max: 240, step: 1,    d: 0,   top: true },
+  { k: "ymax",       l: "Y max (lignes, zone)",      min: 0,  max: 240, step: 1,    d: 240, top: true },
+  { k: "amplitude",  l: "Amplitude",                 min: 0,  max: 12,  step: 0.5,  d: 3 },
+  { k: "wavelength", l: "Longueur d'onde (px)",      min: 8,  max: 128, step: 1,    d: 48 },
+  { k: "speed",      l: "Vitesse (cycles/s)",        min: 0,  max: 3,   step: 0.05, d: 0.8 },
+  { k: "foam",       l: "Écume",                     min: 0,  max: 1,   step: 0.05, d: 0.6 },
+  { k: "alpha",      l: "Opacité",                   min: 0,  max: 1,   step: 0.05, d: 1 },
+  { k: "color",      l: "Couleur de surface",        col: true,          d: "#1E6FB0" },
+  { k: "deep",       l: "Couleur profonde",          col: true,          d: "#0B2F5C" },
+  { k: "glow",       l: "Halo (glow)",               min: 0,  max: 1,   step: 0.05, d: 0,   side: true },
+  { k: "glowradius", l: "Rayon du halo (lignes)",    min: 1,  max: 64,  step: 1,    d: 24,  side: true },
+  { k: "bubbles",    l: "Bulles",                    min: 0,  max: 64,  step: 1,    d: 0,   side: true },
+  { k: "bubblesize", l: "Taille des bulles",         min: 0.5, max: 4,  step: 0.1,  d: 1.5, side: true },
+  { k: "bubblerise", l: "Montée des bulles (cyc/s)", min: 0,  max: 2,   step: 0.05, d: 0.4, side: true },
+  { k: "prio",       l: "Prio (Z SNES / bande NES)", min: 0,  max: 255, step: 1,    d: 95 }
+];
+const PLAT = { snes: { w: 256, h: 224, pmax: 255, pdef: 95 }, nes: { w: 256, h: 240, pmax: 49, pdef: 40 } };
+const $ = (id) => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d");
+let W = 256, H = 224, bgData = null, img = null, bubbleMap = null, frameNo = 0;
+
+// --- Construction des réglages ---
+function buildControls() {
+  const box = $("controls");
+  box.innerHTML = "";
+  for (const f of FIELDS) {
+    const row = document.createElement("div");
+    row.className = "row"; row.id = "row-" + f.k;
+    const lab = document.createElement("label"); lab.htmlFor = f.k; lab.textContent = f.l;
+    const val = document.createElement("output"); val.id = "o-" + f.k;
+    const inp = document.createElement("input");
+    inp.id = f.k;
+    if (f.col) { inp.type = "color"; inp.value = f.d; inp.style.gridColumn = "2"; }
+    else { inp.type = "range"; inp.min = f.min; inp.max = f.max; inp.step = f.step; inp.value = f.d; }
+    inp.addEventListener("input", () => { if (!f.col) val.textContent = inp.value; });
+    row.append(lab, val, inp);
+    if (f.col) { row.append(); row.style.gridTemplateColumns = "1fr 64px"; }
+    box.append(row);
+    val.textContent = f.col ? "" : f.d;
+  }
+  $("plat").addEventListener("change", onPlatform);
+  $("view").addEventListener("change", refresh);
+  $("reset").addEventListener("click", () => { $("plat").value = "snes"; $("view").value = "side"; buildControls(); setup(); refresh(); });
+  $("copy").addEventListener("click", () => navigator.clipboard && navigator.clipboard.writeText($("out").value));
+  onPlatform();
+}
+
+function onPlatform() {
+  const p = PLAT[$("plat").value];
+  const prio = $("prio");
+  prio.max = p.pmax;
+  if (+prio.value > p.pmax || prio.dataset.plat !== $("plat").value) { prio.value = p.pdef; }
+  $("o-prio").textContent = prio.value;
+  prio.dataset.plat = $("plat").value;
+  setup();
+  refresh();
+}
+
+function vals() {
+  const v = { plat: $("plat").value, view: $("view").value };
+  for (const f of FIELDS) {
+    const el = $(f.k);
+    v[f.k] = f.col ? el.value : parseFloat(el.value);
+    if (!f.col) { const o = $("o-" + f.k); if (o) o.textContent = el.value; }
+  }
+  // Affiche seulement les réglages utiles à la vue choisie
+  for (const f of FIELDS) {
+    const row = $("row-" + f.k);
+    if (row) row.style.display = ((f.side && v.view !== "side") || (f.top && v.view !== "top")) ? "none" : "";
+  }
+  return v;
+}
+
+// --- Balise générée (seulement les valeurs différentes du défaut) ---
+function tagOf(v) {
+  const parts = [];
+  if (v.view === "top") parts.push("view=top");
+  for (const f of FIELDS) {
+    if (f.k === "prio") { parts.push("prio=" + v.prio); continue; }
+    if (f.side && v.view !== "side") continue;
+    if (f.top && v.view !== "top") continue;
+    const cur = v[f.k];
+    if (f.col) {
+      if (cur.toLowerCase() !== f.d.toLowerCase()) parts.push(f.k + "=" + cur.slice(1).toUpperCase());
+    } else if (cur !== f.d) {
+      parts.push(f.k + "=" + cur);
+    }
+  }
+  return "[cond]<2DLiquid>" + parts.join(",");
+}
+
+// --- Fond de scène (décor + sprites) ---
+function setup() {
+  const p = PLAT[$("plat").value];
+  W = p.w; H = p.h;
+  cv.width = W; cv.height = H;
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  const grd = g.createLinearGradient(0, 0, 0, H);
+  grd.addColorStop(0, "#2b2a4a"); grd.addColorStop(0.55, "#6b4f7a"); grd.addColorStop(1, "#c07a4a");
+  g.fillStyle = grd; g.fillRect(0, 0, W, H);
+  g.fillStyle = "#3d2b3d";
+  for (let x = 0; x < W; x += 32) g.fillRect(x, 40 + ((x * 7) % 30), 30, 6);
+  g.fillStyle = "#e6e0ff"; g.fillRect(40, 70, 16, 24); g.fillRect(190, 96, 16, 24);
+  bgData = g.getImageData(0, 0, W, H).data;
+  img = ctx.createImageData(W, H);
+  bubbleMap = new Float32Array(W * H);
+}
+
+// --- Rendu d'une image (mêmes formules que le moteur, sans texture) ---
+function hashU(v) { v = (v ^ (v >>> 16)) >>> 0; v = Math.imul(v, 0x7feb352d) >>> 0; v = (v ^ (v >>> 15)) >>> 0; v = Math.imul(v, 0x846ca68b) >>> 0; return (v ^ (v >>> 16)) >>> 0; }
+function hexRGB(h) { h = h.replace("#", ""); return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, f) => a + (b - a) * f;
+
+function render(v, t) {
+  const out = img.data, bg = bgData;
+  const [cr, cg, cb] = hexRGB(v.color), [dr_, dg_, db_] = hexRGB(v.deep);
+  const twoPi = 2 * Math.PI;
+  const x0 = clamp(Math.floor(v.xmin), 0, W), x1 = clamp(Math.floor(v.xmax), 0, W);
+  const surf = new Float32Array(W);
+  let top = 1e9;
+  const isTop = v.view === "top";
+  if (!isTop) {
+    for (let x = x0; x < x1; x++) {
+      const s = v.level + v.amplitude * Math.sin(twoPi * (x / v.wavelength + v.speed * t));
+      surf[x] = s; top = Math.min(top, s);
+    }
+  }
+  // Carte de bulles (profil seulement)
+  bubbleMap.fill(0);
+  if (!isTop && v.bubbles > 0 && x1 > x0) {
+    const bottom = v.level + v.depth * 0.7;
+    for (let b = 0; b < v.bubbles; b++) {
+      const h1 = hashU(b * 2654435761 + 1), h2 = hashU(h1 + 0x9E3779B9), h3 = hashU(h2 + 0x85EBCA6B);
+      const r1 = (h1 & 0xFFFF) / 65535, r2 = (h2 & 0xFFFF) / 65535, r3 = (h3 & 0xFFFF) / 65535;
+      const period = 1 / Math.max(0.05, v.bubblerise * (0.6 + 0.8 * r2));
+      const u = t / period + r3, ph = u - Math.floor(u);
+      const xh = clamp(x0 + Math.floor(r1 * (x1 - x0 - 1)), 0, W - 1);
+      const sY = surf[xh], cx = xh;
+      let cy, rad, a, ring;
+      if (ph < 0.9) { cy = bottom + (sY - bottom) * (ph / 0.9); rad = v.bubblesize * 0.8; a = 1; ring = false; }
+      else { const e = (ph - 0.9) / 0.1; cy = sY; rad = v.bubblesize * (1 + 1.5 * e); a = 1 - e; ring = true; }
+      for (let y = Math.max(0, Math.floor(cy - rad - 1)); y <= Math.min(H - 1, Math.ceil(cy + rad + 1)); y++)
+        for (let x = Math.max(0, Math.floor(cx - rad - 1)); x <= Math.min(W - 1, Math.ceil(cx + rad + 1)); x++) {
+          const d = Math.hypot(x - cx, y - cy);
+          let q = 0;
+          if (!ring) { if (d <= rad) q = 0.55 * a; }
+          else { const e2 = Math.abs(d - rad); if (e2 <= 1) q = 0.9 * a * (1 - e2); }
+          if (q > bubbleMap[y * W + x]) bubbleMap[y * W + x] = q;
+        }
+    }
+  }
+  const zoneH = Math.max(1, v.ymax - v.ymin);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const br = bg[i], bgg = bg[i + 1], bbl = bg[i + 2];
+      let R = br, G = bgg, B = bbl;
+      if (x >= x0 && x < x1) {
+        if (isTop) {
+          if (y >= v.ymin && y < v.ymax) {
+            const depth = clamp((y - v.ymin) / zoneH, 0, 1);
+            let rr = lerp(cr, dr_, depth), gg = lerp(cg, dg_, depth), bb = lerp(cb, db_, depth);
+            const w1 = Math.sin(twoPi * (x / v.wavelength + v.speed * t));
+            const w2 = Math.sin(twoPi * (y / (v.wavelength * 0.6) - 0.7 * v.speed * t));
+            const rip = 0.5 * (w1 + w2) * Math.min(1, v.amplitude / 6);
+            if (rip >= 0) { rr = lerp(rr, 255, rip * v.foam); gg = lerp(gg, 255, rip * v.foam); bb = lerp(bb, 255, rip * v.foam); }
+            else { const dk = 1 + rip * 0.3; rr *= dk; gg *= dk; bb *= dk; }
+            R = lerp(br, rr, v.alpha); G = lerp(bgg, gg, v.alpha); B = lerp(bbl, bb, v.alpha);
+          }
+        } else {
+          const s = surf[x];
+          if (y < s) {
+            if (v.glow > 0) {
+              const d = (s - y) / Math.max(1, v.glowradius);
+              if (d < 1) {
+                const g = v.glow * (1 - d) * (1 - d);
+                R = br + (cr * 0.5 + 127.5) * g; G = bgg + (cg * 0.5 + 127.5) * g; B = bbl + (cb * 0.5 + 127.5) * g;
+              }
+            }
+          } else {
+            const depth = clamp((y - s) / v.depth, 0, 1);
+            let rr = lerp(cr, dr_, depth), gg = lerp(cg, dg_, depth), bb = lerp(cb, db_, depth);
+            if (y - s < 1) { rr = lerp(rr, 255, v.foam); gg = lerp(gg, 255, v.foam); bb = lerp(bb, 255, v.foam); }
+            R = lerp(br, rr, v.alpha); G = lerp(bgg, gg, v.alpha); B = lerp(bbl, bb, v.alpha);
+          }
+          const q = bubbleMap[y * W + x];
+          if (q > 0) { R = lerp(R, 255, q); G = lerp(G, 255, q); B = lerp(B, 255, q); }
+        }
+      }
+      out[i] = clamp(Math.round(R), 0, 255); out[i + 1] = clamp(Math.round(G), 0, 255); out[i + 2] = clamp(Math.round(B), 0, 255); out[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function refresh() {
+  const v = vals();
+  $("out").value = tagOf(v);
+  $("info").textContent = v.plat.toUpperCase() + " " + W + "×" + H + " — " + (v.view === "top" ? "zone ondulée" : "profil") +
+    (v.plat === "nes" ? " — prio NES : bande " + Math.floor(v.prio / 10) : " — prio SNES : z " + v.prio);
+}
+
+// Animation : 60 images par seconde logiques, comme le moteur (temps = images / 60)
+function loop() {
+  const v = vals();
+  render(v, frameNo / 60);
+  frameNo++;
+  requestAnimationFrame(loop);
+}
+
+buildControls();
+setup();
+refresh();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

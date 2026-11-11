@@ -318,6 +318,9 @@ bool HdPackLoader::LoadPack()
 			} else if(lineContent.substr(0, 13) == "<tile_hvflip>") {
 				tokens = StringUtilities::Split(lineContent.substr(13), ',');
 				ProcessTileTag(tokens, conditions, true, true);
+			} else if(lineContent.substr(0, 15) == "<LoadingScreen>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				_data->LoadingScreen = HdLoadingScreen::ParseTag(tokens, [this](const string& name, vector<uint8_t>& data) { return LoadFile(name, data); });
 			} else if(lineContent.substr(0, 12) == "<background>") {
 				tokens = StringUtilities::Split(lineContent.substr(12), ',');
 				ProcessBackgroundTag(tokens, conditions);
@@ -351,6 +354,9 @@ bool HdPackLoader::LoadPack()
 			} else if(lineContent.substr(0, 11) == "<2DOverlay>") {
 				tokens = StringUtilities::Split(lineContent.substr(11), ',');
 				ProcessOverlayTag(tokens, conditions);
+			} else if(lineContent.substr(0, 10) == "<2DLiquid>") {
+				tokens = StringUtilities::Split(lineContent.substr(10), ',');
+				ProcessLiquidTag(tokens, conditions);
 			} else if(lineContent.substr(0, 5) == "<ver>") {
 				_data->Version = stoi(lineContent.substr(5));
 				if(_data->Version > BaseHdNesPack::CurrentVersion) {
@@ -687,6 +693,31 @@ void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition
 {
 	HdPackTileInfo *tileInfo = new HdPackTileInfo();
 	size_t index = 0;
+	// <tile>blank,tuile,palette (ou disable) : tuile masquee, ni SD ni HD (comme "disable" en SNES)
+	if(_data->Version >= 100 && tokens.size() >= 3) {
+		string imageParam = StringUtilities::ToLower(StringUtilities::Trim(tokens[0]));
+		if(imageParam == "blank" || imageParam == "disable") {
+			ReadTileData(*tileInfo, tokens[1], tokens[2]);
+			tileInfo->MarkDisabled();
+			tileInfo->X = 0;
+			tileInfo->Y = 0;
+			tileInfo->Width = 8 * _data->Scale;
+			tileInfo->Height = 8 * _data->Scale;
+			tileInfo->Conditions = conditions;
+			tileInfo->IsHFlip = hFlip;
+			tileInfo->IsVFlip = vFlip;
+			if(!_ign2dBlockStack.empty()) {
+				tileInfo->Ignore2DSets.push_back(_ign2dBlockStack.back());
+			}
+			// Desactive le cache : la tuile depend des conditions, et une tuile vide ne doit pas etre mise en cache a tort
+			tileInfo->ForceDisableCache = true;
+			tileInfo->Brightness = 255;
+			tileInfo->DefaultTile = false;
+			tileInfo->ChrBankId = tileInfo->TileIndex / 256;
+			_data->Tiles.push_back(unique_ptr<HdPackTileInfo>(tileInfo));
+			return;
+		}
+	}
 	if(_data->Version < 100) {
 		tileInfo->TileIndex = std::stoi(tokens[index++]);
 		tileInfo->BitmapIndex = std::stoi(tokens[index++]);
@@ -1740,4 +1771,95 @@ void HdPackLoader::InitializeHdPack()
 			_data->TileByKey[tileInfo->GetKey(true)].push_back(tileInfo.get());
 		}
 	}
+}
+
+// <2DLiquid> : liquide 2D, vue de profil (phase 1). Syntaxe : [cond]<2DLiquid>cle=valeur,...
+// Cles : view (side seulement pour l'instant), prio (0-49, defaut 40), level, depth, xmin, xmax (px NES),
+// amplitude, wavelength, speed, phase, scrollx, texture, texscale, color, deep, foam, alpha.
+void HdPackLoader::ProcessLiquidTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	std::unordered_map<string, string> cfg;
+	for(const string& raw : tokens) {
+		string tok = StringUtilities::Trim(raw);
+		size_t eq = tok.find('=');
+		if(eq == string::npos) {
+			if(!tok.empty()) {
+				logError("2DLiquid : parametre sans valeur : " + tok);
+			}
+			continue;
+		}
+		cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+	}
+
+	auto str = [&](const char* k) -> string {
+		auto it = cfg.find(k);
+		return it == cfg.end() ? string() : it->second;
+	};
+	auto num = [&](const char* k, float def) -> float {
+		string v = str(k);
+		if(v.empty()) return def;
+		try { return std::stof(v); } catch(...) { logError("2DLiquid : valeur invalide pour " + string(k) + " : " + v); return def; }
+	};
+	auto colorOf = [&](const char* k, uint32_t def) -> uint32_t {
+		string v = StringUtilities::Trim(str(k));
+		if(v.empty()) return def;
+		if(v[0] == '#') v = v.substr(1);
+		try { return (uint32_t)std::stoul(v, nullptr, 16) & 0xFFFFFF; } catch(...) { logError("2DLiquid : couleur invalide pour " + string(k) + " : " + v); return def; }
+	};
+
+	string view = StringUtilities::ToLower(str("view"));
+	if(view.empty()) view = "side";
+	if(view != "side" && view != "top") {
+		logError("2DLiquid : view=" + view + " inconnu (side ou top)");
+		return;
+	}
+
+	auto liquid = std::make_unique<NesHdLiquidInfo>();
+	liquid->Conditions = conditions;
+	liquid->Level = std::clamp(num("level", 176.0f), 0.0f, 240.0f);
+	liquid->Depth = std::max(1.0f, num("depth", 64.0f));
+	liquid->XMin = std::clamp(num("xmin", 0.0f) / 256.0f, 0.0f, 1.0f);
+	liquid->XMax = std::clamp(num("xmax", 256.0f) / 256.0f, 0.0f, 1.0f);
+	liquid->Amp = std::max(0.0f, num("amplitude", 3.0f));
+	liquid->Wave = std::max(1.0f, num("wavelength", 48.0f));
+	liquid->Speed = num("speed", 0.8f);
+	liquid->Phase = num("phase", 0.0f);
+	liquid->ScrollX = num("scrollx", 0.0f);
+	liquid->TexScale = std::max(0.01f, num("texscale", 1.0f));
+	liquid->Foam = std::clamp(num("foam", 0.6f), 0.0f, 1.0f);
+	liquid->Alpha = std::clamp(num("alpha", 1.0f), 0.0f, 1.0f);
+	liquid->Priority = std::clamp((int)num("prio", 40.0f), 0, 49);
+	liquid->IsTop = (view == "top");
+	liquid->YMin = std::clamp(num("ymin", 0.0f), 0.0f, 240.0f);
+	liquid->YMax = std::max(liquid->YMin + 1.0f, std::clamp(num("ymax", 240.0f), 0.0f, 240.0f));
+	liquid->Glow = std::clamp(num("glow", 0.0f), 0.0f, 1.0f);
+	liquid->GlowRadius = std::max(1.0f, num("glowradius", 24.0f));
+	liquid->BubbleCount = std::clamp((int)num("bubbles", 0.0f), 0, 64);
+	liquid->BubbleSize = std::max(0.5f, num("bubblesize", 1.5f));
+	liquid->BubbleRise = std::max(0.0f, num("bubblerise", 0.4f));
+	liquid->Color = colorOf("color", 0x1E6FB0);
+	liquid->Deep = colorOf("deep", 0x0B2F5C);
+
+	string tex = StringUtilities::Trim(str("texture"));
+	if(!tex.empty()) {
+		HdPackBitmapInfo* found = nullptr;
+		for(auto& bitmap : _data->ImageFileData) {
+			if(bitmap->PngName == tex) {
+				found = bitmap.get();
+				break;
+			}
+		}
+		if(found == nullptr) {
+			_data->ImageFileData.push_back(unique_ptr<HdPackBitmapInfo>(new HdPackBitmapInfo()));
+			HdPackBitmapInfo* bitmapInfo = _data->ImageFileData.back().get();
+			bitmapInfo->PngName = tex;
+			if(!LoadFile(tex, bitmapInfo->FileData)) {
+				logError("2DLiquid texture not found: " + tex);
+			}
+			found = bitmapInfo;
+		}
+		liquid->Texture = found;
+	}
+
+	_data->Liquids.push_back(std::move(liquid));
 }

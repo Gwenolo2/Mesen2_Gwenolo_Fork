@@ -53,6 +53,7 @@ private:
 	uint32_t _scriptHudScale = 2;
 	uint32_t _lastScriptHudFrameNumber = 0;
 	bool _needRedraw = true;
+	bool _loadingScreenShown = false; // ecran de chargement des packs HD affiche
 
 	RenderedFrame _lastFrame;
 	SimpleLock _frameLock;

@@ -64,13 +64,20 @@ SnesHdVideoFilter::SnesHdVideoFilter(Emulator* emu) : SnesDefaultVideoFilter(emu
 // ============================================================================
 // FORMAT LARGE 16:9 (v1 : Mode 7 seulement, largeur constante)
 // ============================================================================
+// Lecture atomique du pack actif : LoadHdPack l'ecrit depuis le thread emulation, le filtre le lit depuis le thread video.
+static std::shared_ptr<SnesHdPackData> SnesHdSnapshotActivePack()
+{
+	return std::atomic_load(&SnesHdPackLoader::ActivePack);
+}
+
 // Mode effectif : 0 = off, 1 = bandes 16:9 actives.
 static uint8_t GetEffectiveWidescreenMode(Emulator* emu)
 {
+	auto pack = SnesHdSnapshotActivePack();
 	WidescreenSetting setting = emu->GetSettings()->GetSnesConfig().Widescreen;
 	if(setting == WidescreenSetting::Off) return 0;
 	if(setting == WidescreenSetting::Mode7) return 1;
-	if(SnesHdPackLoader::ActivePack) return SnesHdPackLoader::ActivePack->WidescreenMode ? 1 : 0;
+	if(pack) return pack->WidescreenMode ? 1 : 0;
 	return 0;
 }
 
@@ -93,14 +100,16 @@ static uint32_t GetWidescreenExtForFrame(Emulator* emu, const FrameInfo& base, c
 
 uint32_t SnesHdVideoFilter::GetWidescreenExtraWidth()
 {
-	if(!SnesHdPackLoader::ActivePack) return 0;
-	return GetWidescreenExtForFrame(_emu, _baseFrameInfo, GetOverscan(), SnesHdPackLoader::ActivePack->OverscanStretch);
+	auto pack = SnesHdSnapshotActivePack();
+	if(!pack) return 0;
+	return GetWidescreenExtForFrame(_emu, _baseFrameInfo, GetOverscan(), pack->OverscanStretch);
 }
 
 //----------------------------------------------------------------------------------------
 
 FrameInfo SnesHdVideoFilter::GetFrameInfo()
 {
+	auto pack = SnesHdSnapshotActivePack();
 	static bool frameLog = false;
 	/*if(!frameLog) {
 		MessageManager::Log("[HD TRACE 2.5] GetFrameInfo a pris le relais pour l'affichage !");
@@ -111,11 +120,11 @@ FrameInfo SnesHdVideoFilter::GetFrameInfo()
 	_sdFrameInfo = SnesDefaultVideoFilter::GetFrameInfo();
 	FrameInfo info = _sdFrameInfo;
 
-	if(SnesHdPackLoader::ActivePack) {
-		uint32_t scale = SnesHdPackLoader::ActivePack->Scale;
-		bool stretch = SnesHdPackLoader::ActivePack->OverscanStretch;
+	if(pack) {
+		uint32_t scale = pack->Scale;
+		bool stretch = pack->OverscanStretch;
 
-		if(SnesHdPackLoader::ActivePack->HasOverscanConfig && !stretch) {
+		if(pack->HasOverscanConfig && !stretch) {
 			// Mode No-Stretch : we keep native geometry 
 			_sdFrameInfo = _baseFrameInfo;
 			info.Width = _baseFrameInfo.Width * scale;
@@ -235,6 +244,7 @@ void BuildMode7TileMips(SnesHdMode7Image* img)
 
 void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 {
+	_framePack = SnesHdSnapshotActivePack();
 	static bool filterLog = false;
 	SnesHdFrameTimer frameTm(_filterMs, _idleMs, _lastEnd, _hasLastEnd);
 	const auto tPrep0 = std::chrono::steady_clock::now();
@@ -256,17 +266,17 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	};
 	std::vector<ExpandedTile> tilesToExpand;
 
-	if(!SnesHdPackLoader::ActivePack) {
+	if(!_framePack) {
 		SnesDefaultVideoFilter::ApplyFilter(ppuOutputBuffer);
 		return;
 	}
 
-	uint32_t scale = SnesHdPackLoader::ActivePack->Scale;
+	uint32_t scale = _framePack->Scale;
 	uint32_t* out = GetOutputBuffer();
 
 
 	OverscanDimensions overscan = GetOverscan();
-	bool stretch = SnesHdPackLoader::ActivePack->OverscanStretch;
+	bool stretch = _framePack->OverscanStretch;
 
 	// Dimensions de la zone active utile (tronquée par l'overscan)
 	uint32_t cropWidth = _baseFrameInfo.Width - overscan.Left - overscan.Right;
@@ -274,7 +284,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 	// Dimensions du tampon de sortie selon le mode Stretch
 	uint32_t wsExt = GetWidescreenExtForFrame(_emu, _baseFrameInfo, overscan, stretch);
-	SnesHdPackLoader::ActivePack->WsExtPx = wsExt; // lu par le PPU pour les sprites de la bande
+	_framePack->WsExtPx = wsExt; // lu par le PPU pour les sprites de la bande
 	uint32_t outWidth = ((stretch ? cropWidth : _baseFrameInfo.Width) + 2 * wsExt) * scale;
 	uint32_t hdHeight = stretch ? (cropHeight * scale) : (_baseFrameInfo.Height * scale);
 
@@ -294,7 +304,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	SnesHdPixelData* hdBehindBuffer = console->GetPpu()->GetHdBehindScreenBuffer();
 	// Index des queues (sprites + additions) fige par SnesPpu::SendFrame, lu UNE fois ici
 	// en meme temps que les buffers HD pour que tout corresponde a la meme frame.
-	int hdReadIndex = SnesHdPackLoader::ActivePack->ActiveSpriteQueueReadIndex;
+	int hdReadIndex = _framePack->ActiveSpriteQueueReadIndex;
 
 	// ------------------------------------------------------------------
 	// COLOR WINDOW : zones dont l'effet SD est supprime (<disableAllColorMathWindow>,
@@ -302,8 +312,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// principal AVANT color math (memorisee par le PPU) a la place du pixel SD final.
 	// ------------------------------------------------------------------
 	const uint16_t* cwPreMath = console->GetPpu()->GetColorWindowPreMathBuffer();
-	const auto& cwRegions = SnesHdPackLoader::ActivePack->ColorWindowRegions;
-	const auto& cwLabels = SnesHdPackLoader::ActivePack->ColorWindowLabels;
+	const auto& cwRegions = _framePack->ColorWindowRegions;
+	const auto& cwLabels = _framePack->ColorWindowLabels;
 	std::vector<char> cwOff(cwRegions.size(), 0);
 	bool anyCwOff = false;
 	if(!cwRegions.empty() && cwLabels.size() == 256 * 240 && _baseFrameInfo.Width == 256 && cwPreMath) {
@@ -312,13 +322,13 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			return true;
 		};
 		bool all = false;
-		for(const auto& conds : SnesHdPackLoader::ActivePack->DisableAllColorMathWindowRules) {
+		for(const auto& conds : _framePack->DisableAllColorMathWindowRules) {
 			if(condsOk(conds)) { all = true; break; }
 		}
 		for(size_t i = 0; i < cwRegions.size(); i++) {
 			if(all) { cwOff[i] = 1; }
 			else {
-				for(const auto& rule : SnesHdPackLoader::ActivePack->DisableColorMathWindowRules) {
+				for(const auto& rule : _framePack->DisableColorMathWindowRules) {
 					if(rule.Hash == cwRegions[i].Hash && condsOk(rule.Conditions)) { cwOff[i] = 1; break; }
 				}
 			}
@@ -386,7 +396,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					if(it != imgByHash.end()) {
 						img = it->second;
 					} else {
-						img = SnesHdPackLoader::ActivePack->GetMode7Image(p.M7TileHash);
+						img = _framePack->GetMode7Image(p.M7TileHash);
 						BuildMode7TileMips(img);
 						imgByHash[p.M7TileHash] = img;
 					}
@@ -451,7 +461,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			}
 			if(!L.HasNext) { L.Next = L.Ref; L.NextRefX = L.RefX; }
 
-			SnesHdMode7Image* img = SnesHdPackLoader::ActivePack->GetMode7Image(L.Ref.M7MapHash);
+			SnesHdMode7Image* img = _framePack->GetMode7Image(L.Ref.M7MapHash);
 			if(!img || !img->Bitmap || img->Bitmap->PixelData.empty()) continue;
 			BuildMode7MipChain(img->Bitmap, 1024 * img->Scale);
 			L.Img = img;
@@ -620,15 +630,15 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// CAMERA MODE 7 RECONSTRUITE (socle 3D) + <3DParticles>
 	// Voir SnesHdMode7Camera.h et docs/claude/10_Mode7_Camera_3D.md
 	// ====================================================================
-	auto& hdParts3D = SnesHdPackLoader::ActivePack->Particles3D;
-	bool m7DebugOn = SnesHdPackLoader::ActivePack->M7CameraDebug;
-	for(auto* c : SnesHdPackLoader::ActivePack->M7CameraDebugConditions) {
+	auto& hdParts3D = _framePack->Particles3D;
+	bool m7DebugOn = _framePack->M7CameraDebug;
+	for(auto* c : _framePack->M7CameraDebugConditions) {
 		if(!c->CheckCondition(0, 0, nullptr)) { m7DebugOn = false; break; }
 	}
 	std::vector<SnesHdM7Zone> m7Zones; // toutes les zones Mode 7 de l'ecran
 	std::vector<int> m7Views;          // zones en perspective avec camera valide (vue 0 = haut, 1 = bas)
 	// la camera sert a TOUS les effets 3D (relief, panneaux, modeles, lumieres, effets, liquide, lumieres de sprites)
-	const SnesHdPackData& pk3 = *SnesHdPackLoader::ActivePack;
+	const SnesHdPackData& pk3 = *_framePack;
 	const bool m7CamNeeded = m7DebugOn || !hdParts3D.empty() || !pk3.M7Reliefs.empty() || !pk3.M7Billboards.empty() || !pk3.M7Models.empty() ||
 		!pk3.M7Lights.empty() || !pk3.M7Ambients.empty() || !pk3.M7Liquids.empty() || !pk3.M7Effects.empty() || !pk3.SpriteLights.empty();
 	if(m7CamNeeded) {
@@ -667,11 +677,11 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// ====================================================================
 	struct MVert { float X, Y, W, GR, U, V, L; }; // ecran HD, 1/profondeur, ligne du sol, texture, lumiere
 	struct MTriDraw { MVert P[3]; const SnesHdModelMaterial* M; float A; };
-	auto& hdModels = SnesHdPackLoader::ActivePack->M7Models;
+	auto& hdModels = _framePack->M7Models;
 	std::vector<std::vector<MTriDraw>> mdDraws(m7Views.size());
 	bool mdOn = false;
 	// <m7model> sur la carte graphique (SnesHdGpu) si disponible et non desactive par <gpu3d>off
-	const bool mdUseGpu = !hdModels.empty() && !m7Views.empty() && SnesHdPackLoader::ActivePack->Gpu3D && SnesHdGpu::Get().Available();
+	const bool mdUseGpu = !hdModels.empty() && !m7Views.empty() && _framePack->Gpu3D && SnesHdGpu::Get().Available();
 	std::vector<SnesHdGpuView> gpuViews;
 	static std::vector<uint32_t> s_gpuColor;
 	static std::vector<float> s_gpuGround;
@@ -680,7 +690,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	if(mdUseGpu) gpuViews.resize(m7Views.size());
 	std::vector<std::vector<float>> mdPalettes(hdModels.size()); // os animes de chaque modele (cette frame)
 	if(!hdModels.empty() && !m7Views.empty()) {
-		const float mdTime = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+		const float mdTime = (float)_framePack->ScreenInfo.FrameNumber / 60.0f;
 		const float kDeg = 0.01745329f;
 		// lumiere fixe dans le monde : du nord-ouest, en hauteur (u, v, h)
 		const float lx = -0.45f, lv = -0.35f, lh = 0.82f;
@@ -861,7 +871,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	static std::vector<uint32_t> s_matRM, s_matEm;
 	static std::vector<uint8_t> s_matZ, s_matRow;
 	{
-		auto& hdMats = SnesHdPackLoader::ActivePack->M7Materials;
+		auto& hdMats = _framePack->M7Materials;
 		if(!hdMats.empty()) {
 			std::unordered_map<uint32_t, const SnesHdM7MaterialInfo*> byTile;
 			std::vector<SnesHdM7MaterialInfo*> imgMats;
@@ -899,11 +909,11 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// ====================================================================
 	std::vector<const SnesHdM7LiquidInfo*> lineLiquid(cropHeight, nullptr);
 	std::vector<const SnesHdM7Zone*> lineZone(cropHeight, nullptr);
-	const float liqTime = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+	const float liqTime = (float)_framePack->ScreenInfo.FrameNumber / 60.0f;
 	bool liqOn = false;                       // un liquide est actif sur au moins une ligne
 	static std::vector<uint16_t> s_liqCov;    // pixels HD de liquide visible : (Z du Mode 7 << 8) | couverture
 	{
-		auto& hdLiquids = SnesHdPackLoader::ActivePack->M7Liquids;
+		auto& hdLiquids = _framePack->M7Liquids;
 		if(!hdLiquids.empty()) {
 			std::vector<char> liqOk(hdLiquids.size(), 0);
 			for(size_t i = 0; i < hdLiquids.size(); i++) {
@@ -1028,8 +1038,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 	// <Ignore2DOverlays> : tiles (HUD) et ressources (m7img, m7tiles, background) restant nettes pendant la distorsion <2DOverlay>
 	std::vector<const SnesHdNoLightRule*> ign2dRules;
-	for(auto& ur : SnesHdPackLoader::ActivePack->Ignore2DOverlaysRules) if(ur->MatchesCondition()) ign2dRules.push_back(ur.get());
-	const bool ign2dOn = !ign2dRules.empty() || SnesHdPackLoader::ActivePack->HasIgnore2DResources;
+	for(auto& ur : _framePack->Ignore2DOverlaysRules) if(ur->MatchesCondition()) ign2dRules.push_back(ur.get());
+	const bool ign2dOn = !ign2dRules.empty() || _framePack->HasIgnore2DResources;
 	auto ign2dTile = [&](const SnesHdPackTileInfo* t) -> bool {
 		if(ign2dRules.empty() || !t) return false;
 		for(const SnesHdNoLightRule* r : ign2dRules) {
@@ -1075,14 +1085,14 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 		for(uint32_t x = 0; x < cropWidth; x++) {
 			uint32_t currentOffset = snesY * _baseFrameInfo.Width + x + srcX;
-			uint32_t sdColor = SnesHdPackLoader::ActivePack->IsColorMathDisabled
+			uint32_t sdColor = _framePack->IsColorMathDisabled
 				? baseSdColor
 				: _calculatedPalette[cwPixel(snesY, x + srcX, ppuOutputBuffer[currentOffset])];
 			sdColorRow[x + wsM7].color = sdColor;
 			// Color math PAR PIXEL (couleur SD finale - couleur Mode 7 brute de ce pixel),
 			// seulement si le Mode 7 est au premier plan (pas sous un sprite).
 			const SnesHdPixelData& m7Px = hdBuffer[currentOffset];
-			if(applyColorMath && (m7Px.IsMode7 || m7Px.IsMode7Tile) && !SnesHdPackLoader::ActivePack->IsColorMathDisabled) {
+			if(applyColorMath && (m7Px.IsMode7 || m7Px.IsMode7Tile) && !_framePack->IsColorMathDisabled) {
 				uint32_t pxBase = _calculatedPalette[m7Px.BaseColor];
 				sdColorRow[x + wsM7].diffR = ((sdColor >> 16) & 0xFF) - (int)((pxBase >> 16) & 0xFF);
 				sdColorRow[x + wsM7].diffG = ((sdColor >> 8) & 0xFF) - (int)((pxBase >> 8) & 0xFF);
@@ -1590,7 +1600,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	}
 
 			auto renderMode7Tile = [&](const SnesHdPixelData& m7Data, uint8_t targetZ, bool useColorMath, uint32_t outX, uint32_t outY, uint32_t sdColor) {
-				SnesHdMode7Image* m7Img = SnesHdPackLoader::ActivePack->GetMode7Image(m7Data.M7TileHash);
+				SnesHdMode7Image* m7Img = _framePack->GetMode7Image(m7Data.M7TileHash);
 				const bool m7TileIgn = ign2dOn && m7Img && m7Img->IsIgnored2D(); // <Ignore2DOverlays> : tile m7tiles entiere
 
 				if(m7Img && m7Img->Bitmap && !m7Img->Bitmap->PixelData.empty()) {
@@ -1794,7 +1804,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 			if(hdData.IsMode7) continue;
 
-			uint32_t sdColor = SnesHdPackLoader::ActivePack->IsColorMathDisabled
+			uint32_t sdColor = _framePack->IsColorMathDisabled
 				? _calculatedPalette[hdData.BaseColor]
 				: _calculatedPalette[snesPixel];
 
@@ -1802,7 +1812,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			if(hdData.IsHighPriority) pixelZ += 2;
 
 			if(!hdData.IsSprite && hdData.SourceLayer >= 0 && hdData.SourceLayer < 4) {
-				for(auto& rule : SnesHdPackLoader::ActivePack->LayerOrders) {
+				for(auto& rule : _framePack->LayerOrders) {
 					if(!rule.MatchesCondition(snesX, snesY, &hdData)) continue;
 					pixelZ = rule.ZIndexBg[hdData.SourceLayer];
 					if(hdData.IsHighPriority) pixelZ += 2;
@@ -1896,11 +1906,11 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// ====================================================================
 	// ÉTAPE 2 : INJECTION DES ADDITIONS HD
 	// ====================================================================
-	if(SnesHdPackLoader::ActivePack) {
+	if(_framePack) {
 		bool overscanFrame = console->GetPpu()->GetState().OverscanMode;
 
 		// Queues figees par SnesPpu::SendFrame (hdReadIndex lu au debut du filtre)
-		for(const auto& add : SnesHdPackLoader::ActivePack->ActiveAdditionsQueues[hdReadIndex]) {
+		for(const auto& add : _framePack->ActiveAdditionsQueues[hdReadIndex]) {
 			SnesHdPackTileInfo* hdTile = SnesHdPackLoader::GetHdTile(
 				add.MemoryHash,
 				add.PaletteHash,
@@ -1936,7 +1946,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		// ====================================================================
 		const uint8_t* pSpritePri = console->GetPpu()->GetCurrentSpritePriorities();
 
-		for(const auto& spr : SnesHdPackLoader::ActivePack->ActiveSpritesQueues[hdReadIndex]) {
+		for(const auto& spr : _framePack->ActiveSpritesQueues[hdReadIndex]) {
 			if(spr.HdTile == nullptr || spr.HdTile->HdTileData.empty()) continue;
 
 			// Coordonnées exactes de la tuile 8x8 dans le repère de tilesToExpand
@@ -1990,7 +2000,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// ====================================================================
 	// <2DOverlay> : SIMULATION DES PARTICULES (sequentielle, une fois par frame, avant la composition)
 	// ====================================================================
-	auto& hdOverlays = SnesHdPackLoader::ActivePack->Overlays;
+	auto& hdOverlays = _framePack->Overlays;
 	std::vector<char> ovActive(hdOverlays.size(), 0);
 	{
 		const float ovDt = 1.0f / 60.0f;
@@ -2061,8 +2071,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			if(ov.Layer >= 1 && ov.Layer <= 4) {
 				int li = ov.Layer - 1;
 				uint32_t line = std::min<uint32_t>(srcY + cropHeight / 2, 239);
-				int scx = SnesHdPackLoader::ActivePack->ScreenInfo.ScanlineHScroll[line][li];
-				int scy = SnesHdPackLoader::ActivePack->ScreenInfo.ScanlineVScroll[line][li];
+				int scx = _framePack->ScreenInfo.ScanlineHScroll[line][li];
+				int scy = _framePack->ScreenInfo.ScanlineVScroll[line][li];
 				if(ov.HaveScroll) {
 					int dx = (((scx - ov.LastScrollX) % 1024) + 1536) % 1024 - 512; // registres de scroll sur 10 bits
 					int dy = (((scy - ov.LastScrollY) % 1024) + 1536) % 1024 - 512;
@@ -2080,6 +2090,193 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			ovStep(ov);
 		}
 	}
+
+	// <2DLiquid> : etat par image (activite, temps, zone, surface par colonne, bulles). Dessin par bande (tache type 9).
+	auto liqHash = [](uint32_t v) -> uint32_t { v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; v ^= v >> 16; return v; };
+	for(auto& liqPtr : _framePack->Liquids) {
+		SnesHdLiquidInfo& liq = *liqPtr;
+		liq.Active = liq.MatchesCondition();
+		liq.Bubbles.clear();
+		if(!liq.Active) continue;
+		liq.Time += 1.0f / 60.0f;
+		const float S = (float)scale; // pixels HD par pixel SNES
+		const float twoPi = 6.2831853f;
+		const float degToRad = 3.14159265f / 180.0f;
+		liq.Col0 = (uint32_t)std::clamp(liq.XMin * (float)outWidth, 0.0f, (float)outWidth);
+		liq.Col1 = (uint32_t)std::clamp(liq.XMax * (float)outWidth, 0.0f, (float)outWidth);
+		if(liq.Col0 >= liq.Col1 || hdHeight == 0) { liq.Active = false; continue; }
+		if(liq.IsTop) {
+			liq.RowMin = (uint32_t)std::clamp(liq.YMin * S, 0.0f, (float)hdHeight);
+			liq.RowMax = (uint32_t)std::clamp(liq.YMax * S, 0.0f, (float)hdHeight);
+			liq.Surface.clear();
+			continue;
+		}
+		liq.Surface.assign(outWidth, 0.0f);
+		float top = 1e9f;
+		for(uint32_t x = liq.Col0; x < liq.Col1; x++) {
+			const float xN = (float)x / S;
+			const float sv = liq.Level + liq.Amp * std::sin(twoPi * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * degToRad);
+			liq.Surface[x] = sv;
+			top = std::min(top, sv);
+		}
+		const float glowMargin = liq.Glow > 0.0f ? liq.GlowRadius : 0.0f;
+		liq.RowMin = (uint32_t)std::clamp(std::floor((top - glowMargin) * S), 0.0f, (float)hdHeight);
+		liq.RowMax = hdHeight;
+
+		// Bulles : position deterministe (hash de l'index + temps), donc stable en savestate et rewind
+		const float bottom = liq.Level + liq.Depth * 0.7f;
+		for(int b = 0; b < liq.BubbleCount; b++) {
+			const uint32_t h1 = liqHash((uint32_t)b * 2654435761u + 1u);
+			const uint32_t h2 = liqHash(h1 + 0x9E3779B9u);
+			const uint32_t h3 = liqHash(h2 + 0x85EBCA6Bu);
+			const float r1 = (float)(h1 & 0xFFFF) / 65535.0f;
+			const float r2 = (float)(h2 & 0xFFFF) / 65535.0f;
+			const float r3 = (float)(h3 & 0xFFFF) / 65535.0f;
+			const float period = 1.0f / std::max(0.05f, liq.BubbleRise * (0.6f + 0.8f * r2));
+			const float u = liq.Time / period + r3;
+			const float ph = u - std::floor(u);
+			const uint32_t xh = liq.Col0 + (uint32_t)(r1 * (float)(liq.Col1 - liq.Col0 - 1));
+			const float sY = liq.Surface[xh];
+			SnesHdLiquidBubble bub;
+			bub.X = (float)xh;
+			if(ph < 0.9f) {
+				bub.Y = (bottom + (sY - bottom) * (ph / 0.9f)) * S;
+				bub.R = liq.BubbleSize * S * 0.8f;
+				bub.A = 1.0f;
+				bub.Ring = false;
+			} else {
+				const float e = (ph - 0.9f) / 0.1f;
+				bub.Y = sY * S;
+				bub.R = liq.BubbleSize * S * (1.0f + 1.5f * e);
+				bub.A = 1.0f - e;
+				bub.Ring = true;
+			}
+			liq.Bubbles.push_back(bub);
+		}
+	}
+
+	// <2DLiquid> : dessin d'une bande de lignes HD (tache type 9, triee par ZIndex comme les overlays)
+	auto renderLiquidBand = [&](size_t liqIndex, uint32_t bandY0, uint32_t bandY1) {
+		const SnesHdLiquidInfo& liq = *_framePack->Liquids[liqIndex];
+		const float S = (float)scale;
+		const float twoPi = 6.2831853f;
+		const float degToRad = 3.14159265f / 180.0f;
+		const uint8_t z = (uint8_t)std::clamp(liq.ZIndex, 0, 255);
+		const uint32_t r0 = std::max(bandY0, liq.RowMin);
+		const uint32_t r1 = std::min(bandY1, liq.RowMax);
+		if(r0 >= r1 || liq.Col0 >= liq.Col1) return;
+		const SnesHdPackBitmapInfo* tex = (liq.Texture && liq.Texture->Width > 0 && liq.Texture->Height > 0 && liq.Texture->PixelData.size() >= (size_t)liq.Texture->Width * liq.Texture->Height) ? liq.Texture : nullptr;
+		const int texW = tex ? (int)tex->Width : 0, texH = tex ? (int)tex->Height : 0;
+		auto chanF = [](uint32_t c, int sh) -> float { return (float)((c >> sh) & 0xFF); };
+		auto lerpF = [](float a, float b, float f) -> float { return a + (b - a) * f; };
+		auto packF = [](float r, float g, float b) -> uint32_t {
+			const uint32_t R = (uint32_t)std::clamp(r + 0.5f, 0.0f, 255.0f);
+			const uint32_t G = (uint32_t)std::clamp(g + 0.5f, 0.0f, 255.0f);
+			const uint32_t B = (uint32_t)std::clamp(b + 0.5f, 0.0f, 255.0f);
+			return 0xFF000000u | (R << 16) | (G << 8) | B;
+		};
+		// Texture repetee, premultipliee : superpose sur (r, g, b)
+		auto sampleTex = [&](float u, float v, float& r, float& g, float& b) {
+			int tx = (int)std::floor(u) % texW; if(tx < 0) tx += texW;
+			int ty = (int)std::floor(v) % texH; if(ty < 0) ty += texH;
+			const uint32_t c = tex->PixelData[(size_t)ty * texW + tx];
+			const float a = chanF(c, 24) / 255.0f;
+			r = chanF(c, 16) + r * (1.0f - a);
+			g = chanF(c, 8) + g * (1.0f - a);
+			b = chanF(c, 0) + b * (1.0f - a);
+		};
+		const float glowR = std::max(1.0f, liq.GlowRadius);
+		const float gR = lerpF(chanF(liq.Color, 16), 255.0f, 0.5f);
+		const float gG = lerpF(chanF(liq.Color, 8), 255.0f, 0.5f);
+		const float gB = lerpF(chanF(liq.Color, 0), 255.0f, 0.5f);
+		const float rippleStrength = std::min(1.0f, liq.Amp / 6.0f);
+		const float zoneH = std::max(1.0f, liq.YMax - liq.YMin);
+
+		for(uint32_t r = r0; r < r1; r++) {
+			const float yN = (float)r / S;
+			uint32_t* row = out + (size_t)r * outWidth;
+			const uint8_t* ign = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr; // <Ignore2DOverlays>
+			for(uint32_t x = liq.Col0; x < liq.Col1; x++) {
+				if(ign && ign[x]) continue;
+				if(z < _zBuffer[(size_t)r * outWidth + x]) continue;
+				const float xN = (float)x / S;
+				const uint32_t dst = row[x];
+				const float dr = chanF(dst, 16), dg = chanF(dst, 8), db = chanF(dst, 0);
+				float rr, gg, bb;
+				if(!liq.IsTop) {
+					const float s = liq.Surface[x];
+					if(yN < s) {
+						// Halo au-dessus de la surface (additif, s'estompe avec la distance)
+						if(liq.Glow > 0.0f) {
+							const float d = (s - yN) / glowR;
+							if(d < 1.0f) {
+								const float g = liq.Glow * (1.0f - d) * (1.0f - d);
+								row[x] = packF(dr + gR * g, dg + gG * g, db + gB * g);
+							}
+						}
+						continue;
+					}
+					const float depth = std::clamp((yN - s) / liq.Depth, 0.0f, 1.0f);
+					rr = lerpF(chanF(liq.Color, 16), chanF(liq.Deep, 16), depth);
+					gg = lerpF(chanF(liq.Color, 8), chanF(liq.Deep, 8), depth);
+					bb = lerpF(chanF(liq.Color, 0), chanF(liq.Deep, 0), depth);
+					if(tex) sampleTex((xN + liq.ScrollX * liq.Time) / liq.TexScale, (yN - s) / liq.TexScale, rr, gg, bb);
+					if(yN - s < 1.0f) {
+						rr = lerpF(rr, 255.0f, liq.Foam);
+						gg = lerpF(gg, 255.0f, liq.Foam);
+						bb = lerpF(bb, 255.0f, liq.Foam);
+					}
+				} else {
+					// view=top : degrade par profondeur dans la zone + ondulations croisees
+					const float depth = std::clamp((yN - liq.YMin) / zoneH, 0.0f, 1.0f);
+					rr = lerpF(chanF(liq.Color, 16), chanF(liq.Deep, 16), depth);
+					gg = lerpF(chanF(liq.Color, 8), chanF(liq.Deep, 8), depth);
+					bb = lerpF(chanF(liq.Color, 0), chanF(liq.Deep, 0), depth);
+					const float w1 = std::sin(twoPi * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * degToRad);
+					const float w2 = std::sin(twoPi * (yN / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time));
+					const float rip = 0.5f * (w1 + w2) * rippleStrength; // -k .. k
+					if(rip >= 0.0f) {
+						rr = lerpF(rr, 255.0f, rip * liq.Foam);
+						gg = lerpF(gg, 255.0f, rip * liq.Foam);
+						bb = lerpF(bb, 255.0f, rip * liq.Foam);
+					} else {
+						const float dk = 1.0f + rip * 0.3f;
+						rr *= dk; gg *= dk; bb *= dk;
+					}
+					if(tex) sampleTex((xN + liq.ScrollX * liq.Time) / liq.TexScale, (yN - liq.YMin) / liq.TexScale, rr, gg, bb);
+				}
+				row[x] = packF(lerpF(dr, rr, liq.Alpha), lerpF(dg, gg, liq.Alpha), lerpF(db, bb, liq.Alpha));
+			}
+		}
+
+		// Bulles (view=side) : disque clair qui monte, puis anneau a l'eclatement
+		for(const SnesHdLiquidBubble& bub : liq.Bubbles) {
+			const int ra = (int)std::ceil(bub.R) + 1;
+			const int bx = (int)bub.X, by = (int)bub.Y;
+			const int ya = std::max((int)r0, by - ra), yb = std::min((int)r1 - 1, by + ra);
+			const int xa = std::max((int)liq.Col0, bx - ra), xb = std::min((int)liq.Col1 - 1, bx + ra);
+			for(int r = ya; r <= yb; r++) {
+				uint32_t* row = out + (size_t)r * outWidth;
+				const uint8_t* ignB = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr;
+				for(int x = xa; x <= xb; x++) {
+					if(ignB && ignB[x]) continue;
+					if(z < _zBuffer[(size_t)r * outWidth + x]) continue;
+					const float d = std::sqrt((float)((x - bx) * (x - bx) + (r - by) * (r - by)));
+					float a = 0.0f;
+					if(!bub.Ring) {
+						if(d <= bub.R) a = 0.55f * bub.A;
+					} else {
+						const float e = std::fabs(d - bub.R);
+						if(e <= 1.0f) a = 0.9f * bub.A * (1.0f - e);
+					}
+					if(a <= 0.0f) continue;
+					const uint32_t dst = row[x];
+					const float dr = chanF(dst, 16), dg = chanF(dst, 8), db = chanF(dst, 0);
+					row[x] = packF(lerpF(dr, 255.0f, a), lerpF(dg, 255.0f, a), lerpF(db, 255.0f, a));
+				}
+			}
+		}
+	};
 
 	// Rendu d'un overlay sur une bande de lignes HD (appele par composeBand, en parallele)
 	auto renderOverlayBand = [&](size_t ovIndex, uint32_t bandY0, uint32_t bandY1) {
@@ -2327,7 +2524,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// ====================================================================
 	// <m7relief> : PREPARATION (sequentielle) - relief de chaque case visible de la carte Mode 7
 	// ====================================================================
-	auto& hdReliefs = SnesHdPackLoader::ActivePack->M7Reliefs;
+	auto& hdReliefs = _framePack->M7Reliefs;
 	std::vector<SnesHdM7ReliefInfo*> cellRelief;
 	float reliefMaxH = 0.0f;
 	if(!hdReliefs.empty() && !m7CellHash.empty() && !m7Views.empty()) {
@@ -2358,7 +2555,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// <m7billboard> : PREPARATION (sequentielle) - projection des panneaux de chaque vue
 	// ====================================================================
 	struct BBDraw { const SnesHdM7BillboardInfo* B; float Cx, Bottom, W, H, A, GroundRow, Depth; int Level; };
-	auto& hdBillboards = SnesHdPackLoader::ActivePack->M7Billboards;
+	auto& hdBillboards = _framePack->M7Billboards;
 	std::vector<std::vector<BBDraw>> bbDraws(m7Views.size());
 	bool bbOn = false;
 	if(!hdBillboards.empty()) {
@@ -2418,7 +2615,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		u = baseU; v = baseV; h = fx.Elevation;
 		if(!fx.HasMotion) return;
 		const SnesHdM7ModelInfo& m = fx.Motion;
-		const float t = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f + m.TimeOffset;
+		const float t = (float)_framePack->ScreenInfo.FrameNumber / 60.0f + m.TimeOffset;
 		if(m.Path.size() >= 2 && m.PathLen > 0) {
 			float pu, pv, ph, du, dv;
 			m.EvalPath(t, pu, pv, ph, du, dv);
@@ -2445,10 +2642,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	std::vector<ViewLighting> viewLights(m7Views.size());
 	for(ViewLighting& vl : viewLights) vl.SetSun(135.0f, 40.0f, 0.5f, 0xFFF6E8); // soleil par defaut (materiaux)
 	bool lightsOn = false;
-	auto& hdLights = SnesHdPackLoader::ActivePack->M7Lights;
-	auto& hdAmbients = SnesHdPackLoader::ActivePack->M7Ambients;
+	auto& hdLights = _framePack->M7Lights;
+	auto& hdAmbients = _framePack->M7Ambients;
 	if((!hdLights.empty() || !hdAmbients.empty()) && !m7Views.empty()) {
-		const float tSec = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+		const float tSec = (float)_framePack->ScreenInfo.FrameNumber / 60.0f;
 		for(size_t v = 0; v < m7Views.size(); v++) {
 			const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
 			const uint32_t viewMap = m7Lines[zn.Y1].Img ? m7Lines[zn.Y1].Ref.M7MapHash : 0;
@@ -2539,8 +2736,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// ====================================================================
 	std::vector<const SnesHdSpriteLightInfo*> sprLightRules;
 	bool sprLightCand = false;
-	if(!SnesHdPackLoader::ActivePack->SpriteLights.empty() && !m7Views.empty()) {
-		for(auto& ur : SnesHdPackLoader::ActivePack->SpriteLights) { if(ur->MatchesCondition()) sprLightRules.push_back(ur.get()); }
+	if(!_framePack->SpriteLights.empty() && !m7Views.empty()) {
+		for(auto& ur : _framePack->SpriteLights) { if(ur->MatchesCondition()) sprLightRules.push_back(ur.get()); }
 		for(const auto& item : tilesToExpand) {
 			if(sprLightCand) break;
 			if(item.oamIndex >= 128 || !item.Tile) continue;
@@ -2559,7 +2756,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// ====================================================================
 	struct AtmoFx { const SnesHdM7EffectInfo* Fx; double Cu, Cv; };
 	struct FlareFx { SnesHdM7EffectInfo* Fx; int Key; float Sx, Sy, GroundRow; bool Visible; };
-	auto& hdEffectsA = SnesHdPackLoader::ActivePack->M7Effects;
+	auto& hdEffectsA = _framePack->M7Effects;
 	std::vector<std::vector<AtmoFx>> atmoLists(m7Views.size());
 	std::vector<std::vector<FlareFx>> flareLists(m7Views.size());
 	bool atmoOn = false, flareOn = false;
@@ -2624,7 +2821,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	bool noLightAll = false;
 	std::vector<const SnesHdNoLightRule*> noLight;
 	if(maskOn) {
-		for(auto& ur : SnesHdPackLoader::ActivePack->NoLightRules) {
+		for(auto& ur : _framePack->NoLightRules) {
 			if(!ur->MatchesCondition()) continue;
 			if(ur->AllSprites) noLightAll = true; else noLight.push_back(ur.get());
 		}
@@ -2643,7 +2840,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	const float kFront = 1.0e7f;
 	bool frontAll = false, frontHud = false;
 	std::vector<const SnesHdNoLightRule*> frontRules;
-	for(auto& ur : SnesHdPackLoader::ActivePack->FrontOf3DRules) {
+	for(auto& ur : _framePack->FrontOf3DRules) {
 		if(!ur->MatchesCondition()) continue;
 		if(ur->AllSprites) frontAll = true; else if(ur->OffGround) frontHud = true; else frontRules.push_back(ur.get());
 	}
@@ -2657,7 +2854,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	};
 	// <NoLiquidReflect> : tiles qui ne se refletent pas dans le liquide (Lakitu en l'air, piece qui s'envole...)
 	std::vector<const SnesHdNoLightRule*> noReflRules;
-	if(liqOn) for(auto& ur : SnesHdPackLoader::ActivePack->NoReflectRules) if(ur->MatchesCondition()) noReflRules.push_back(ur.get());
+	if(liqOn) for(auto& ur : _framePack->NoReflectRules) if(ur->MatchesCondition()) noReflRules.push_back(ur.get());
 	const bool noReflOn = !noReflRules.empty();
 	auto noReflTile = [&](const SnesHdPackTileInfo* t) -> bool {
 		if(!t) return false;
@@ -2679,11 +2876,11 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// en coordonnees relatives a lui. Un emetteur visible dans 2 vues n'avance qu'une fois par frame.
 	// ====================================================================
 	struct FxDraw { float Cx, Cy, HalfW, HalfH, A, R, G, B, Depth, GroundRow; bool Add; const SnesHdPackBitmapInfo* Tex; };
-	auto& hdEffects = SnesHdPackLoader::ActivePack->M7Effects;
+	auto& hdEffects = _framePack->M7Effects;
 	std::vector<std::vector<FxDraw>> fxDraws(m7Views.size());
 	bool fxOn = false;
 	if(!hdEffects.empty() && !m7Views.empty()) {
-		const uint32_t frameNo = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
+		const uint32_t frameNo = _framePack->ScreenInfo.FrameNumber;
 		const float dt = 1.0f / 60.0f;
 		for(size_t v = 0; v < m7Views.size(); v++) {
 			const SnesHdM7Zone& zn = m7Zones[m7Views[v]];
@@ -2866,7 +3063,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	struct SlGlow { int Group; int X0, Y0, X1, Y1; float R, G, B, Glow, HaloPx; }; // rectangle en pixels HD
 	std::vector<SlGlow> slGlows;
 	if(sprLightCand) {
-		const float tSec = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+		const float tSec = (float)_framePack->ScreenInfo.FrameNumber / 60.0f;
 		// Groupes PROPRES aux tiles reconnues : seules les tiles de la regle comptent (un champignon qui touche
 		// Lakitu ou un kart n'est plus fusionne avec eux). Tiles du meme sprite, ou qui se touchent = une lumiere.
 		// Pieds = bas des tiles reconnues (et non du groupe de sprites, qui peut contenir d'autres objets).
@@ -3367,6 +3564,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	for(size_t i = 0; i < hdOverlays.size(); i++) {
 		if(ovActive[i]) tasks.push_back({ hdOverlays[i]->ZIndex, 2, 0, i });
 	}
+	for(size_t i = 0; i < _framePack->Liquids.size(); i++) {
+		if(_framePack->Liquids[i]->Active) tasks.push_back({ _framePack->Liquids[i]->ZIndex, 9, 0, i });
+	}
 	for(size_t i = 0; i < p3Draws.size(); i++) {
 		if(!p3Draws[i].empty()) tasks.push_back({ hdParts3D[i / 2]->ZIndex, 3, 0, i });
 	}
@@ -3384,8 +3584,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		if(!fxDraws[v].empty()) tasks.push_back({ (int)kFxZ, 8, 0, v }); // <m7Effect> (flammes, fumee)
 	}
 
-	for(size_t i = 0; i < SnesHdPackLoader::ActivePack->Backgrounds.size(); i++) {
-		auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[i];
+	for(size_t i = 0; i < _framePack->Backgrounds.size(); i++) {
+		auto& bg = _framePack->Backgrounds[i];
 		if(!bg->MatchesCondition()) continue;
 		tasks.push_back({ bg->ZIndex, 0, 0, i });
 	}
@@ -3411,12 +3611,12 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 	// Preparation SEQUENTIELLE des backgrounds (image d'animation courante + PNG charge),
 	// avant de repartir la composition sur plusieurs coeurs.
-	std::vector<char> bgReady(SnesHdPackLoader::ActivePack->Backgrounds.size(), 0);
+	std::vector<char> bgReady(_framePack->Backgrounds.size(), 0);
 	for(const auto& task : tasks) {
 		if(task.type != 0) continue;
-		auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[task.index];
+		auto& bg = _framePack->Backgrounds[task.index];
 		if(bg->IsAnimated && !bg->AnimFrames.empty() && bg->FramesBetweenSteps > 0) {
-			uint32_t currentFrame = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
+			uint32_t currentFrame = _framePack->ScreenInfo.FrameNumber;
 			int totalFrames = (int)bg->AnimFrames.size();
 			int currentAnimIndex = (currentFrame / bg->FramesBetweenSteps) % totalFrames;
 			bg->Bitmap = bg->AnimFrames[currentAnimIndex];
@@ -3432,6 +3632,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// a un rendu sequentiel, mais reparti sur plusieurs coeurs.
 	auto composeBand = [&](uint32_t bandY0, uint32_t bandY1) {
 	for(const auto& task : tasks) {
+		if(task.type == 9) {
+			renderLiquidBand(task.index, bandY0, bandY1);
+			continue;
+		}
 		if(task.type == 2) {
 			renderOverlayBand(task.index, bandY0, bandY1);
 			continue;
@@ -3461,7 +3665,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			continue;
 		}
 		if(task.type == 0) {
-			auto& bg = SnesHdPackLoader::ActivePack->Backgrounds[task.index];
+			auto& bg = _framePack->Backgrounds[task.index];
 			if(!bgReady[task.index]) continue;
 			const bool bgIgn = ign2dOn && bg->IsIgnored2D(); // <Ignore2DOverlays> : fond entier
 
@@ -3474,14 +3678,14 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				int masterScrollX = 0, masterScrollY = 0;
 
 				if(bgIndex >= 0 && bgIndex < 4 && sdY < 240) {
-					auto& screenInfo = SnesHdPackLoader::ActivePack->ScreenInfo;
+					auto& screenInfo = _framePack->ScreenInfo;
 					masterScrollX = screenInfo.ScanlineHScroll[sdY][bgIndex];
 					masterScrollY = screenInfo.ScanlineVScroll[sdY][bgIndex];
 				}
 
 				int calcScrollX = 0;
 				int calcScrollY = 0;
-				uint32_t currentFrame = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
+				uint32_t currentFrame = _framePack->ScreenInfo.FrameNumber;
 
 				switch(bg->ScrollSpeedOperator) {
 					case SnesHdBackgroundInfo::ScrollOperator::Divide:
@@ -4026,7 +4230,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	};
 	auto smooth01 = [](float e0, float e1, float x) { float t = std::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f); return t * t * (3 - 2 * t); };
 	if(atmoOn) {
-		const float tA = (float)SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber / 60.0f;
+		const float tA = (float)_framePack->ScreenInfo.FrameNumber / 60.0f;
 		// Chaque effet = transformation affine de la couleur (c' = c x M + A) : on combine tous les effets
 		// d'un point en un seul (M, A) par canal. Calcul sur une GRILLE de kS x kS pixels HD puis
 		// interpolation (le brouillard varie lentement) ; les objets poses au sol sont calcules au pixel.
@@ -4386,7 +4590,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			fillRect(px - 3 * thick, pyG - thick, px + 3 * thick, pyG + thick, c, cy0, cy1);
 			fillRect(px - 2 * thick, pyT - 2 * thick, px + 2 * thick, pyT + 2 * thick, 0xFFFFFFFF, cy0, cy1);
 		}
-		uint32_t fn = SnesHdPackLoader::ActivePack->ScreenInfo.FrameNumber;
+		uint32_t fn = _framePack->ScreenInfo.FrameNumber;
 		if(fn % 120 == 0 && sprLightCand) {
 			MessageManager::Log("[HD-SPRITELIGHT] " + std::to_string(slDbgBoxes.size()) + " tile(s) reconnue(s), " + std::to_string(slDbgLights.size()) + " lumiere(s)");
 		}
@@ -4730,12 +4934,12 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		SnesHdPassTimer tmTail(_tailMs);
 	// ÉTAPE 4 : GESTION DES VIDÉOS (pl_mpeg)
 	// ====================================================================
-	if(SnesHdPackLoader::ActivePack != nullptr && out != nullptr) {
-		for(auto& video : SnesHdPackLoader::ActivePack->Videos) {
+	if(_framePack != nullptr && out != nullptr) {
+		for(auto& video : _framePack->Videos) {
 			if(!video->MatchesCondition()) continue;
 
 			if(!video->IsPlaying && !video->HasPlayed) {
-				std::string fullPath = FolderUtilities::CombinePath(SnesHdPackLoader::ActivePack->RootFolder, video->Filename);
+				std::string fullPath = FolderUtilities::CombinePath(_framePack->RootFolder, video->Filename);
 
 				// Lecture depuis la memoire si le fichier a ete precharge par LoadAsync, sinon depuis le disque.
 				// (free_when_done = 0 : les donnees restent disponibles pour une relecture)
@@ -5097,7 +5301,7 @@ if(video->IsPlaying && video->VideoPlayer != nullptr) {
 void SnesHdVideoFilter::ApplyFilterSpritesOAMScan(uint32_t scale, uint32_t outWidth, uint32_t outHeight, uint32_t* out)
 {
 	// 1. Sécurité
-	if(!SnesHdPackLoader::ActivePack || !_emu) return;
+	if(!_framePack || !_emu) return;
 
 	SnesConsole* console = (SnesConsole*)_emu->GetConsole().get();
 	SnesPpu* ppu = console->GetPpu();
@@ -5162,8 +5366,8 @@ void SnesHdVideoFilter::ApplyFilterSpritesOAMScan(uint32_t scale, uint32_t outWi
 		key.IsLargeTile = isLarge;
 		key.IsSprite = true;
 
-		auto it = SnesHdPackLoader::ActivePack->TileByKey.find(key);
-		if(it != SnesHdPackLoader::ActivePack->TileByKey.end() && !it->second.empty()) {
+		auto it = _framePack->TileByKey.find(key);
+		if(it != _framePack->TileByKey.end() && !it->second.empty()) {
 
 			// ON A TROUVÉ UN SPRITE HD !
 			SnesHdPackTileInfo* hdTile = nullptr;
@@ -5252,16 +5456,16 @@ void SnesHdVideoFilter::ApplyFilterSpritesStandard(uint32_t x, uint32_t y, uint3
 
 	// Règles globales d'effacement du pack
 	if(!hdData.IsSprite) {
-		if(SnesHdPackLoader::ActivePack->DisableOriginalTiles) {
+		if(_framePack->DisableOriginalTiles) {
 			eraseThisTile = true;
 		} else {
-			if(hdData.SourceLayer == 0 && SnesHdPackLoader::ActivePack->DisableBg1) eraseThisTile = true;
-			else if(hdData.SourceLayer == 1 && SnesHdPackLoader::ActivePack->DisableBg2) eraseThisTile = true;
-			else if(hdData.SourceLayer == 2 && SnesHdPackLoader::ActivePack->DisableBg3) eraseThisTile = true;
-			else if(hdData.SourceLayer == 3 && SnesHdPackLoader::ActivePack->DisableBg4) eraseThisTile = true;
+			if(hdData.SourceLayer == 0 && _framePack->DisableBg1) eraseThisTile = true;
+			else if(hdData.SourceLayer == 1 && _framePack->DisableBg2) eraseThisTile = true;
+			else if(hdData.SourceLayer == 2 && _framePack->DisableBg3) eraseThisTile = true;
+			else if(hdData.SourceLayer == 3 && _framePack->DisableBg4) eraseThisTile = true;
 		}
 	} else {
-		if(SnesHdPackLoader::ActivePack->DisableOriginalSprites) {
+		if(_framePack->DisableOriginalSprites) {
 			eraseThisTile = true;
 		}
 	}
@@ -5289,7 +5493,7 @@ void SnesHdVideoFilter::ApplyFilterSpritesStandard(uint32_t x, uint32_t y, uint3
 				} else if(hdData.IsSprite) {
 					// 2. Pour un sprite : restauration de la couleur du décor cachée sous le sprite
 					finalColor = _calculatedPalette[hdData.UnderlyingColor] | 0xFF000000;
-				} else if(SnesHdPackLoader::ActivePack->DisableOriginalTiles) {
+				} else if(_framePack->DisableOriginalTiles) {
 					// 3. Pour une tuile de décor désactivée : transparent
 					finalColor = 0x00000000;
 				} else {
@@ -5821,9 +6025,10 @@ bool SnesHdPackSpriteNearbyCondition::InternalCheckCondition(int x, int y, SnesH
 //--------------------------------------------------------------------------------------------------
 OverscanDimensions SnesHdVideoFilter::GetOverscan()
 {
+	auto pack = SnesHdSnapshotActivePack();
 	// Si un pack HD est actif et qu'il possède le tag <overscan>
-	if(SnesHdPackLoader::ActivePack != nullptr && SnesHdPackLoader::ActivePack->HasOverscanConfig) {
-		return SnesHdPackLoader::ActivePack->Overscan;
+	if(pack != nullptr && pack->HasOverscanConfig) {
+		return pack->Overscan;
 	} else {
 		// Sinon, on appelle gentiment l'overscan standard de la console parent
 		return SnesDefaultVideoFilter::GetOverscan();

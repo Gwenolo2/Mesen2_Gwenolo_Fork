@@ -7,6 +7,8 @@
 
 struct SnesHdPixelData;
 
+class SnesHdPackData;
+
 // On hérite du filtre par défaut pour récupérer sa gestion des couleurs et de la luminosité
 class SnesHdVideoFilter : public SnesDefaultVideoFilter
 {
@@ -14,6 +16,7 @@ private:
 	FrameInfo _sdFrameInfo = {}; // Pour garder en mémoire la taille basse résolution
 	std::vector<uint8_t> _zBuffer; // La carte de profondeur HD
 	SnesHdThreadPool _pool; // Reserve de threads permanente (passes du filtre)
+	std::shared_ptr<SnesHdPackData> _framePack; // Snapshot du pack HD pour la frame en cours (evite la course avec LoadHdPack)
 	// Chronometrage des passes (journal [HD-PASS] toutes les 300 frames) : m7, compose, reflets, eclairage, atmosphere
 	double _passMs[5] = {};
 	int _passFrames = 0;

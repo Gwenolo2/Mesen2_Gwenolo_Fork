@@ -387,11 +387,19 @@ namespace {
 template<uint32_t scale>
 void HdNesPack<scale>::SimulateOverlays(HdScreenInfo* hdScreenInfo)
 {
+	const float dt = 1.0f / 60.0f;
+	// <2DLiquid> : activation et temps, meme sans <2DOverlay> dans le pack (avant le retour anticipe)
+	for(auto& liqPtr : _hdData->Liquids) {
+		liqPtr->Active = liqPtr->MatchesCondition();
+		if(liqPtr->Active) {
+			liqPtr->Time += dt;
+		}
+	}
+
 	if(_hdData->Overlays.empty()) {
 		return;
 	}
 
-	const float dt = 1.0f / 60.0f;
 	// Defilement lu sur la ligne du milieu de l'ecran (comme cote SNES)
 	const HdPpuPixelInfo& midPixel = hdScreenInfo->ScreenTiles[(NesConstants::ScreenHeight / 2) << 8];
 	const int32_t scrollX = NesLineScrollX(midPixel);
@@ -651,6 +659,253 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 			}
 		}
 	}
+}
+
+template<uint32_t scale>
+void HdNesPack<scale>::PrepareLiquids(uint32_t screenWidth)
+{
+	const float S = (float)scale;
+	const float twoPi = 2.0f * OverlayPi;
+	const float degToRad = OverlayPi / 180.0f;
+	const int hdRows = 240 * (int)scale;
+	auto liqHash = [](uint32_t v) -> uint32_t { v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; v ^= v >> 16; return v; };
+	for(auto& liqPtr : _hdData->Liquids) {
+		NesHdLiquidInfo& liq = *liqPtr;
+		liq.Col0 = (int)std::clamp(liq.XMin * (float)screenWidth, 0.0f, (float)screenWidth);
+		liq.Col1 = (int)std::clamp(liq.XMax * (float)screenWidth, 0.0f, (float)screenWidth);
+		liq.Surface.assign(screenWidth, 0.0f);
+		liq.BubbleMap.clear();
+		if(!liq.Active || liq.IsTop) {
+			continue;
+		}
+		for(int x = liq.Col0; x < liq.Col1; x++) {
+			const float xN = (float)x / S;
+			liq.Surface[x] = liq.Level + liq.Amp * std::sin(twoPi * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * degToRad);
+		}
+		if(liq.BubbleCount <= 0 || liq.Col1 <= liq.Col0) {
+			continue;
+		}
+		// Bulles : rasterisees une fois par image dans une carte alpha HD (position deterministe, hash + temps)
+		liq.BubbleMap.assign((size_t)screenWidth * hdRows, 0);
+		const float bottom = liq.Level + liq.Depth * 0.7f;
+		for(int b = 0; b < liq.BubbleCount; b++) {
+			const uint32_t h1 = liqHash((uint32_t)b * 2654435761u + 1u);
+			const uint32_t h2 = liqHash(h1 + 0x9E3779B9u);
+			const uint32_t h3 = liqHash(h2 + 0x85EBCA6Bu);
+			const float r1 = (float)(h1 & 0xFFFF) / 65535.0f;
+			const float r2 = (float)(h2 & 0xFFFF) / 65535.0f;
+			const float r3 = (float)(h3 & 0xFFFF) / 65535.0f;
+			const float period = 1.0f / std::max(0.05f, liq.BubbleRise * (0.6f + 0.8f * r2));
+			const float u = liq.Time / period + r3;
+			const float ph = u - std::floor(u);
+			int xh = liq.Col0 + (int)(r1 * (float)(liq.Col1 - liq.Col0 - 1));
+			xh = std::clamp(xh, 0, (int)screenWidth - 1);
+			const float sY = liq.Surface[xh];
+			float cy, rad, alpha;
+			bool ring;
+			if(ph < 0.9f) {
+				cy = (bottom + (sY - bottom) * (ph / 0.9f)) * S;
+				rad = liq.BubbleSize * S * 0.8f;
+				alpha = 1.0f;
+				ring = false;
+			} else {
+				const float e = (ph - 0.9f) / 0.1f;
+				cy = sY * S;
+				rad = liq.BubbleSize * S * (1.0f + 1.5f * e);
+				alpha = 1.0f - e;
+				ring = true;
+			}
+			const float cx = (float)xh;
+			const int x0 = std::max(0, (int)std::floor(cx - rad - 1.0f)), x1 = std::min((int)screenWidth - 1, (int)std::ceil(cx + rad + 1.0f));
+			const int y0 = std::max(0, (int)std::floor(cy - rad - 1.0f)), y1 = std::min(hdRows - 1, (int)std::ceil(cy + rad + 1.0f));
+			for(int y = y0; y <= y1; y++) {
+				for(int x = x0; x <= x1; x++) {
+					const float d = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+					float v = 0.0f;
+					if(!ring) {
+						if(d <= rad) v = 0.55f * alpha;
+					} else {
+						const float e2 = std::fabs(d - rad);
+						if(e2 <= 1.0f) v = 0.9f * alpha * (1.0f - e2);
+					}
+					if(v <= 0.0f) continue;
+					const uint8_t q = (uint8_t)(v * 255.0f + 0.5f);
+					uint8_t& m = liq.BubbleMap[(size_t)y * screenWidth + x];
+					if(q > m) m = q;
+				}
+			}
+		}
+	}
+}
+
+// view=top : degrade par profondeur dans la zone + ondulations croisees (coordonnees NES)
+static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, uint32_t dst)
+{
+	auto chan = [](uint32_t c, int sh) -> float { return (float)((c >> sh) & 0xFF); };
+	const float zoneH = std::max(1.0f, liq.YMax - liq.YMin);
+	const float depth = std::clamp((yN - liq.YMin) / zoneH, 0.0f, 1.0f);
+	float rr = chan(liq.Color, 16) + (chan(liq.Deep, 16) - chan(liq.Color, 16)) * depth;
+	float gg = chan(liq.Color, 8) + (chan(liq.Deep, 8) - chan(liq.Color, 8)) * depth;
+	float bb = chan(liq.Color, 0) + (chan(liq.Deep, 0) - chan(liq.Color, 0)) * depth;
+	const float twoPi = 2.0f * OverlayPi;
+	const float w1 = std::sin(twoPi * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * (OverlayPi / 180.0f));
+	const float w2 = std::sin(twoPi * (yN / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time));
+	const float rip = 0.5f * (w1 + w2) * std::min(1.0f, liq.Amp / 6.0f);
+	if(rip >= 0.0f) {
+		rr += (255.0f - rr) * rip * liq.Foam;
+		gg += (255.0f - gg) * rip * liq.Foam;
+		bb += (255.0f - bb) * rip * liq.Foam;
+	} else {
+		const float dk = 1.0f + rip * 0.3f;
+		rr *= dk; gg *= dk; bb *= dk;
+	}
+	const bool hasTex = liq.Texture != nullptr && liq.Texture->Width > 0 && liq.Texture->Height > 0 && liq.Texture->PixelData.size() >= (size_t)liq.Texture->Width * liq.Texture->Height;
+	if(hasTex) {
+		const int tw = (int)liq.Texture->Width, th = (int)liq.Texture->Height;
+		const float u = (xN + liq.ScrollX * liq.Time) / liq.TexScale;
+		const float v = (yN - liq.YMin) / liq.TexScale;
+		int tx = (int)std::floor(u) % tw; if(tx < 0) tx += tw;
+		int ty = (int)std::floor(v) % th; if(ty < 0) ty += th;
+		const uint32_t c = liq.Texture->PixelData[(size_t)ty * tw + tx];
+		const float a = chan(c, 24) / 255.0f;
+		rr = chan(c, 16) + rr * (1.0f - a);
+		gg = chan(c, 8) + gg * (1.0f - a);
+		bb = chan(c, 0) + bb * (1.0f - a);
+	}
+	const float A = liq.Alpha;
+	const float dr = chan(dst, 16), dg = chan(dst, 8), db = chan(dst, 0);
+	const uint32_t R = (uint32_t)std::clamp(dr + (rr - dr) * A + 0.5f, 0.0f, 255.0f);
+	const uint32_t G = (uint32_t)std::clamp(dg + (gg - dg) * A + 0.5f, 0.0f, 255.0f);
+	const uint32_t B = (uint32_t)std::clamp(db + (bb - db) * A + 0.5f, 0.0f, 255.0f);
+	return 0xFF000000u | (R << 16) | (G << 8) | B;
+}
+
+// Halo additif au-dessus de la surface ; d = distance normalisee (0 = surface, 1 = bord du halo)
+static uint32_t LiquidGlowPixel(const NesHdLiquidInfo& liq, float d, uint32_t dst)
+{
+	auto chan = [](uint32_t c, int sh) -> float { return (float)((c >> sh) & 0xFF); };
+	const float g = liq.Glow * (1.0f - d) * (1.0f - d);
+	const float dr = chan(dst, 16), dg = chan(dst, 8), db = chan(dst, 0);
+	const float gr = chan(liq.Color, 16) * 0.5f + 127.5f, gg = chan(liq.Color, 8) * 0.5f + 127.5f, gb = chan(liq.Color, 0) * 0.5f + 127.5f;
+	const uint32_t R = (uint32_t)std::clamp(dr + gr * g + 0.5f, 0.0f, 255.0f);
+	const uint32_t G = (uint32_t)std::clamp(dg + gg * g + 0.5f, 0.0f, 255.0f);
+	const uint32_t B = (uint32_t)std::clamp(db + gb * g + 0.5f, 0.0f, 255.0f);
+	return 0xFF000000u | (R << 16) | (G << 8) | B;
+}
+
+// Bulle : melange vers le blanc selon l'alpha de la carte de bulles (0 a 255)
+static uint32_t LiquidBubblePixel(uint32_t dst, uint8_t a)
+{
+	const float f = (float)a / 255.0f;
+	const float dr = (float)((dst >> 16) & 0xFF), dg = (float)((dst >> 8) & 0xFF), db = (float)(dst & 0xFF);
+	const uint32_t R = (uint32_t)std::clamp(dr + (255.0f - dr) * f + 0.5f, 0.0f, 255.0f);
+	const uint32_t G = (uint32_t)std::clamp(dg + (255.0f - dg) * f + 0.5f, 0.0f, 255.0f);
+	const uint32_t B = (uint32_t)std::clamp(db + (255.0f - db) * f + 0.5f, 0.0f, 255.0f);
+	return 0xFF000000u | (R << 16) | (G << 8) | B;
+}
+
+// Dessine le liquide dans le bloc HD d'un pixel NES, pour les liquides dont la bande est "band"
+template<uint32_t scale>
+void HdNesPack<scale>::DrawLiquidBand(int band, uint32_t nesX, uint32_t nesY, uint32_t* block, uint32_t screenWidth)
+{
+	if(_hdData->Liquids.empty()) {
+		return;
+	}
+	// Pixel net (HUD) : pas de liquide
+	if(_hdData->HasIgnore2D && _ignNes[((size_t)nesY << 8) | nesX] != 0) {
+		return;
+	}
+	const int xRel = (int)nesX - (int)_liquidOffX;
+	const int yRel = (int)nesY - (int)_liquidOffY;
+	if(xRel < 0 || yRel < 0) {
+		return;
+	}
+	for(auto& liqPtr : _hdData->Liquids) {
+		const NesHdLiquidInfo& liq = *liqPtr;
+		if(!liq.Active || liq.Priority / (int)HdNesPack<scale>::PriorityLevelsPerLayer != band) {
+			continue;
+		}
+		for(int i = 0; i < (int)scale; i++) {
+			const float yN = (float)yRel + (float)i / (float)scale;
+			const int hdRow = yRel * (int)scale + i;
+			uint32_t* row = block + (size_t)i * screenWidth;
+			for(int j = 0; j < (int)scale; j++) {
+				const int col = xRel * (int)scale + j;
+				if(col < liq.Col0 || col >= liq.Col1 || col >= (int)screenWidth) {
+					continue;
+				}
+				const float xN = (float)col / (float)scale;
+				const uint32_t dst = row[j];
+				uint32_t px = dst;
+				if(liq.IsTop) {
+					if(yN >= liq.YMin && yN < liq.YMax) {
+						px = LiquidTopPixel(liq, xN, yN, dst);
+					}
+				} else {
+					const float s = liq.Surface[col];
+					if(yN < s) {
+						if(liq.Glow > 0.0f) {
+							const float d = (s - yN) / std::max(1.0f, liq.GlowRadius);
+							if(d < 1.0f) {
+								px = LiquidGlowPixel(liq, d, dst);
+							}
+						}
+					} else {
+						px = BlendLiquidPixel(liq, xN, yN, s, dst);
+					}
+					if(!liq.BubbleMap.empty() && hdRow >= 0) {
+						const size_t bi = (size_t)hdRow * screenWidth + (size_t)col;
+						if(bi < liq.BubbleMap.size() && liq.BubbleMap[bi] != 0) {
+							px = LiquidBubblePixel(px, liq.BubbleMap[bi]);
+						}
+					}
+				}
+				row[j] = px;
+			}
+		}
+	}
+}
+
+template<uint32_t scale>
+uint32_t HdNesPack<scale>::BlendLiquidPixel(const NesHdLiquidInfo& liq, float xN, float yN, float s, uint32_t dst)
+{
+	auto chan = [](uint32_t c, int sh) -> float { return (float)((c >> sh) & 0xFF); };
+
+	// Couleur de base : de la couleur de surface vers la couleur profonde
+	const float depth = std::clamp((yN - s) / liq.Depth, 0.0f, 1.0f);
+	float rr = chan(liq.Color, 16) + (chan(liq.Deep, 16) - chan(liq.Color, 16)) * depth;
+	float gg = chan(liq.Color, 8) + (chan(liq.Deep, 8) - chan(liq.Color, 8)) * depth;
+	float bb = chan(liq.Color, 0) + (chan(liq.Deep, 0) - chan(liq.Color, 0)) * depth;
+
+	// Texture : repetee horizontalement, defilante, ancree a la surface (PNG premultiplie)
+	const bool hasTex = liq.Texture != nullptr && liq.Texture->Width > 0 && liq.Texture->Height > 0 && liq.Texture->PixelData.size() >= (size_t)liq.Texture->Width * liq.Texture->Height;
+	if(hasTex) {
+		const int tw = (int)liq.Texture->Width, th = (int)liq.Texture->Height;
+		const float u = (xN + liq.ScrollX * liq.Time) / liq.TexScale;
+		const float v = (yN - s) / liq.TexScale;
+		int tx = (int)std::floor(u) % tw; if(tx < 0) tx += tw;
+		int ty = (int)std::floor(v) % th; if(ty < 0) ty += th;
+		const uint32_t c = liq.Texture->PixelData[(size_t)ty * tw + tx];
+		const float a = chan(c, 24) / 255.0f;
+		rr = chan(c, 16) + rr * (1.0f - a);
+		gg = chan(c, 8) + gg * (1.0f - a);
+		bb = chan(c, 0) + bb * (1.0f - a);
+	}
+
+	// Ecume : liseré clair sur la premiere ligne NES sous la surface
+	if(yN - s < 1.0f) {
+		rr += (255.0f - rr) * liq.Foam;
+		gg += (255.0f - gg) * liq.Foam;
+		bb += (255.0f - bb) * liq.Foam;
+	}
+
+	// Opacite globale : melange avec ce qui est deja dessine
+	const float A = liq.Alpha;
+	const float dr = chan(dst, 16), dg = chan(dst, 8), db = chan(dst, 0);
+	const uint32_t R = (uint32_t)std::clamp(dr + (rr - dr) * A + 0.5f, 0.0f, 255.0f);
+	const uint32_t G = (uint32_t)std::clamp(dg + (gg - dg) * A + 0.5f, 0.0f, 255.0f);
+	const uint32_t B = (uint32_t)std::clamp(db + (bb - db) * A + 0.5f, 0.0f, 255.0f);
+	return 0xFF000000u | (R << 16) | (G << 8) | B;
 }
 
 template<uint32_t scale>
@@ -1259,6 +1514,7 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 		for(int i = 0; i < _activeBgCount[0]; i++) {
 			DrawBackgroundLayer(lineCfg[HdNesPack::BehindBgSpritesPriority+i], x, y, outputBuffer, screenWidth);
 		}
+		DrawLiquidBand(0, x, y, outputBuffer, screenWidth);
 	}
 
 	if(hasSprite) {
@@ -1286,6 +1542,7 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 		for(int i = 0; i < _activeBgCount[1]; i++) {
 			DrawBackgroundLayer(lineCfg[HdNesPack::BehindBgPriority+i], x, y, outputBuffer, screenWidth);
 		}
+		DrawLiquidBand(1, x, y, outputBuffer, screenWidth);
 	}
 	
 	if(hdPackTileInfo) {
@@ -1302,6 +1559,7 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 	for(int i = 0; i < _activeBgCount[2]; i++) {
 		DrawBackgroundLayer(lineCfg[HdNesPack::BehindFgSpritesPriority+i], x, y, outputBuffer, screenWidth);
 	}
+	DrawLiquidBand(2, x, y, outputBuffer, screenWidth);
 
 	if(hasSprite) {
 		for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
@@ -1321,11 +1579,13 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 	for(int i = 0; i < _activeBgCount[3]; i++) {
 		DrawBackgroundLayer(lineCfg[HdNesPack::ForegroundPriority+i], x, y, outputBuffer, screenWidth);
 	}
+	DrawLiquidBand(3, x, y, outputBuffer, screenWidth);
 
 	//Cinquieme bande (40 a 49) : au-dessus du premier plan
 	for(int i = 0; i < _activeBgCount[4]; i++) {
 		DrawBackgroundLayer(lineCfg[HdNesPack::TopPriority+i], x, y, outputBuffer, screenWidth);
 	}
+	DrawLiquidBand(4, x, y, outputBuffer, screenWidth);
 }
 
 template<uint32_t scale>
@@ -1365,6 +1625,9 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 
 	//Z-index par pixel : calcule seulement si le pack contient un <video>
 	SimulateOverlays(hdScreenInfo);
+	_liquidOffX = overscan.Left;
+	_liquidOffY = overscan.Top;
+	PrepareLiquids(screenWidth);
 	_zEnabled = !_hdData->Videos.empty() || !_hdData->Overlays.empty();
 	if(_zEnabled) {
 		std::fill(_zNes.begin(), _zNes.end(), (uint8_t)0);

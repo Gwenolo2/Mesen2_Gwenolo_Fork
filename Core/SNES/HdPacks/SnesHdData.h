@@ -10,6 +10,8 @@
 #include <array>
 #include <cstring>
 #include "Shared/MessageManager.h"
+#include "Shared/HdLoadingScreen.h"
+#include <unordered_set>
 #include "Utilities/PNGHelper.h"
 #include "Utilities/SimpleLock.h"
 #include "Shared/SettingTypes.h"
@@ -680,6 +682,54 @@ struct SnesHdParticle
 	float Size = 1;           // multiplicateur de taille propre (aleatoire)
 	float Rot = 0, Spin = 0;  // radians, radians / s
 	float Seed1 = 0, Seed2 = 0;
+};
+
+// <2DLiquid> (SNES) : nappe de liquide, meme format que NES. view=side (profil, surface + bulles) ou view=top (zone + ondulations)
+struct SnesHdLiquidBubble
+{
+	float X = 0, Y = 0, R = 0, A = 0; // pixels HD
+	bool Ring = false;                // phase d'eclatement (anneau)
+};
+
+struct SnesHdLiquidInfo
+{
+	std::vector<SnesHdPackCondition*> Conditions;
+	bool Active = false;
+	bool IsTop = false;                   // view=top
+	float Level = 176.0f;                 // view=side : hauteur de la surface (lignes SNES)
+	float Depth = 64.0f;                  // profondeur du degrade (lignes SNES)
+	float XMin = 0.0f, XMax = 1.0f;       // zone horizontale (fraction de la largeur)
+	float YMin = 0.0f, YMax = 224.0f;     // view=top : zone verticale (lignes SNES)
+	float Amp = 3.0f, Wave = 48.0f, Speed = 0.8f, Phase = 0.0f; // houle / ondulations
+	float ScrollX = 0.0f;                 // defilement de la texture (px SNES / s)
+	float TexScale = 1.0f;                // taille d'un texel en pixels SNES
+	float Foam = 0.6f;                    // eclaircissement (ecume, crete des ondes) 0 a 1
+	float Alpha = 1.0f;                   // opacite du liquide
+	uint32_t Color = 0x1E6FB0, Deep = 0x0B2F5C;
+	SnesHdPackBitmapInfo* Texture = nullptr;
+	float Glow = 0.0f;                    // halo lumineux au-dessus de la surface (0 a 1)
+	float GlowRadius = 24.0f;             // rayon du halo (lignes SNES)
+	int BubbleCount = 0;                  // view=side : bulles qui montent et eclatent a la surface
+	float BubbleSize = 1.5f;              // rayon des bulles (lignes SNES)
+	float BubbleRise = 0.4f;              // montee des bulles (cycles / s)
+	int ZIndex = 95;                      // prio= : z sur l'echelle SNES (comme Z de <2DOverlay>)
+	float Time = 0.0f;
+
+	// Etat par image (calcule dans ApplyFilter)
+	uint32_t Col0 = 0, Col1 = 0;          // colonnes HD
+	uint32_t RowMin = 0, RowMax = 0;      // lignes HD
+	std::vector<float> Surface;           // view=side : surface par colonne HD (lignes SNES)
+	std::vector<SnesHdLiquidBubble> Bubbles;
+
+	bool MatchesCondition()
+	{
+		for(SnesHdPackCondition* cond : Conditions) {
+			if(!cond->CheckCondition(0, 0, nullptr)) {
+				return false;
+			}
+		}
+		return true;
+	}
 };
 
 struct SnesHdOverlayInfo
@@ -1641,6 +1691,8 @@ public:
 	std::map<std::string, std::string> RandomFolderChoices;
 	std::vector<std::unique_ptr<SnesHdPackBitmapInfo>> ImageFileData;
 	std::unordered_map<SnesHdTileKey, std::vector<SnesHdPackTileInfo*>> TileByKey;
+	// <tile> ... defaultPalette=Y : tuiles utilisees pour toute palette sans tuile explicite (PaletteHash = 0, sentinelle)
+	std::unordered_map<SnesHdTileKey, std::vector<SnesHdPackTileInfo*>> DefaultPaletteTileByKey;
 
 	// Stockage global des conditions et adresses surveillées
 	std::vector<std::unique_ptr<SnesHdPackCondition>> Conditions;
@@ -1720,6 +1772,9 @@ public:
 	// Effets <2DOverlay> (particules 2D...)
 	std::vector<std::unique_ptr<SnesHdOverlayInfo>> Overlays;
 
+	// Nappes <2DLiquid> (phase 2 SNES)
+	std::vector<std::unique_ptr<SnesHdLiquidInfo>> Liquids;
+
 	// Effets <3DParticles> (particules dans le monde Mode 7)
 	std::vector<std::unique_ptr<SnesHdParticles3DInfo>> Particles3D;
 
@@ -1755,6 +1810,7 @@ public:
 	std::vector<std::unique_ptr<SnesHdVideoInfo>> Videos;
 
 
+	HdLoadingScreenConfig LoadingScreen; // balise <LoadingScreen>
 	std::unordered_map<std::string, std::string> PatchesByHash;
 	
 
@@ -1762,8 +1818,17 @@ public:
 
 	void LoadAsync()
 	{
+		// Ecran de chargement : nombre de fichiers = PNG + OGG distincts
+		uint32_t loadingTotal = (uint32_t)ImageFileData.size();
+		{
+			std::unordered_set<std::string> audioNames;
+			for(auto& pair : MsuTracks) for(auto& track : pair.second) audioNames.insert(track.Filename);
+			loadingTotal += (uint32_t)audioNames.size();
+		}
+		HdLoadingScreen::Guard loadingScreen(LoadingScreen, loadingTotal);
 		for(auto& bitmap : ImageFileData) {
 			bitmap->Init();
+			HdLoadingScreen::Progress(bitmap->PngName);
 			if(_cancelLoad) return;
 		}
 
@@ -1831,6 +1896,7 @@ public:
 				if(track.Filename.empty()) continue;
 
 				// Si déjà en cache
+				HdLoadingScreen::Progress(track.Filename);
 				auto it = OggCache.find(track.Filename);
 				if(it != OggCache.end()) {
 					track.AudioData = it->second;

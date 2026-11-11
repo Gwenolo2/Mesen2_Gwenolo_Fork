@@ -563,6 +563,13 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				}
 			}
 
+			// Option optionnelle (7e parametre) : defaultPalette = Y/N (true/false, 1/0)
+			bool defaultPalette = false;
+			if(tokens.size() >= 7) {
+				std::string dp = StringUtilities::ToLower(StringUtilities::Trim(tokens[6]));
+				defaultPalette = (dp == "y" || dp == "yes" || dp == "1" || dp == "true");
+			}
+
 			tile->Bitmap = loadedBitmaps[pngPath];
 			tile->Conditions = activeConditions;
 
@@ -575,6 +582,18 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 				key.IsSprite = true;
 				outData->TileByKey[key].push_back(tile);
+			}
+
+			if(defaultPalette) {
+				SnesHdTileKey dkey = key;
+				dkey.PaletteHash = 0; // sentinelle : la recherche par defaut ignore la palette
+				for(auto currentBpp : bppsToTry) {
+					dkey.Bpp = currentBpp;
+					dkey.IsSprite = false;
+					outData->DefaultPaletteTileByKey[dkey].push_back(tile);
+					dkey.IsSprite = true;
+					outData->DefaultPaletteTileByKey[dkey].push_back(tile);
+				}
 			}
 
 			outData->Tiles.push_back(std::unique_ptr<SnesHdPackTileInfo>(tile));
@@ -779,7 +798,13 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 		}
 
 		/// <IMG> TAGS
-		if(lineContent.substr(0, 5) == "<img>") {
+		if(lineContent.substr(0, 15) == "<LoadingScreen>") {
+			std::vector<std::string> lsTokens = StringUtilities::Split(lineContent.substr(15), ',');
+			outData->LoadingScreen = HdLoadingScreen::ParseTag(lsTokens, [&rootFolder](const std::string& name, std::vector<uint8_t>& data) {
+				VirtualFile file(FolderUtilities::CombinePath(rootFolder, name));
+				return file.IsValid() && file.ReadFile(data);
+			});
+		} else if(lineContent.substr(0, 5) == "<img>") {
 			//imageCatalog.push_back(lineContent.substr(5));
 			imageCatalog.push_back(NormalizePath(lineContent.substr(5)));
 		} else if(lineContent.substr(0, 7) == "<scale>") {
@@ -2531,6 +2556,89 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			}
 		}
 
+		/// PARSING <2DLiquid> (SNES) : nappe de liquide, meme format que NES, + view=top, glow, bubbles, prio (z SNES)
+		// [conditions]<2DLiquid>[,view=side|top][,level=176][,depth=64][,xmin=0][,xmax=256][,ymin=0][,ymax=224][,amplitude=3][,wavelength=48][,speed=0.8][,phase=0][,scrollx=0][,texscale=1][,foam=0.6][,alpha=1][,color=1E6FB0][,deep=0B2F5C][,texture=fichier.png][,glow=0][,glowradius=24][,bubbles=0][,bubblesize=1.5][,bubblerise=0.4][,prio=95]
+		else if(lineContent.substr(0, 10) == "<2DLiquid>") {
+			std::unordered_map<std::string, std::string> cfg;
+			for(const std::string& raw : StringUtilities::Split(lineContent.substr(10), ',')) {
+				std::string tok = StringUtilities::Trim(raw);
+				size_t eq = tok.find('=');
+				if(eq == std::string::npos) {
+					if(!tok.empty()) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DLiquid> : parametre sans valeur : " + tok);
+					continue;
+				}
+				cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+			}
+			auto str = [&](const char* k) -> std::string { auto it = cfg.find(k); return it == cfg.end() ? std::string() : it->second; };
+			auto num = [&](const char* k, float def) -> float {
+				std::string v = str(k);
+				if(v.empty()) return def;
+				try { return std::stof(v); } catch(...) { MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DLiquid> : valeur invalide pour " + std::string(k) + " : " + v); return def; }
+			};
+			auto color = [&](const char* k, uint32_t def) -> uint32_t {
+				std::string v = StringUtilities::Trim(str(k));
+				if(v.empty()) return def;
+				if(v[0] == '#') v = v.substr(1);
+				try { return (uint32_t)std::stoul(v, nullptr, 16) & 0xFFFFFF; } catch(...) { return def; }
+			};
+
+			std::string view = StringUtilities::ToLower(str("view"));
+			if(view.empty()) view = "side";
+			if(view != "side" && view != "top") {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DLiquid> : view=" + view + " inconnu (side ou top).");
+			} else {
+				auto liquid = std::make_unique<SnesHdLiquidInfo>();
+				liquid->Conditions = currentConditions;
+				liquid->IsTop = (view == "top");
+				liquid->Level = std::clamp(num("level", 176.0f), 0.0f, 240.0f);
+				liquid->Depth = std::max(1.0f, num("depth", 64.0f));
+				liquid->XMin = std::clamp(num("xmin", 0.0f) / 256.0f, 0.0f, 1.0f);
+				liquid->XMax = std::clamp(num("xmax", 256.0f) / 256.0f, 0.0f, 1.0f);
+				liquid->YMin = std::clamp(num("ymin", 0.0f), 0.0f, 240.0f);
+				liquid->YMax = std::max(liquid->YMin + 1.0f, std::clamp(num("ymax", 224.0f), 0.0f, 240.0f));
+				liquid->Amp = std::max(0.0f, num("amplitude", 3.0f));
+				liquid->Wave = std::max(1.0f, num("wavelength", 48.0f));
+				liquid->Speed = num("speed", 0.8f);
+				liquid->Phase = num("phase", 0.0f);
+				liquid->ScrollX = num("scrollx", 0.0f);
+				liquid->TexScale = std::max(0.01f, num("texscale", 1.0f));
+				liquid->Foam = std::clamp(num("foam", 0.6f), 0.0f, 1.0f);
+				liquid->Alpha = std::clamp(num("alpha", 1.0f), 0.0f, 1.0f);
+				liquid->Color = color("color", 0x1E6FB0);
+				liquid->Deep = color("deep", 0x0B2F5C);
+				liquid->Glow = std::clamp(num("glow", 0.0f), 0.0f, 1.0f);
+				liquid->GlowRadius = std::max(1.0f, num("glowradius", 24.0f));
+				liquid->BubbleCount = std::clamp((int)num("bubbles", 0.0f), 0, 64);
+				liquid->BubbleSize = std::max(0.5f, num("bubblesize", 1.5f));
+				liquid->BubbleRise = std::max(0.0f, num("bubblerise", 0.4f));
+				liquid->ZIndex = std::clamp((int)num("prio", 95.0f), 0, 255);
+
+				std::string tex = StringUtilities::Trim(str("texture"));
+				if(!tex.empty()) {
+					std::string filename = NormalizePath(tex);
+					auto itBmp = loadedBitmaps.find(filename);
+					if(itBmp != loadedBitmaps.end()) {
+						liquid->Texture = itBmp->second;
+					} else {
+						auto bitmap = std::make_unique<SnesHdPackBitmapInfo>();
+						bitmap->PngName = filename;
+						VirtualFile pngFile(FolderUtilities::CombinePath(rootFolder, filename));
+						if(pngFile.IsValid()) {
+							pngFile.ReadFile(bitmap->FileData);
+						} else {
+							MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DLiquid> : texture introuvable : " + filename);
+						}
+						liquid->Texture = bitmap.get();
+						loadedBitmaps[filename] = bitmap.get();
+						outData->ImageFileData.push_back(std::move(bitmap));
+					}
+				}
+
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DLiquid> " + view + " enregistre (z " + std::to_string(liquid->ZIndex) + ").");
+				outData->Liquids.push_back(std::move(liquid));
+			}
+		}
+
 		else if(lineContent.substr(0, 12) == "<background>") {
 			bool tileX = false;
 			bool tileY = false;
@@ -3163,7 +3271,7 @@ bool ApplyRomPatch(const std::string& patchPath, std::vector<uint8_t>& romData)
 void SnesHdPackLoader::Clear() {
     //_tileMap.clear();
     //_sheetImages.clear();
-	ActivePack = nullptr; // Cela va automatiquement vider les tuiles, images et conditions de la RAM !
+	std::atomic_store(&ActivePack, std::shared_ptr<SnesHdPackData>()); // Cela va automatiquement vider les tuiles, images et conditions de la RAM !
 	_isLoaded = false;
 }
 //-----------------------------------------------------------------------------------------------------
@@ -3172,7 +3280,8 @@ void SnesHdPackLoader::Clear() {
 /// </summary>
 SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t paletteHash, SnesBpp bpp, bool isLargeTile, bool isSprite, bool isHFlip, bool isVFlip, int x, int y)
 {
-	if(ActivePack == nullptr) return nullptr;
+	auto pack = std::atomic_load(&ActivePack); // snapshot : lu depuis le filtre (thread video)
+	if(pack == nullptr) return nullptr;
 
 	SnesHdTileKey key;
 	key.MemoryHash = memoryHash;
@@ -3195,8 +3304,8 @@ SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t pa
 	condCtx.IsSprite = isSprite;
 
 	// 1. Recherche prioritaire : Palette spécifique explicite
-	auto it = ActivePack->TileByKey.find(key);
-	if(it != ActivePack->TileByKey.end()) {
+	auto it = pack->TileByKey.find(key);
+	if(it != pack->TileByKey.end()) {
 		for(SnesHdPackTileInfo* tile : it->second) {
 			if(tile->MatchesCondition(x, y, &condCtx)) {
 				return tile; // Trouvé et condition validée !
@@ -3207,8 +3316,8 @@ SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t pa
 	// 2. Fallback 1 : Recherche avec la palette Wildcard (0xFFFFFFFF)
 	if(paletteHash != 0xFFFFFFFF) {
 		key.PaletteHash = 0xFFFFFFFF;
-		it = ActivePack->TileByKey.find(key);
-		if(it != ActivePack->TileByKey.end()) {
+		it = pack->TileByKey.find(key);
+		if(it != pack->TileByKey.end()) {
 			for(SnesHdPackTileInfo* tile : it->second) {
 				if(tile->MatchesCondition(x, y, &condCtx)) {
 					return tile;
@@ -3224,8 +3333,8 @@ SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t pa
 
 		// 3a. Version non-flippée avec Palette spécifique
 		key.PaletteHash = paletteHash;
-		it = ActivePack->TileByKey.find(key);
-		if(it != ActivePack->TileByKey.end()) {
+		it = pack->TileByKey.find(key);
+		if(it != pack->TileByKey.end()) {
 			for(SnesHdPackTileInfo* tile : it->second) {
 				if(tile->MatchesCondition(x, y, &condCtx)) {
 					return tile;
@@ -3236,9 +3345,32 @@ SnesHdPackTileInfo* SnesHdPackLoader::GetHdTile(uint64_t memoryHash, uint32_t pa
 		// 3b. Version non-flippée avec Palette Wildcard
 		if(paletteHash != 0xFFFFFFFF) {
 			key.PaletteHash = 0xFFFFFFFF;
-			it = ActivePack->TileByKey.find(key);
-			if(it != ActivePack->TileByKey.end()) {
+			it = pack->TileByKey.find(key);
+			if(it != pack->TileByKey.end()) {
 				for(SnesHdPackTileInfo* tile : it->second) {
+					if(tile->MatchesCondition(x, y, &condCtx)) {
+						return tile;
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Fallback 3 : tuiles "defaultPalette=Y" (toute autre palette, si aucune tuile explicite n'a matche)
+	{
+		SnesHdTileKey dkey;
+		dkey.MemoryHash = memoryHash;
+		dkey.PaletteHash = 0;
+		dkey.Bpp = bpp;
+		dkey.IsLargeTile = isLargeTile;
+		dkey.IsSprite = isSprite;
+		for(int pass = 0; pass < 2; pass++) {
+			if(pass == 1 && !(isHFlip || isVFlip)) break;
+			dkey.IsHFlip = pass == 0 ? isHFlip : false;
+			dkey.IsVFlip = pass == 0 ? isVFlip : false;
+			auto dit = pack->DefaultPaletteTileByKey.find(dkey);
+			if(dit != pack->DefaultPaletteTileByKey.end()) {
+				for(SnesHdPackTileInfo* tile : dit->second) {
 					if(tile->MatchesCondition(x, y, &condCtx)) {
 						return tile;
 					}
@@ -3298,8 +3430,9 @@ void SnesHdPackLoader::ProcessPatchTag(const std::vector<std::string>& tokens, c
 /// </summary>
 SnesHdPackBitmapInfo* SnesHdPackLoader::GetSheet(uint32_t imageIndex)
 {
-	if(ActivePack != nullptr && imageIndex < ActivePack->ImageFileData.size()) {
-		return ActivePack->ImageFileData[imageIndex].get();
+	auto pack = std::atomic_load(&ActivePack);
+	if(pack != nullptr && imageIndex < pack->ImageFileData.size()) {
+		return pack->ImageFileData[imageIndex].get();
 	}
 	return nullptr;
 }

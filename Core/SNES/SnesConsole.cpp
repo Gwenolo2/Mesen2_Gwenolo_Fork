@@ -295,7 +295,7 @@ BaseVideoFilter* SnesConsole::GetVideoFilter(bool getDefaultFilter)
 	}
 
 	bool hdOption = _settings->GetSnesConfig().EnableHdPacks;
-	bool packOk = (SnesHdPackLoader::ActivePack != nullptr);
+	bool packOk = (std::atomic_load(&SnesHdPackLoader::ActivePack) != nullptr);
 
 	MessageManager::Log(std::string("[HD TRACE 4] Option HD : ") + (hdOption ? "OUI" : "NON") + " | Pack Actif : " + (packOk ? "OUI" : "NON"));
 
@@ -652,7 +652,7 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
 	MessageManager::Log("[HD TRACE 0] Starting SNES LoadHdPack");
 
 	// On nettoie l'ancien pack (globale ET console)
-	SnesHdPackLoader::ActivePack = nullptr;
+	std::atomic_store(&SnesHdPackLoader::ActivePack, std::shared_ptr<SnesHdPackData>());
 	this->_hdPackData = nullptr;
 
 	bool optionActivee = _settings->GetSnesConfig().EnableHdPacks;
@@ -669,7 +669,7 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
 			std::shared_ptr<SnesHdPackData> packData;
 			if(SnesHdPackLoader::LoadHdPack(packFile, packData)) {
 
-				SnesHdPackLoader::ActivePack = packData;
+				std::atomic_store(&SnesHdPackLoader::ActivePack, packData);
 				this->_hdPackData = packData;
 
 				// ==========================================================
@@ -718,7 +718,7 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
 	MessageManager::Log("[HD TRACE 0] Starting SNES LoadHdPack");
 
 	// On nettoie l'ancien pack (globale ET console)
-	SnesHdPackLoader::ActivePack = nullptr;
+	std::atomic_store(&SnesHdPackLoader::ActivePack, std::shared_ptr<SnesHdPackData>());
 	this->_hdPackData = nullptr;
 
 	bool optionActivee = true;
@@ -735,7 +735,7 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
 			std::shared_ptr<SnesHdPackData> packData;
 			if(SnesHdPackLoader::LoadHdPack(packFile, packData)) {
 
-				SnesHdPackLoader::ActivePack = packData;
+				std::atomic_store(&SnesHdPackLoader::ActivePack, packData);
 				this->_hdPackData = packData;
 
 				// --- 1. AFFICHAGE DU MESSAGE ---

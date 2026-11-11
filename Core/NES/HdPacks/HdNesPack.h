@@ -111,6 +111,10 @@ private:
 	void ProcessOverlays(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
 	void ProcessScreenLayers(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
 	void ProcessDistortions(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
+	void PrepareLiquids(uint32_t screenWidth);
+	void DrawLiquidBand(int band, uint32_t nesX, uint32_t nesY, uint32_t* block, uint32_t screenWidth);
+	uint32_t BlendLiquidPixel(const NesHdLiquidInfo& liq, float xN, float yN, float surf, uint32_t dst);
+	uint32_t _liquidOffX = 0, _liquidOffY = 0;
 	int32_t GetLayerIndex(uint8_t priority);
 	void OnBeforeApplyFilter();
 

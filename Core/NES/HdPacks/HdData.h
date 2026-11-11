@@ -2,6 +2,7 @@
 #include "pch.h"
 #include "NES/NesConstants.h"
 #include "Shared/MessageManager.h"
+#include "Shared/HdLoadingScreen.h"
 #include "Utilities/PNGHelper.h"
 #include "Utilities/HexUtilities.h"
 #include "Utilities/SimpleLock.h"
@@ -276,6 +277,7 @@ public:
 	int Brightness;
 	bool DefaultTile;
 	bool Blank;
+	bool IsDisabled = false; // <tile>blank / disable : tuile masquee (ni SD ni HD)
 	bool HasTransparentPixels;
 	bool TransparencyRequired;
 	bool IsFullyTransparent;
@@ -332,6 +334,18 @@ public:
 		}
 
 		return rgbBuffer;
+	}
+
+	// <tile>blank / disable : tuile sans image, qui ne dessine rien (ni SD ni HD)
+	void MarkDisabled()
+	{
+		IsDisabled = true;
+		Bitmap = nullptr;
+		_needInit = false;
+		Blank = true;
+		HasTransparentPixels = false;
+		TransparencyRequired = false;
+		IsFullyTransparent = true;
 	}
 
 	void UpdateFlags()
@@ -694,6 +708,46 @@ struct HdIgnore2DRule
 	vector<HdPackCondition*> Conditions;
 };
 
+// <2DLiquid> (vue de profil, phase 1) : liquide sous une surface ondulee. Dimensions en pixels NES.
+struct NesHdLiquidInfo
+{
+	vector<HdPackCondition*> Conditions;
+	bool Active = false;
+	float Level = 176.0f;                 // hauteur de la surface (lignes NES, depuis le haut de l'image)
+	float Depth = 64.0f;                  // profondeur du degrade vers la couleur profonde (lignes NES)
+	float XMin = 0.0f, XMax = 1.0f;       // zone horizontale (fraction de la largeur)
+	float Amp = 3.0f, Wave = 48.0f, Speed = 0.8f, Phase = 0.0f; // houle : amplitude (lignes NES), longueur d'onde (px NES), vitesse (cycles/s), phase (degres)
+	float ScrollX = 0.0f;                 // defilement de la texture (px NES / s)
+	float TexScale = 1.0f;                // taille d'un texel en pixels NES
+	float Foam = 0.6f;                    // eclaircissement de la ligne de surface (0 a 1)
+	float Alpha = 1.0f;                   // opacite du liquide (1 = remplace l'image)
+	uint32_t Color = 0x1E6FB0, Deep = 0x0B2F5C;
+	HdPackBitmapInfo* Texture = nullptr;  // PNG optionnel, repete et defilant
+	float Time = 0.0f;                    // temps d'activite (houle, defilement)
+	bool IsTop = false;                   // view=top : zone rectangulaire ondulee (ymin/ymax) au lieu d'une surface
+	float YMin = 0.0f, YMax = 240.0f;     // view=top : zone verticale (lignes NES depuis le haut de l'image)
+	float Glow = 0.0f;                    // halo au-dessus de la surface (0 a 1)
+	float GlowRadius = 24.0f;             // rayon du halo (lignes NES)
+	int BubbleCount = 0;                  // bulles qui montent et eclatent a la surface (view=side)
+	float BubbleSize = 1.5f;              // rayon des bulles (lignes NES)
+	float BubbleRise = 0.4f;              // montee des bulles (cycles / s)
+	std::vector<uint8_t> BubbleMap;      // alpha des bulles par pixel HD de l'image visible (calcule par image)
+
+	int Priority = 40;                    // bande de priorite (prio=0-49, defaut 40) : meme echelle que <background>
+	int Col0 = 0, Col1 = 0;               // colonnes HD de la zone (calculees par image)
+	vector<float> Surface;               // hauteur de la surface par colonne HD (lignes NES, calculee par image)
+
+	bool MatchesCondition()
+	{
+		for(HdPackCondition* cond : Conditions) {
+			if(!cond->CheckCondition(0, 0, nullptr)) {
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
 struct HdPackData
 {
 private:
@@ -709,6 +763,7 @@ public:
 	vector<unique_ptr<HdPackCondition>> Conditions;
 	vector<unique_ptr<NesHdVideoInfo>> Videos;
 	vector<unique_ptr<NesHdOverlayInfo>> Overlays;
+	vector<unique_ptr<NesHdLiquidInfo>> Liquids; // <2DLiquid>
 
 	// <Ignore2DOverlays> : regles ligne seule, et drapeau si un bloc ou une regle existe dans le pack
 	vector<unique_ptr<HdIgnore2DRule>> Ignore2DRules;
@@ -731,6 +786,7 @@ public:
 	unordered_map<string, shared_ptr<vector<uint8_t>>> OggCache;
 	vector<uint32_t> Palette;
 
+	HdLoadingScreenConfig LoadingScreen; // balise <LoadingScreen>
 	bool HasOverscanConfig = false;
 	OverscanDimensions Overscan;
 
@@ -751,15 +807,27 @@ public:
 	{
 		Timer timer;
 
+		// Ecran de chargement : nombre de fichiers = PNG + OGG distincts
+		uint32_t loadingTotal = (uint32_t)(BackgroundFileData.size() + ImageFileData.size());
+		if(preloadAudio) {
+			unordered_set<string> audioNames;
+			for(auto& bgm : BgmFilesById) audioNames.insert(bgm.second.Filename);
+			for(auto& sfx : SfxFilesById) audioNames.insert(sfx.second);
+			loadingTotal += (uint32_t)audioNames.size();
+		}
+		HdLoadingScreen::Guard loadingScreen(LoadingScreen, loadingTotal);
+
 		// 1. PNG
 		for(auto& bitmap : BackgroundFileData) {
 			bitmap->Init();
+			HdLoadingScreen::Progress(bitmap->PngName);
 			if(_cancelLoad) {
 				return;
 			}
 		}
 		for(auto& bitmap : ImageFileData) {
 			bitmap->Init();
+			HdLoadingScreen::Progress(bitmap->PngName);
 			if(_cancelLoad) {
 				return;
 			}
@@ -786,6 +854,7 @@ public:
 					return;
 				}
 				auto fileData = std::make_shared<vector<uint8_t>>();
+				HdLoadingScreen::Progress(filename);
 				VirtualFile file = filename;
 				if(file.ReadFile(*fileData) && !fileData->empty()) {
 					oggBytes += fileData->size();
