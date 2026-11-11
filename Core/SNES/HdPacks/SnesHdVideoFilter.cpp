@@ -4907,21 +4907,38 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				const float ox = std::cos(dirRad) * ov.FxSpeed * ov.Time, oy = std::sin(dirRad) * ov.FxSpeed * ov.Time; // pixels SNES
 				const float thr = 1.0f - std::clamp(ov.FxCoverage, 0.0f, 1.0f);
 				const int seed = ov.FxSeed, kind = ov.NoiseKind;
+				// Bruit calcule une fois par bloc SNES (S x S pixels HD), en parallele ; chaque pixel HD lit la valeur de son bloc.
+				auto blockM = [&](int bx, int by) -> float {
+					const float px = (float)bx + 0.5f - ox;
+					const float py = (float)by + 0.5f - oy;
+					const float u = px / size, v = py / size;
+					const float n = 0.65f * fxNoise(u, v, seed) + 0.35f * fxNoise(u * 2.03f + 17.0f, v * 2.03f + 9.0f, seed + 1);
+					float m;
+					if(kind == 2) m = std::clamp((n - (thr - 0.1f)) / 0.4f, 0.0f, 1.0f) * 0.85f; // brouillard : bords doux
+					else if(kind == 1) m = std::clamp((n - thr) / 0.08f, 0.0f, 1.0f);            // nuages : bords nets
+					else m = std::clamp((n - thr) / 0.12f, 0.0f, 1.0f);                           // ombres
+					return m * m * (3.0f - 2.0f * m);
+				};
+				const int bx0 = (int)(zx0 / S), bx1 = (int)((zx1 - 1) / S);
+				const int by0 = (int)(zy0 / S), by1 = (int)((zy1 - 1) / S);
+				const int gwz = bx1 - bx0 + 1, ghz = by1 - by0 + 1;
+				std::vector<float> nm((size_t)gwz * ghz, 0.0f);
+				const int nB = std::max(1, std::min(_pool.Size(), ghz));
+				_pool.Run(nB, [&](int tb) {
+					for(int j = tb; j < ghz; j += nB) {
+						for(int i = 0; i < gwz; i++) {
+							nm[(size_t)j * gwz + i] = blockM(bx0 + i, by0 + j);
+						}
+					}
+				});
 				_pool.Run(nT, [&](int tt) {
 					for(uint32_t r = zy0 + (uint32_t)tt; r < zy1; r += (uint32_t)nT) {
 						uint32_t* row = out + (size_t)r * outWidth;
 						const uint8_t* ign = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr;
-						const float py = ((float)r + 0.5f) / S - oy;
+						const size_t rowOff = (size_t)((int)(r / S) - by0) * gwz;
 						for(uint32_t x = zx0; x < zx1; x++) {
 							if(ign && ign[x]) continue;
-							const float px = ((float)x + 0.5f) / S - ox;
-							const float u = px / size, v = py / size;
-							const float n = 0.65f * fxNoise(u, v, seed) + 0.35f * fxNoise(u * 2.03f + 17.0f, v * 2.03f + 9.0f, seed + 1);
-							float m;
-							if(kind == 2) m = std::clamp((n - (thr - 0.1f)) / 0.4f, 0.0f, 1.0f) * 0.85f; // brouillard : bords doux
-							else if(kind == 1) m = std::clamp((n - thr) / 0.08f, 0.0f, 1.0f);            // nuages : bords nets
-							else m = std::clamp((n - thr) / 0.12f, 0.0f, 1.0f);                           // ombres
-							m = m * m * (3.0f - 2.0f * m);
+							const float m = nm[rowOff + (size_t)((int)(x / S) - bx0)];
 							if(m <= 0.0f) continue;
 							row[x] = fxBlend(row[x], col, a * m);
 						}

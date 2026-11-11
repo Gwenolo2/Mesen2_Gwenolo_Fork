@@ -12,6 +12,7 @@ class HdVideoFilter : public BaseVideoFilter
 private:
 	HdPackData* _hdData;
 	unique_ptr<BaseHdNesPack> _hdNesPack = nullptr;
+	vector<uint32_t> _wsBuffer; // tampon 256 px pour le widescreen (voie 1)
 
 public:
 	HdVideoFilter(NesConsole* console, Emulator* emu, HdPackData* hdData);
@@ -20,4 +21,5 @@ public:
 	void ApplyFilter(uint16_t *ppuOutputBuffer) override;
 	FrameInfo GetFrameInfo() override;
 	OverscanDimensions GetOverscan() override;
+	uint32_t GetWidescreenExtraWidth() override;
 };

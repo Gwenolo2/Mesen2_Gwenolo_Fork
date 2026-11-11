@@ -428,7 +428,7 @@ void HdNesPack<scale>::SimulateOverlays(HdScreenInfo* hdScreenInfo)
 			continue;
 		}
 
-		const float fieldW = 256.0f * ov.FieldW;
+		const float fieldW = _simFieldNes * ov.FieldW;
 		const float fieldH = 240.0f * ov.FieldH;
 		if(ov.IsNoise || ov.IsRays || ov.IsAurora || ov.IsDistortion) {
 			ov.Time += dt;
@@ -453,15 +453,26 @@ void HdNesPack<scale>::SimulateOverlays(HdScreenInfo* hdScreenInfo)
 }
 
 template<uint32_t scale>
-void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan)
+void HdNesPack<scale>::ProcessScreenLayersLayout(uint32_t* outputBuffer, uint32_t screenWidth, float originNes, uint32_t oTop, uint32_t oBottom)
 {
 	// Calques plainscreen, ellipse, ombres / nuages / brouillard : passe finale sur l'image visible (comme cote SNES)
-	const int hdHeight = (int)((240 - overscan.Top - overscan.Bottom) * scale);
+	const int hdHeight = (int)((240 - oTop - oBottom) * scale);
 	if(screenWidth == 0 || hdHeight <= 0) {
 		return;
 	}
 	const float fScale = (float)scale;
 	const float visW = (float)screenWidth, visH = (float)hdHeight;
+	// Boucle par lignes : chaque ligne ecrit ses propres pixels ; repartie sur le pool de threads
+	auto forRows = [&](int r0, int r1, auto&& fn) {
+		const int n = std::max(1, std::min(_pool.Size(), r1 - r0));
+		if(n <= 1) {
+			for(int y = r0; y < r1; y++) fn(y);
+			return;
+		}
+		_pool.Run(n, [&](int t) {
+			for(int y = r0 + t; y < r1; y += n) fn(y);
+		});
+	};
 
 	for(auto& ovPtr : _hdData->Overlays) {
 		NesHdOverlayInfo& ov = *ovPtr;
@@ -491,19 +502,19 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 		};
 
 		if(ov.IsPlainScreen) {
-			for(int y = zy0; y < zy1; y++) {
+			forRows(zy0, zy1, [&](int y) {
 				uint32_t* row = outputBuffer + (size_t)y * screenWidth;
 				for(int x = zx0; x < zx1; x++) {
 					blend(row[x], 1.0f);
 				}
-			}
+			});
 		} else if(ov.IsEllipse) {
 			// Centre et rayons : pixels NES du cadre complet, convertis en pixels HD de la sortie
-			const float cx = ((float)ov.FxEllipseX - (float)overscan.Left) * fScale;
-			const float cy = ((float)ov.FxEllipseY - (float)overscan.Top) * fScale;
+			const float cx = ((float)ov.FxEllipseX - originNes) * fScale;
+			const float cy = ((float)ov.FxEllipseY - (float)oTop) * fScale;
 			const float rx = std::max(0.5f, ov.FxRadiusX * fScale);
 			const float ry = std::max(0.5f, ov.FxRadiusY * fScale);
-			for(int y = zy0; y < zy1; y++) {
+			forRows(zy0, zy1, [&](int y) {
 				uint32_t* row = outputBuffer + (size_t)y * screenWidth;
 				const float dy = ((float)y + 0.5f - cy) / ry;
 				for(int x = zx0; x < zx1; x++) {
@@ -514,7 +525,7 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 						blend(row[x], 1.0f);
 					}
 				}
-			}
+			});
 		} else if(ov.IsRays) {
 			// Rayons : faisceaux additifs partant d'un point ; intensite calculee sur une grille de noeuds (pas de 4 px HD), interpolee
 			const int kStep = 4;
@@ -533,7 +544,7 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 			const float invW = 1.0f / std::max(0.01f, ov.RayWidth);
 			const int gx = (zx1 - zx0) / kStep + 2, gy = (zy1 - zy0) / kStep + 2;
 			std::vector<float> node((size_t)gx * gy, 0.0f);
-			for(int j = 0; j < gy; j++) {
+			forRows(0, gy, [&](int j) {
 				const float dy = (float)(zy0 + j * kStep) + 0.5f - sy0;
 				for(int ii = 0; ii < gx; ii++) {
 					const float dx = (float)(zx0 + ii * kStep) + 0.5f - sx0;
@@ -552,9 +563,9 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 					}
 					node[(size_t)j * gx + ii] = I;
 				}
-			}
+			});
 			const float cR = (float)((ov.RayColor >> 16) & 0xFF), cG = (float)((ov.RayColor >> 8) & 0xFF), cB = (float)(ov.RayColor & 0xFF);
-			for(int y = zy0; y < zy1; y++) {
+			forRows(zy0, zy1, [&](int y) {
 				uint32_t* row = outputBuffer + (size_t)y * screenWidth;
 				const float fy = (float)(y - zy0) / (float)kStep;
 				const int jy = (int)fy;
@@ -573,7 +584,7 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 					const float bb = (float)(c & 0xFF) + cB * I;
 					row[x] = 0xFF000000 | ((uint32_t)std::min(255.0f, rr) << 16) | ((uint32_t)std::min(255.0f, gg) << 8) | (uint32_t)std::min(255.0f, bb);
 				}
-			}
+			});
 		} else if(ov.IsAurora) {
 			// Aurore : rideaux additifs (bruit etire en hauteur, derive horizontal), plus lumineux vers le bas de la zone,
 			// bord inferieur ondule ; couleur melangee entre color1 et color2. Grille de noeuds (pas de 4 px HD), interpolee.
@@ -587,7 +598,7 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 			const int seed = ov.FxSeed;
 			const int gx = (zx1 - zx0) / kStep + 2, gy = (zy1 - zy0) / kStep + 2;
 			std::vector<float> nI((size_t)gx * gy, 0.0f), nM((size_t)gx * gy, 0.0f);
-			for(int j = 0; j < gy; j++) {
+			forRows(0, gy, [&](int j) {
 				const float y = (float)(zy0 + j * kStep) + 0.5f;
 				const float py = y / fScale;
 				const float t = (y - (float)zy0) / std::max(1.0f, zh);            // 0 en haut de la zone, 1 en bas
@@ -605,10 +616,10 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 					nI[(size_t)j * gx + ii] = m * prof * ov.Alpha;
 					nM[(size_t)j * gx + ii] = FxNoise(u * 0.5f + 5.0f, v * 0.5f + 1.0f, seed + 3);
 				}
-			}
+			});
 			const float c1R = (float)((ov.AuroraColor1 >> 16) & 0xFF), c1G = (float)((ov.AuroraColor1 >> 8) & 0xFF), c1B = (float)(ov.AuroraColor1 & 0xFF);
 			const float c2R = (float)((ov.AuroraColor2 >> 16) & 0xFF), c2G = (float)((ov.AuroraColor2 >> 8) & 0xFF), c2B = (float)(ov.AuroraColor2 & 0xFF);
-			for(int y = zy0; y < zy1; y++) {
+			forRows(zy0, zy1, [&](int y) {
 				uint32_t* row = outputBuffer + (size_t)y * screenWidth;
 				const float fy = (float)(y - zy0) / (float)kStep;
 				const int jy = (int)fy;
@@ -631,7 +642,7 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 					const float bb = (float)(c & 0xFF) + cB * I;
 					row[x] = 0xFF000000 | ((uint32_t)std::min(255.0f, rr) << 16) | ((uint32_t)std::min(255.0f, gg) << 8) | (uint32_t)std::min(255.0f, bb);
 				}
-			}
+			});
 		} else {
 			// Ombres / nuages / brouillard : bruit a deux octaves qui derive (direction, vitesse), seuille par la couverture
 			const float size = std::max(4.0f, ov.FxSize);
@@ -639,26 +650,65 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 			const float ox = std::cos(dirRad) * ov.FxSpeed * ov.Time, oy = std::sin(dirRad) * ov.FxSpeed * ov.Time; // pixels NES
 			const float thr = 1.0f - std::clamp(ov.FxCoverage, 0.0f, 1.0f);
 			const int seed = ov.FxSeed, kind = ov.NoiseKind;
-			for(int y = zy0; y < zy1; y++) {
+			const int iS = (int)scale;
+			// Valeur du bruit pour un bloc NES (bx, by) : echantillonnee au centre du bloc, lissee, seuillee
+			auto blockM = [&](int bx, int by) -> float {
+				const float px = (float)bx + 0.5f - ox;
+				const float py = (float)by + 0.5f - oy;
+				const float u = px / size, v = py / size;
+				const float n = 0.65f * FxNoise(u, v, seed) + 0.35f * FxNoise(u * 2.03f + 17.0f, v * 2.03f + 9.0f, seed + 1);
+				float m;
+				if(kind == 2) m = std::clamp((n - (thr - 0.1f)) / 0.4f, 0.0f, 1.0f) * 0.85f; // brouillard : bords doux
+				else if(kind == 1) m = std::clamp((n - thr) / 0.08f, 0.0f, 1.0f);            // nuages : bords nets
+				else m = std::clamp((n - thr) / 0.12f, 0.0f, 1.0f);                           // ombres
+				return m * m * (3.0f - 2.0f * m);
+			};
+			// Bruit calcule une fois par bloc NES (scale x scale pixels HD), en parallele par lignes de blocs.
+			// Chaque pixel HD lit la valeur de son bloc : cout divise par scale^2, aspect a la resolution NES.
+			const int bx0 = zx0 / iS, bx1 = (zx1 - 1) / iS;
+			const int by0 = zy0 / iS, by1 = (zy1 - 1) / iS;
+			const int gwz = bx1 - bx0 + 1, ghz = by1 - by0 + 1;
+			std::vector<float> nm((size_t)gwz * ghz, 0.0f);
+			const int nT = std::max(1, std::min(_pool.Size(), ghz));
+			_pool.Run(nT, [&](int t) {
+				for(int j = t; j < ghz; j += nT) {
+					for(int i = 0; i < gwz; i++) {
+						nm[(size_t)j * gwz + i] = blockM(bx0 + i, by0 + j);
+					}
+				}
+			});
+			forRows(zy0, zy1, [&](int y) {
 				uint32_t* row = outputBuffer + (size_t)y * screenWidth;
-				const float py = ((float)y + 0.5f) / fScale - oy;
+				const size_t rowOff = (size_t)(y / iS - by0) * gwz;
 				for(int x = zx0; x < zx1; x++) {
-					const float px = ((float)x + 0.5f) / fScale - ox;
-					const float u = px / size, v = py / size;
-					const float n = 0.65f * FxNoise(u, v, seed) + 0.35f * FxNoise(u * 2.03f + 17.0f, v * 2.03f + 9.0f, seed + 1);
-					float m;
-					if(kind == 2) m = std::clamp((n - (thr - 0.1f)) / 0.4f, 0.0f, 1.0f) * 0.85f; // brouillard : bords doux
-					else if(kind == 1) m = std::clamp((n - thr) / 0.08f, 0.0f, 1.0f);            // nuages : bords nets
-					else m = std::clamp((n - thr) / 0.12f, 0.0f, 1.0f);                           // ombres
-					m = m * m * (3.0f - 2.0f * m);
+					const float m = nm[rowOff + (size_t)(x / iS - bx0)];
 					if(m <= 0.0f) {
 						continue;
 					}
 					blend(row[x], m);
 				}
-			}
+			});
 		}
 	}
+}
+
+// Calques de plein ecran : chemin non widescreen (inchange).
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan)
+{
+	ProcessScreenLayersLayout(outputBuffer, screenWidth, (float)overscan.Left, overscan.Top, overscan.Bottom);
+}
+
+// Widescreen (voie 1) : calques de plein ecran sur toute la largeur elargie (bandes incluses).
+// Zones et rayons en fraction de la largeur elargie ; ellipse en pixels NES du cadre, decales de l'origine elargie.
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessWidescreenScreenLayers(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom)
+{
+	if(out == nullptr || outWidth == 0) {
+		return;
+	}
+	const float ws = (float)padHd / (float)scale;
+	ProcessScreenLayersLayout(out, outWidth, (float)overscanLeft - ws, overscanTop, overscanBottom);
 }
 
 template<uint32_t scale>
@@ -972,25 +1022,98 @@ void HdNesPack<scale>::ProcessDistortions(uint32_t* outputBuffer, uint32_t scree
 	}
 }
 
+// Widescreen (voie 1) : distorsions sur tout le buffer de sortie (bandes incluses), apres DrawWidescreenBands.
+// Zones ZoneX0/ZoneX1 en fraction de la largeur elargie. Le HUD (_ignNes) n'existe que dans le centre : hors centre, pas de masque.
 template<uint32_t scale>
-void HdNesPack<scale>::ProcessOverlays(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan)
+void HdNesPack<scale>::ProcessWidescreenDistortions(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom)
 {
-	const int hdHeight = (int)((240 - overscan.Top - overscan.Bottom) * scale);
+	const int hdHeight = (int)((240 - overscanTop - overscanBottom) * scale);
+	if(out == nullptr || outWidth == 0 || hdHeight <= 0 || _hdData->Overlays.empty()) {
+		return;
+	}
+	const float S = (float)scale;
+	const float twoPi = 2.0f * OverlayPi;
+	const float degToRad = OverlayPi / 180.0f;
+	const int xs = (int)overscanLeft, ys = (int)overscanTop;
+	const int visHdW = (int)outWidth - 2 * (int)padHd;
+	const bool ignOn = _hdData->HasIgnore2D;
+	// Pixel net (HUD) : seulement dans le centre ; hors centre, pas de masque
+	auto ignAt = [&](int x, int r) -> bool {
+		const int rel = x - (int)padHd;
+		if(rel < 0 || rel >= visHdW) return false;
+		return _ignNes[((size_t)(ys + r / (int)scale) << 8) | (size_t)(xs + rel / (int)scale)] != 0;
+	};
+	auto lerpArgb = [](uint32_t c0, uint32_t c1, float f) -> uint32_t {
+		uint32_t res = 0xFF000000;
+		for(int sh = 0; sh <= 16; sh += 8) {
+			const float v0 = (float)((c0 >> sh) & 0xFF), v1 = (float)((c1 >> sh) & 0xFF);
+			res |= ((uint32_t)std::min(255.0f, v0 + (v1 - v0) * f + 0.5f)) << sh;
+		}
+		return res;
+	};
+
+	for(auto& ovPtr : _hdData->Overlays) {
+		const NesHdOverlayInfo& ov = *ovPtr;
+		if(!ov.IsDistortion || !ov.Active) {
+			continue;
+		}
+		const int zy0 = (int)std::clamp(ov.ZoneY0 * (float)hdHeight, 0.0f, (float)hdHeight);
+		const int zy1 = (int)std::clamp(ov.ZoneY1 * (float)hdHeight, 0.0f, (float)hdHeight);
+		const int zx0 = (int)std::clamp(ov.ZoneX0 * (float)outWidth, 0.0f, (float)outWidth);
+		const int zx1 = (int)std::clamp(ov.ZoneX1 * (float)outWidth, 0.0f, (float)outWidth);
+		if(zx0 >= zx1 || zy0 >= zy1) {
+			continue;
+		}
+		const int nT = std::max(1, std::min(_pool.Size(), zy1 - zy0));
+		_pool.Run(nT, [&](int t) {
+			std::vector<uint32_t> rowCopy(outWidth);
+			for(int r = zy0 + t; r < zy1; r += nT) {
+				const float yN = (float)r / S;
+				float dx = ov.DistAmp1 * std::sin(twoPi * (yN / ov.DistWave1 + ov.DistSpeed1 * ov.Time) + ov.DistPhase1 * degToRad)
+				         + ov.DistAmp2 * std::sin(twoPi * (yN / ov.DistWave2 + ov.DistSpeed2 * ov.Time) + ov.DistPhase2 * degToRad);
+				dx *= S * ov.Alpha;
+				uint32_t* row = out + (size_t)r * outWidth;
+				for(int x = zx0; x < zx1; x++) {
+					rowCopy[x] = row[x];
+				}
+				for(int x = zx0; x < zx1; x++) {
+					if(ignOn && ignAt(x, r)) continue;
+					const float sx = std::clamp((float)x - dx, (float)zx0, (float)(zx1 - 1));
+					const int ix = (int)sx;
+					const int ix1 = std::min(ix + 1, zx1 - 1);
+					if(ignOn && (ignAt(ix, r) || ignAt(ix1, r))) continue;
+					row[x] = lerpArgb(rowCopy[ix], rowCopy[ix1], sx - (float)ix);
+				}
+			}
+		});
+	}
+}
+
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessOverlaysLayout(uint32_t* outputBuffer, uint32_t screenWidth, uint32_t padHd, uint32_t centreHd, float originNes, float widthNes, float fieldWNes, uint32_t oLeft, uint32_t oTop, uint32_t oBottom)
+{
+	const int hdHeight = (int)((240 - oTop - oBottom) * scale);
 	if(screenWidth == 0 || hdHeight <= 0) {
 		return;
 	}
 	const int iScale = (int)scale;
-	const int xStart = (int)overscan.Left;
-	const int yStart = (int)overscan.Top;
+	const int xStart = (int)oLeft;
+	const int yStart = (int)oTop;
 	const float fScale = (float)scale;
 
 	// Ecriture d'un pixel HD. src : couleur premultipliee (0-255). Test de z par pixel NES, comme les <video>.
 	auto put = [&](const NesHdOverlayInfo& ov, int sx, int sy, float srcA, float sr, float sg, float sb) {
-		size_t nesIdx = ((size_t)(yStart + sy / iScale) << 8) | (size_t)(xStart + sx / iScale);
-		if(ov.ZIndex < _zNes[nesIdx]) {
+		// Centre : z NES (_zNes). Bandes widescreen : z des bandes (_wsZ). Meme test z dans les deux cas.
+		uint8_t* zPtr;
+		if(sx >= (int)padHd && sx < (int)(padHd + centreHd)) {
+			zPtr = &_zNes[((size_t)(yStart + sy / iScale) << 8) | (size_t)(xStart + (sx - (int)padHd) / iScale)];
+		} else {
+			zPtr = &_wsZ[(size_t)sy * screenWidth + (size_t)sx];
+		}
+		if(ov.ZIndex < *zPtr) {
 			return;
 		}
-		_zNes[nesIdx] = (uint8_t)ov.ZIndex;
+		*zPtr = (uint8_t)ov.ZIndex;
 
 		uint32_t& dst = outputBuffer[(size_t)sy * screenWidth + (size_t)sx];
 		float dr = (float)((dst >> 16) & 0xFF), dg = (float)((dst >> 8) & 0xFF), db = (float)(dst & 0xFF);
@@ -1014,7 +1137,7 @@ void HdNesPack<scale>::ProcessOverlays(uint32_t* outputBuffer, uint32_t screenWi
 			continue;
 		}
 
-		const float fieldW = 256.0f * ov.FieldW;
+		const float fieldW = fieldWNes * ov.FieldW;
 		const float fieldH = 240.0f * ov.FieldH;
 		const bool hasTex = ov.Texture != nullptr && ov.Texture->Width > 0 && ov.Texture->Height > 0 && !ov.Texture->PixelData.empty();
 		const float texW = hasTex ? (float)ov.Texture->Width : 0.0f;
@@ -1045,9 +1168,9 @@ void HdNesPack<scale>::ProcessOverlays(uint32_t* outputBuffer, uint32_t screenWi
 			const float px0 = WrapCoord(p.X - ov.OffsetX, fieldW);
 			const float py0 = WrapCoord(p.Y - ov.OffsetY, fieldH);
 
-			for(int mx = (int)std::ceil((-margin - px0) / fieldW); ; mx++) {
+			for(int mx = (int)std::ceil((originNes - margin - px0) / fieldW); ; mx++) {
 				const float cx = px0 + mx * fieldW;
-				if(cx > 256.0f + margin) {
+				if(cx > originNes + widthNes + margin) {
 					break;
 				}
 				for(int my = (int)std::ceil((-margin - py0) / fieldH); ; my++) {
@@ -1057,7 +1180,7 @@ void HdNesPack<scale>::ProcessOverlays(uint32_t* outputBuffer, uint32_t screenWi
 					}
 
 					// Centre en pixels HD de la sortie
-					const float cxH = (cx - (float)xStart) * fScale;
+					const float cxH = (cx - originNes) * fScale;
 					const float cyH = (cy - (float)yStart) * fScale;
 
 					if(hasTex) {
@@ -1113,6 +1236,25 @@ void HdNesPack<scale>::ProcessOverlays(uint32_t* outputBuffer, uint32_t screenWi
 			}
 		}
 	}
+}
+
+// Overlays : chemin non widescreen (inchange : meme champ 256 px, meme z NES).
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessOverlays(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan)
+{
+	ProcessOverlaysLayout(outputBuffer, screenWidth, 0, screenWidth, (float)overscan.Left, (float)(256 - (int)overscan.Left - (int)overscan.Right), 256.0f, overscan.Left, overscan.Top, overscan.Bottom);
+}
+
+// Widescreen (voie 1) : overlays sur toute la largeur elargie (bandes incluses). Le champ suit la largeur elargie.
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessWidescreenOverlays(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom)
+{
+	if(!_zEnabled || out == nullptr || outWidth == 0) {
+		return;
+	}
+	const float ws = (float)padHd / (float)scale;
+	const float widthNes = (float)outWidth / (float)scale;
+	ProcessOverlaysLayout(out, outWidth, padHd, outWidth - 2 * padHd, (float)overscanLeft - ws, widthNes, widthNes, overscanLeft, overscanTop, overscanBottom);
 }
 
 template<uint32_t scale>
@@ -1674,14 +1816,20 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	lap(2);
 	//Overlays puis videos : appliques apres grayscale/emphasis, sequentiellement
 	if(_zEnabled) {
-		ProcessOverlays(outputBuffer, screenWidth, overscan);
+		if(!_wsMode) {
+			ProcessOverlays(outputBuffer, screenWidth, overscan);
+		}
 	}
 	lap(3);
 	//Ecrans plainscreen / ellipse : apres les overlays, avant les videos
-	ProcessScreenLayers(outputBuffer, screenWidth, overscan);
+	if(!_wsMode) {
+		ProcessScreenLayers(outputBuffer, screenWidth, overscan);
+	}
 	lap(4);
 	//Distorsions : deplacement horizontal des lignes de l'image composee (apres les calques, avant les videos)
-	ProcessDistortions(outputBuffer, screenWidth, overscan);
+	if(!_wsMode) {
+		ProcessDistortions(outputBuffer, screenWidth, overscan);
+	}
 	lap(5);
 	//Videos : appliquees en dernier (apres grayscale/emphasis), sequentiellement
 	if(_zEnabled) {
@@ -1700,6 +1848,241 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 		MessageManager::Log(buf);
 		for(double& ms : _passMs) ms = 0;
 		_passFrames = 0;
+	}
+}
+
+// Widescreen (voie 1) : un pixel de bande HD. aCol / aRow : position HD absolue dans l'image NES (0..255 x 0..239, x scale).
+// Meme calcul que DrawCustomBackground : pixel du PNG = (Left + scroll) * scale + position HD, modulo si tileX / tileY.
+template<uint32_t scale>
+void HdNesPack<scale>::DrawWidescreenBgPixel(const HdBgConfig& cfg, int64_t aCol, int64_t aRow, uint32_t* dst)
+{
+	HdBackgroundInfo& bgInfo = _hdData->BackgroundsByPriority[cfg.BgPriority][cfg.BackgroundIndex];
+	if(!bgInfo.Data) {
+		return;
+	}
+	const int64_t width = (int64_t)bgInfo.Data->Width;
+	const int64_t height = (int64_t)bgInfo.Data->Height;
+	if(width <= 0 || height <= 0) {
+		return;
+	}
+	int64_t px = (int64_t)(bgInfo.Left + cfg.BgScrollX) * scale + aCol;
+	int64_t py = (int64_t)(bgInfo.Top + cfg.BgScrollY) * scale + aRow;
+	if(bgInfo.TileX) {
+		px %= width; if(px < 0) px += width;
+	}
+	if(bgInfo.TileY) {
+		py %= height; if(py < 0) py += height;
+	}
+	if(px < 0 || py < 0 || px >= width || py >= height) {
+		return;
+	}
+	uint32_t c = bgInfo.data()[py * width + px];
+	if(bgInfo.Brightness != 255) {
+		c = AdjustBrightness((uint8_t*)&c, bgInfo.Brightness);
+	}
+	switch(bgInfo.BlendMode) {
+		case HdPackBlendMode::Alpha:
+			if(c >= 0xFF000000) {
+				*dst = c;
+			} else if(c >= 0x01000000) {
+				BlendColors<HdPackBlendMode::Alpha>((uint8_t*)dst, (uint8_t*)&c);
+			}
+			break;
+		case HdPackBlendMode::Add: BlendColors<HdPackBlendMode::Add>((uint8_t*)dst, (uint8_t*)&c); break;
+		case HdPackBlendMode::Subtract: BlendColors<HdPackBlendMode::Subtract>((uint8_t*)dst, (uint8_t*)&c); break;
+	}
+}
+
+// Widescreen (voie 1) : un pixel de liquide dans une bande. xN : position NES relative au bord visible (negative a gauche),
+// yN : position NES relative au haut visible. L'etendue XMin/XMax est une fraction de la largeur elargie (bandes incluses).
+// La surface (side) vient de _wsLiqSurface ; les bulles viennent de _wsBubbleMap (calculees une fois par image).
+// Pas de test z ni de masque HUD dans les bandes (aucune sprite n'y est dessinee).
+template<uint32_t scale>
+void HdNesPack<scale>::DrawWidescreenLiquidPixel(uint32_t hb, uint32_t outWidth, float xN, float yN, size_t pixIdx, uint32_t* dst)
+{
+	const float frac = (float)hb / (float)outWidth;
+	uint32_t px = *dst;
+	for(size_t k = 0; k < _hdData->Liquids.size(); k++) {
+		const NesHdLiquidInfo& liq = *_hdData->Liquids[k];
+		if(!liq.Active || frac < liq.XMin || frac >= liq.XMax) {
+			continue;
+		}
+		if(liq.IsTop) {
+			if(yN >= liq.YMin && yN < liq.YMax) {
+				px = LiquidTopPixel(liq, xN, yN, px);
+			}
+		} else {
+			const float s = _wsLiqSurface[k][hb];
+			if(yN < s) {
+				if(liq.Glow > 0.0f) {
+					const float d = (s - yN) / std::max(1.0f, liq.GlowRadius);
+					if(d < 1.0f) {
+						px = LiquidGlowPixel(liq, d, px);
+					}
+				}
+			} else {
+				px = BlendLiquidPixel(liq, xN, yN, s, px);
+			}
+		}
+		if(k < _wsBubbleMap.size() && !_wsBubbleMap[k].empty()) {
+			const uint8_t a = _wsBubbleMap[k][pixIdx];
+			if(a != 0) {
+				px = LiquidBubblePixel(px, a);
+			}
+		}
+	}
+	*dst = px;
+}
+
+// Widescreen (voie 1) : bulles d'un liquide sur toute la largeur elargie (meme rendu que PrepareLiquids, sans sprite/HUD).
+// Carte indexee comme le buffer de sortie : (ligne visible HD) * outWidth + colonne HD.
+template<uint32_t scale>
+void HdNesPack<scale>::PrepareWidescreenBubbles(uint32_t outWidth, uint32_t padHd, uint32_t visRows)
+{
+	const float S = (float)scale;
+	auto liqHash = [](uint32_t v) -> uint32_t { v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; v ^= v >> 16; return v; };
+	_wsBubbleMap.resize(_hdData->Liquids.size());
+	for(size_t k = 0; k < _hdData->Liquids.size(); k++) {
+		const NesHdLiquidInfo& liq = *_hdData->Liquids[k];
+		std::vector<uint8_t>& map = _wsBubbleMap[k];
+		map.clear();
+		if(!liq.Active || liq.IsTop || liq.BubbleCount <= 0) {
+			continue;
+		}
+		const int lo = std::clamp((int)(liq.XMin * (float)outWidth), 0, (int)outWidth - 1);
+		const int hi = std::clamp((int)(liq.XMax * (float)outWidth), 0, (int)outWidth);
+		if(hi <= lo) {
+			continue;
+		}
+		map.assign((size_t)outWidth * visRows, 0);
+		const std::vector<float>& surf = _wsLiqSurface[k];
+		const float bottom = liq.Level + liq.Depth * 0.7f;
+		const int visHdRows = (int)visRows;
+		for(int b = 0; b < liq.BubbleCount; b++) {
+			const uint32_t h1 = liqHash((uint32_t)b * 2654435761u + 1u);
+			const uint32_t h2 = liqHash(h1 + 0x9E3779B9u);
+			const uint32_t h3 = liqHash(h2 + 0x85EBCA6Bu);
+			const float r1 = (float)(h1 & 0xFFFF) / 65535.0f;
+			const float r2 = (float)(h2 & 0xFFFF) / 65535.0f;
+			const float r3 = (float)(h3 & 0xFFFF) / 65535.0f;
+			const float period = 1.0f / std::max(0.05f, liq.BubbleRise * (0.6f + 0.8f * r2));
+			const float u = liq.Time / period + r3;
+			const float ph = u - std::floor(u);
+			int xh = lo + (int)(r1 * (float)(hi - lo - 1));
+			xh = std::clamp(xh, 0, (int)outWidth - 1);
+			const float sY = surf[xh];
+			float cy, rad, alpha;
+			bool ring;
+			if(ph < 0.9f) {
+				cy = (bottom + (sY - bottom) * (ph / 0.9f)) * S;
+				rad = liq.BubbleSize * S * 0.8f;
+				alpha = 1.0f;
+				ring = false;
+			} else {
+				const float e = (ph - 0.9f) / 0.1f;
+				cy = sY * S;
+				rad = liq.BubbleSize * S * (1.0f + 1.5f * e);
+				alpha = 1.0f - e;
+				ring = true;
+			}
+			const float cx = (float)xh;
+			const int x0 = std::max(0, (int)std::floor(cx - rad - 1.0f)), x1 = std::min((int)outWidth - 1, (int)std::ceil(cx + rad + 1.0f));
+			const int y0 = std::max(0, (int)std::floor(cy - rad - 1.0f)), y1 = std::min(visHdRows - 1, (int)std::ceil(cy + rad + 1.0f));
+			for(int y = y0; y <= y1; y++) {
+				for(int x = x0; x <= x1; x++) {
+					const float d = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+					float v = 0.0f;
+					if(!ring) {
+						if(d <= rad) v = 0.55f * alpha;
+					} else {
+						const float e2 = std::fabs(d - rad);
+						if(e2 <= 1.0f) v = 0.9f * alpha * (1.0f - e2);
+					}
+					if(v <= 0.0f) continue;
+					const uint8_t q = (uint8_t)(v * 255.0f + 0.5f);
+					uint8_t& m = map[(size_t)y * outWidth + x];
+					if(q > m) m = q;
+				}
+			}
+		}
+	}
+	(void)padHd;
+}
+
+// Widescreen (voie 1) : remplit les colonnes HD hors du centre (0..padHd et apres le centre) avec les <background>
+// puis les liquides de chaque ligne. Le centre (256 px NES) doit deja etre copie dans "out" ; les effets du centre ne changent pas.
+// Les lignes sont reparties sur le pool de threads (chaque ligne ecrit ses propres lignes HD).
+template<uint32_t scale>
+void HdNesPack<scale>::DrawWidescreenBands(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom)
+{
+	if(_hdScreenInfo == nullptr || out == nullptr || outWidth == 0) {
+		return;
+	}
+	const uint32_t yStart = overscanTop, yEnd = 240 - overscanBottom;
+
+	// Surface des liquides : une seule evaluation par colonne et par image (pas de sin par pixel)
+	const float twoPi = 2.0f * OverlayPi;
+	const float degToRad = OverlayPi / 180.0f;
+	_wsLiqSurface.resize(_hdData->Liquids.size());
+	for(size_t k = 0; k < _hdData->Liquids.size(); k++) {
+		const NesHdLiquidInfo& liq = *_hdData->Liquids[k];
+		std::vector<float>& surf = _wsLiqSurface[k];
+		surf.assign(outWidth, 0.0f);
+		if(!liq.Active || liq.IsTop) {
+			continue;
+		}
+		for(uint32_t hb = 0; hb < outWidth; hb++) {
+			const float xN = ((float)hb - (float)padHd) / (float)scale;
+			surf[hb] = liq.Level + liq.Amp * std::sin(twoPi * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * degToRad);
+		}
+	}
+
+	_wsZ.assign(_zEnabled ? (size_t)outWidth * (yEnd - yStart) * scale : 0, 0);
+	PrepareWidescreenBubbles(outWidth, padHd, (yEnd - yStart) * scale);
+
+	auto drawRow = [&](uint32_t y) {
+		HdBgConfig lineCfg[50];
+		std::vector<const HdBgConfig*> layers;
+		ComputeLineBgConfig(_hdScreenInfo->ScreenTiles[y << 8], (uint8_t)y, lineCfg);
+		for(int k = 0; k < 50; k++) {
+			if(lineCfg[k].BackgroundIndex >= 0) {
+				layers.push_back(&lineCfg[k]);
+			}
+		}
+		for(uint32_t i = 0; i < scale; i++) {
+			const uint32_t outRow = (y - yStart) * scale + i;
+			const int64_t aRow = (int64_t)y * scale + i;
+			const float yN = (float)(y - yStart) + (float)i / (float)scale;
+			uint32_t* row = out + (size_t)outRow * outWidth;
+			for(uint32_t hb = 0; hb < outWidth; hb++) {
+				if(hb >= padHd && hb < outWidth - padHd) {
+					continue; // centre deja copie : on ne touche qu'aux bandes
+				}
+				const int64_t aCol = (int64_t)hb - (int64_t)padHd + (int64_t)overscanLeft * scale;
+				for(const HdBgConfig* cfg : layers) {
+					const uint32_t before = row[hb];
+					DrawWidescreenBgPixel(*cfg, aCol, aRow, row + hb);
+					if(_zEnabled && row[hb] != before) {
+						_wsZ[(size_t)outRow * outWidth + hb] = (uint8_t)cfg->BgPriority;
+					}
+				}
+				const float xN = ((float)hb - (float)padHd) / (float)scale;
+				DrawWidescreenLiquidPixel(hb, outWidth, xN, yN, (size_t)outRow * outWidth + hb, row + hb);
+			}
+		}
+	};
+
+	int nThreads = _pool.Size();
+	if(nThreads <= 1 || yEnd <= yStart || yEnd - yStart < 16) {
+		for(uint32_t y = yStart; y < yEnd; y++) {
+			drawRow(y);
+		}
+	} else {
+		_pool.Run(nThreads, [&](int t) {
+			for(uint32_t y = yStart + (uint32_t)t; y < yEnd; y += (uint32_t)nThreads) {
+				drawRow(y);
+			}
+		});
 	}
 }
 

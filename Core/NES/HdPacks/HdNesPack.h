@@ -21,6 +21,13 @@ public:
 
 	virtual uint32_t GetScale() = 0;
 
+	// Widescreen (voie 1) : fonds <background> dans les bandes, apres la copie du centre
+	virtual void DrawWidescreenBands(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
+	virtual void ProcessWidescreenDistortions(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
+	virtual void SetWidescreenMode(bool on, float widthNes) = 0;
+	virtual void ProcessWidescreenOverlays(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
+	virtual void ProcessWidescreenScreenLayers(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
+
 	HdScreenInfo* GetScreenInfo() { return _hdScreenInfo; }
 
 	int32_t GetFallbackTile(int32_t tileIndex) 
@@ -112,6 +119,21 @@ private:
 	void ProcessScreenLayers(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
 	void ProcessDistortions(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
 	void PrepareLiquids(uint32_t screenWidth);
+	void DrawWidescreenBands(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
+	void ProcessWidescreenDistortions(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
+	void SetWidescreenMode(bool on, float widthNes) override { _wsMode = on; _simFieldNes = widthNes; }
+	float _simFieldNes = 256.0f; // largeur du champ des particules (NES) : 256, ou largeur elargie en widescreen
+	bool _wsMode = false; // vrai en widescreen : overlays et distorsions sont faits apres les bandes
+	void ProcessWidescreenOverlays(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
+	void ProcessOverlaysLayout(uint32_t* outputBuffer, uint32_t screenWidth, uint32_t padHd, uint32_t centreHd, float originNes, float widthNes, float fieldWNes, uint32_t oLeft, uint32_t oTop, uint32_t oBottom);
+	void ProcessWidescreenScreenLayers(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
+	void ProcessScreenLayersLayout(uint32_t* outputBuffer, uint32_t screenWidth, float originNes, uint32_t oTop, uint32_t oBottom);
+	std::vector<uint8_t> _wsZ; // z des bandes (priorite du dernier fond ecrit), indexe comme le buffer de sortie
+	void DrawWidescreenBgPixel(const HdBgConfig& cfg, int64_t aCol, int64_t aRow, uint32_t* dst);
+	void DrawWidescreenLiquidPixel(uint32_t hb, uint32_t outWidth, float xN, float yN, size_t pixIdx, uint32_t* dst);
+	void PrepareWidescreenBubbles(uint32_t outWidth, uint32_t padHd, uint32_t visRows);
+	std::vector<std::vector<uint8_t>> _wsBubbleMap; // alpha des bulles par liquide, indexe comme le buffer de sortie (ligne visible x outWidth)
+	std::vector<std::vector<float>> _wsLiqSurface; // surface par liquide et par colonne HD élargie, recalculée chaque image
 	void DrawLiquidBand(int band, uint32_t nesX, uint32_t nesY, uint32_t* block, uint32_t screenWidth);
 	uint32_t BlendLiquidPixel(const NesHdLiquidInfo& liq, float xN, float yN, float surf, uint32_t dst);
 	uint32_t _liquidOffX = 0, _liquidOffY = 0;

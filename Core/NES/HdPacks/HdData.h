@@ -1,5 +1,7 @@
 #pragma once
 #include "pch.h"
+#include <atomic>
+#include <thread>
 #include "NES/NesConstants.h"
 #include "Shared/MessageManager.h"
 #include "Shared/HdLoadingScreen.h"
@@ -751,7 +753,7 @@ struct NesHdLiquidInfo
 struct HdPackData
 {
 private:
-	bool _cancelLoad = false;
+	std::atomic<bool> _cancelLoad{false};
 
 public:
 	static constexpr int BgLayerCount = 50;
@@ -789,6 +791,7 @@ public:
 	HdLoadingScreenConfig LoadingScreen; // balise <LoadingScreen>
 	bool HasOverscanConfig = false;
 	OverscanDimensions Overscan;
+	bool Widescreen = false;   // <widescreen>on : sortie elargie a 16/9 (voie 1, fonds fournis par le pack)
 
 	uint32_t Scale = 1;
 	uint32_t Version = 0;
@@ -799,6 +802,40 @@ public:
 
 	HdPackData(const HdPackData&) = delete;
 	HdPackData& operator=(const HdPackData&) = delete;
+
+	// Execute fn(i) pour i dans [0, count) sur plusieurs threads (ou sequentiellement si peu de travail).
+	// Chaque index est traite une seule fois ; l'annulation (_cancelLoad) arrete la distribution.
+	template<typename TFunc>
+	void ParallelForLoad(size_t count, TFunc fn)
+	{
+		if(count == 0) {
+			return;
+		}
+		size_t nThreads = std::clamp<size_t>((size_t)std::thread::hardware_concurrency() - 2, 1, 8);
+		if(nThreads <= 1 || count < 4) {
+			for(size_t i = 0; i < count && !_cancelLoad; i++) {
+				fn(i);
+			}
+			return;
+		}
+		std::atomic<size_t> next{0};
+		std::vector<std::thread> workers;
+		workers.reserve(nThreads);
+		for(size_t t = 0; t < nThreads; t++) {
+			workers.emplace_back([&]() {
+				while(!_cancelLoad) {
+					size_t i = next.fetch_add(1);
+					if(i >= count) {
+						break;
+					}
+					fn(i);
+				}
+			});
+		}
+		for(auto& w : workers) {
+			w.join();
+		}
+	}
 
 	// Prechargement complet du pack, appele AVANT le debut de l'emulation (appel bloquant dans NesConsole::LoadHdPack) :
 	// 1. decodage des PNG (<background> et <img>), 2. decoupage de toutes les tiles HD, 3. lecture des OGG en memoire.
@@ -817,33 +854,35 @@ public:
 		}
 		HdLoadingScreen::Guard loadingScreen(LoadingScreen, loadingTotal);
 
-		// 1. PNG
-		for(auto& bitmap : BackgroundFileData) {
-			bitmap->Init();
-			HdLoadingScreen::Progress(bitmap->PngName);
-			if(_cancelLoad) {
-				return;
-			}
+		// 1. PNG : decodage en parallele (verrou par bitmap ; Progress protege par mutex)
+		Timer pngTimer;
+		const size_t bgCount = BackgroundFileData.size();
+		ParallelForLoad(bgCount + ImageFileData.size(), [&](size_t i) {
+			HdPackBitmapInfo& bitmap = i < bgCount ? *BackgroundFileData[i] : *ImageFileData[i - bgCount];
+			bitmap.Init();
+			HdLoadingScreen::Progress(bitmap.PngName);
+		});
+		if(_cancelLoad) {
+			return;
 		}
-		for(auto& bitmap : ImageFileData) {
-			bitmap->Init();
-			HdLoadingScreen::Progress(bitmap->PngName);
-			if(_cancelLoad) {
-				return;
-			}
-		}
+		const double pngMs = pngTimer.GetElapsedMS();
 
-		// 2. Tiles HD (sinon decoupees a leur premiere apparition a l'ecran)
-		size_t tileCount = 0;
-		for(auto& tile : Tiles) {
-			if(_cancelLoad) {
-				return;
-			}
+		// 2. Tiles HD (sinon decoupees a leur premiere apparition a l'ecran) : apres la barriere des PNG
+		Timer tileTimer;
+		std::atomic<size_t> tileInits{0};
+		ParallelForLoad(Tiles.size(), [&](size_t i) {
+			HdPackTileInfo* tile = Tiles[i].get();
 			if(tile && tile->Bitmap && tile->NeedInit()) {
 				tile->Init();
-				tileCount++;
+				tileInits++;
 			}
+		});
+		if(_cancelLoad) {
+			return;
 		}
+		size_t tileCount = tileInits.load();
+		MessageManager::Log("[HD-LOAD] NES : PNG " + std::to_string((int)pngMs) + " ms, tuiles " + std::to_string((int)tileTimer.GetElapsedMS()) +
+			" ms (" + std::to_string(std::clamp((int)std::thread::hardware_concurrency() - 2, 1, 8)) + " threads)");
 
 		// 3. Audio OGG (<bgm> et <sfx>)
 		size_t oggCount = 0;

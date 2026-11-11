@@ -12,6 +12,9 @@
 #include "Shared/MessageManager.h"
 #include "Shared/HdLoadingScreen.h"
 #include <unordered_set>
+#include <atomic>
+#include <thread>
+#include <chrono>
 #include "Utilities/PNGHelper.h"
 #include "Utilities/SimpleLock.h"
 #include "Shared/SettingTypes.h"
@@ -1639,7 +1642,7 @@ struct SnesHdDisableColorWindowRule
 class SnesHdPackData
 {
 private:
-	bool _cancelLoad = false;
+	std::atomic<bool> _cancelLoad{false};
 public:
 	uint32_t Scale = 1;
 	bool DisableM7TextureDump = false;
@@ -1816,6 +1819,39 @@ public:
 
 	/*------------------------------------------------------------------------------------*/
 
+	// Execute fn(i) pour i dans [0, count) sur plusieurs threads (ou sequentiellement si peu de travail).
+	template<typename TFunc>
+	void ParallelForLoad(size_t count, TFunc fn)
+	{
+		if(count == 0) {
+			return;
+		}
+		size_t nThreads = std::clamp<size_t>((size_t)std::thread::hardware_concurrency() - 2, 1, 8);
+		if(nThreads <= 1 || count < 4) {
+			for(size_t i = 0; i < count && !_cancelLoad; i++) {
+				fn(i);
+			}
+			return;
+		}
+		std::atomic<size_t> next{0};
+		std::vector<std::thread> workers;
+		workers.reserve(nThreads);
+		for(size_t t = 0; t < nThreads; t++) {
+			workers.emplace_back([&]() {
+				while(!_cancelLoad) {
+					size_t i = next.fetch_add(1);
+					if(i >= count) {
+						break;
+					}
+					fn(i);
+				}
+			});
+		}
+		for(auto& w : workers) {
+			w.join();
+		}
+	}
+
 	void LoadAsync()
 	{
 		// Ecran de chargement : nombre de fichiers = PNG + OGG distincts
@@ -1826,18 +1862,36 @@ public:
 			loadingTotal += (uint32_t)audioNames.size();
 		}
 		HdLoadingScreen::Guard loadingScreen(LoadingScreen, loadingTotal);
-		for(auto& bitmap : ImageFileData) {
-			bitmap->Init();
-			HdLoadingScreen::Progress(bitmap->PngName);
-			if(_cancelLoad) return;
-		}
+		// PNG : decodage en parallele (verrou par bitmap ; Progress protege par mutex)
+		auto pngStart = std::chrono::steady_clock::now();
+		ParallelForLoad(ImageFileData.size(), [&](size_t i) {
+			SnesHdPackBitmapInfo& bitmap = *ImageFileData[i];
+			bitmap.Init();
+			HdLoadingScreen::Progress(bitmap.PngName);
+		});
+		if(_cancelLoad) return;
+		double pngMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pngStart).count();
 
-		for(auto& entry : TileByKey) {
-			for(auto* tile : entry.second) {
-				tile->Init(Scale);
-				if(_cancelLoad) return;
+		// Tuiles : liste dedupliquee (une tuile peut etre referencee sous plusieurs cles), apres la barriere des PNG
+		auto tileStart = std::chrono::steady_clock::now();
+		std::vector<SnesHdPackTileInfo*> uniqueTiles;
+		{
+			std::unordered_set<SnesHdPackTileInfo*> seen;
+			for(auto& entry : TileByKey) {
+				for(auto* tile : entry.second) {
+					if(tile && seen.insert(tile).second) {
+						uniqueTiles.push_back(tile);
+					}
+				}
 			}
 		}
+		ParallelForLoad(uniqueTiles.size(), [&](size_t i) {
+			uniqueTiles[i]->Init(Scale);
+		});
+		if(_cancelLoad) return;
+		double tileMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tileStart).count();
+		MessageManager::Log("[HD-LOAD] SNES : PNG " + std::to_string((int)pngMs) + " ms, tuiles " + std::to_string((int)tileMs) +
+			" ms (" + std::to_string(std::clamp((int)std::thread::hardware_concurrency() - 2, 1, 8)) + " threads)");
 
 		// Mode 7 : mipmaps des cartes <m7img> et des tiles <m7tiles>.
 		// (sinon construits a la premiere image Mode 7 affichee -> saccade de plusieurs secondes en scale 8/16)

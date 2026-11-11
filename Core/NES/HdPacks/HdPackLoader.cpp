@@ -370,6 +370,13 @@ bool HdPackLoader::LoadPack()
 					logError("Scale ratios higher than 10 are not supported.");
 					return false;
 				}
+			} else if(lineContent.substr(0, 12) == "<widescreen>") {
+				tokens = StringUtilities::Split(lineContent.substr(12), ',');
+				string wsOpt = tokens.size() > 0 ? StringUtilities::ToLower(StringUtilities::Trim(tokens[0])) : string();
+				_data->Widescreen = (wsOpt == "on");
+				if(wsOpt != "on" && wsOpt != "off") {
+					logError("<widescreen> : valeur inconnue (on ou off) : " + wsOpt);
+				}
 			} else if(lineContent.substr(0, 10) == "<overscan>") {
 				tokens = StringUtilities::Split(lineContent.substr(10), ',');
 				ProcessOverscanTag(tokens);
