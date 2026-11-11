@@ -2199,17 +2199,87 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		const int texW = (int)tex->Width, texH = (int)tex->Height;
 		const float S = (float)scale;
 		const uint8_t z = (uint8_t)std::clamp(pp.ZIndex, 0, 255);
+		if(pp.Wall) {
+			// paroi verticale (side=left|right) : la profondeur va vers le bord de l'ecran, la hauteur est centree sur cy
+			const bool right = pp.WallRight;
+			const float xv = pp.HorizonSet ? pp.Horizon : (float)outWidth / (2.0f * S); // colonne de fuite (lignes SNES)
+			const float cyN = pp.CySet ? pp.Cy : (float)hdHeight / (2.0f * S);          // centre vertical (lignes SNES)
+			const float limitX = right ? xv + pp.LimitOffset : xv - pp.LimitOffset;     // premiere colonne dessinee
+			const float farX = right ? (float)outWidth / S : 0.0f;                      // bord lointain de l'ecran
+			float sScale = 1.0f;
+			if(pp.Repeat > 0.0f) {
+				const float kFar = pp.Depth / std::max(1.0f, std::fabs(farX - xv));
+				const float kLimit = pp.Depth / std::max(1.0f, std::fabs(limitX - xv));
+				if(kLimit > kFar) sScale = pp.Repeat * (float)texW / (kLimit - kFar);
+			}
+			const int line = std::clamp((int)cyN, 0, 239);
+			const bool anchoredW = pp.AnchorLayer >= 1 && pp.OffX.size() == 240;
+			const float offD = anchoredW ? pp.OffX[line] : 0.0f; // defilement le long du mur (texels)
+			const float offL = anchoredW ? pp.OffY[line] : 0.0f; // defilement vertical (texels)
+			const float fogR = (float)((pp.Fog >> 16) & 0xFF);
+			const float fogG = (float)((pp.Fog >> 8) & 0xFF);
+			const float fogB = (float)(pp.Fog & 0xFF);
+			auto packW = [](float r, float g, float b) -> uint32_t {
+				const uint32_t R = (uint32_t)std::clamp(r + 0.5f, 0.0f, 255.0f);
+				const uint32_t G = (uint32_t)std::clamp(g + 0.5f, 0.0f, 255.0f);
+				const uint32_t B = (uint32_t)std::clamp(b + 0.5f, 0.0f, 255.0f);
+				return 0xFF000000u | (R << 16) | (G << 8) | B;
+			};
+			uint32_t ppDrawnBand = 0;
+			for(uint32_t r = bandY0; r < bandY1; r++) {
+				const float yN = ((float)r + 0.5f) / S;
+				const float lat = yN - cyN;
+				uint32_t* row = out + (size_t)r * outWidth;
+				for(uint32_t x = 0; x < outWidth; x++) {
+					if(z < _zBuffer[(size_t)r * outWidth + x]) continue;
+					const float xN = ((float)x + 0.5f) / S;
+					if(right ? xN < limitX : xN > limitX) continue;
+					const float dx = right ? xN - xv : xv - xN; // distance a la colonne de fuite
+					if(dx <= 0.0f) continue;
+					const float kL = pp.Depth / dx;   // facteur de profondeur : hauteur
+					const float kD = kL * sScale;     // profondeur : x echelle repeat (seule la profondeur est repetee)
+					int tx = (int)std::floor(kD + offD);
+					if(pp.TileX) { tx %= texW; if(tx < 0) tx += texW; }
+					else if(tx < 0 || tx >= texW) continue;
+					int ty = (int)std::floor(lat * kL + offL);
+					if(pp.TileY) { ty %= texH; if(ty < 0) ty += texH; }
+					else if(ty < 0 || ty >= texH) continue;
+					const uint32_t c = tex->PixelData[(size_t)ty * texW + tx];
+					const float a = ((float)((c >> 24) & 0xFF) / 255.0f) * pp.Alpha;
+					if(a <= 0.0f) continue;
+					float fogF = 0.0f;
+					if(pp.FogRange > 0.0f) fogF = std::clamp(1.0f - std::fabs(xN - limitX) / pp.FogRange, 0.0f, 1.0f);
+					float sr = (float)((c >> 16) & 0xFF), sg = (float)((c >> 8) & 0xFF), sb = (float)(c & 0xFF);
+					if(fogF > 0.0f) {
+						sr += (fogR - sr) * fogF;
+						sg += (fogG - sg) * fogF;
+						sb += (fogB - sb) * fogF;
+					}
+					const uint32_t dst = row[x];
+					const float dr = (float)((dst >> 16) & 0xFF), dg = (float)((dst >> 8) & 0xFF), db = (float)(dst & 0xFF);
+					row[x] = packW(dr + (sr - dr) * a, dg + (sg - dg) * a, db + (sb - db) * a);
+					ppDrawnBand++;
+					if(a >= 0.5f) _zBuffer[(size_t)r * outWidth + x] = z;
+				}
+			}
+			SnesHdPerspectiveDrawn += ppDrawnBand;
+			return;
+		}
 		const float cx = (float)outWidth / (2.0f * S);     // centre horizontal (lignes SNES)
-		const float limitY = pp.Horizon + pp.LimitOffset;  // premiere ligne dessinee (lignes SNES)
-		const uint32_t r0 = std::max(bandY0, (uint32_t)std::max(0.0f, std::ceil(limitY * S)));
-		const uint32_t r1 = bandY1;
+		const bool ceil = pp.Ceiling;
+		// sol : limite = Horizon + N, la profondeur croit vers le bas. plafond : limite = Horizon - N, la profondeur croit vers le haut
+		const float limitY = ceil ? pp.Horizon - pp.LimitOffset : pp.Horizon + pp.LimitOffset;  // derniere ligne (plafond) ou premiere ligne (sol), en lignes SNES
+		const float farY = ceil ? 0.0f : (float)hdHeight / S; // bord lointain de l'ecran, en lignes SNES
+		const uint32_t limitRow = (uint32_t)std::max(0.0f, std::ceil(limitY * S));
+		const uint32_t r0 = ceil ? bandY0 : std::max(bandY0, limitRow);
+		const uint32_t r1 = ceil ? std::min(bandY1, limitRow) : bandY1;
 		if(r0 >= r1) return;
 		// repeat=N : echelle commune (carres conserves) pour que N repetitions tiennent entre la limite et le bas de l'ecran
 		float sScale = 1.0f;
 		if(pp.Repeat > 0.0f) {
-			const float kBottom = pp.Depth / std::max(1.0f, (float)hdHeight / S - pp.Horizon);
-			const float kLimit = pp.Depth / std::max(1.0f, limitY - pp.Horizon);
-			if(kLimit > kBottom) sScale = pp.Repeat * (float)texH / (kLimit - kBottom);
+			const float kFar = pp.Depth / std::max(1.0f, ceil ? pp.Horizon - farY : farY - pp.Horizon);
+			const float kLimit = pp.Depth / std::max(1.0f, std::fabs(limitY - pp.Horizon));
+			if(kLimit > kFar) sScale = pp.Repeat * (float)texH / (kLimit - kFar);
 		}
 		const float fogR = (float)((pp.Fog >> 16) & 0xFF);
 		const float fogG = (float)((pp.Fog >> 8) & 0xFF);
@@ -2223,8 +2293,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		};
 		for(uint32_t r = r0; r < r1; r++) {
 			const float yN = ((float)r + 0.5f) / S;   // centre de la ligne HD, en lignes SNES
-			if(yN < limitY) continue;
-			const float dy = yN - pp.Horizon;
+			if(ceil ? yN > limitY : yN < limitY) continue;
+			const float dy = ceil ? pp.Horizon - yN : yN - pp.Horizon;
 			if(dy <= 0.0f) continue;
 			const float kX = pp.Depth / dy;           // facteur de profondeur (1 a la distance Depth) : largeur
 			const float k = kX * sScale;              // profondeur : x echelle repeat (seule la hauteur est repetee)
@@ -2234,7 +2304,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			const float offV = anchored ? pp.OffY[line] : 0.0f; // defilement vertical (texels)
 			// Fondu : couleur du brouillard a limit, texture pure a limit + FogRange
 			float fogF = 0.0f;
-			if(pp.FogRange > 0.0f) fogF = std::clamp(1.0f - (yN - limitY) / pp.FogRange, 0.0f, 1.0f);
+			if(pp.FogRange > 0.0f) fogF = std::clamp(1.0f - std::fabs(yN - limitY) / pp.FogRange, 0.0f, 1.0f);
 			int ty = (int)std::floor(k + offV);
 			if(pp.TileY) { ty %= texH; if(ty < 0) ty += texH; }
 			else if(ty < 0 || ty >= texH) continue;

@@ -692,6 +692,10 @@ struct SnesHdPerspectiveInfo
 {
 	std::vector<SnesHdPackCondition*> Conditions;
 	bool Active = false;
+	bool Ceiling = false;                 // mode=ceiling : plafond (lignes au-dessus de l'horizon)
+	bool Wall = false, WallRight = false; // mode=wall : paroi verticale, a gauche (side=left) ou a droite (side=right)
+	bool HorizonSet = false, CySet = false; // horizon= et cy= explicites (sinon centre de l'ecran)
+	float Cy = 112.0f;                    // cy= : centre vertical de la paroi (lignes SNES)
 	float Horizon = 112.0f;               // ligne SNES de l'horizon
 	float Depth = 64.0f;                  // distance (lignes SNES) sous l'horizon ou la texture est a 1:1
 	float Repeat = 0.0f;                  // repeat=N : nombre de repetitions de la texture entre la limite et le bas de l'ecran (0 = 1:1 a Depth)

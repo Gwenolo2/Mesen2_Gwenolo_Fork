@@ -357,6 +357,9 @@ bool HdPackLoader::LoadPack()
 			} else if(lineContent.substr(0, 10) == "<2DLiquid>") {
 				tokens = StringUtilities::Split(lineContent.substr(10), ',');
 				ProcessLiquidTag(tokens, conditions);
+			} else if(lineContent.substr(0, 15) == "<2DPerspective>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				ProcessPerspectiveTag(tokens, conditions);
 			} else if(lineContent.substr(0, 5) == "<ver>") {
 				_data->Version = stoi(lineContent.substr(5));
 				if(_data->Version > BaseHdNesPack::CurrentVersion) {
@@ -1778,6 +1781,96 @@ void HdPackLoader::InitializeHdPack()
 			_data->TileByKey[tileInfo->GetKey(true)].push_back(tileInfo.get());
 		}
 	}
+}
+
+// <2DPerspective> (NES) : sol incline. Syntaxe : [cond]<2DPerspective>fichier.png,Z,tileX,tileY,alpha,speedX,speedY,horizon=..,depth=..,repeat=..,limit=+N,fog=RRGGBB,fogrange=N
+void HdPackLoader::ProcessPerspectiveTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	vector<string> pos;
+	std::unordered_map<string, string> cfg;
+	for(const string& raw : tokens) {
+		string tok = StringUtilities::Trim(raw);
+		if(tok.empty()) continue;
+		size_t eq = tok.find('=');
+		if(eq == string::npos) {
+			pos.push_back(tok);
+		} else {
+			cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+		}
+	}
+	auto str = [&](const char* k) -> string { auto it = cfg.find(k); return it == cfg.end() ? string() : it->second; };
+	auto numOf = [&](const string& v, const char* what, float def) -> float {
+		if(v.empty()) return def;
+		try { return std::stof(v); } catch(...) { logError("2DPerspective : valeur invalide pour " + string(what) + " : " + v); return def; }
+	};
+	auto posNum = [&](size_t i, float def) -> float { return numOf(i < pos.size() ? pos[i] : string(), "champ positionnel", def); };
+	auto cfgNum = [&](const char* k, float def) -> float { return numOf(str(k), k, def); };
+
+	if(pos.empty()) {
+		logError("2DPerspective : fichier PNG manquant.");
+		return;
+	}
+	string mode = StringUtilities::ToLower(str("mode"));
+	string side = StringUtilities::ToLower(str("side"));
+	if(mode == "wall" && side != "left" && side != "right") {
+		logError("2DPerspective : mode=wall demande side=left ou side=right, ignore.");
+		return;
+	}
+	if(!mode.empty() && mode != "floor" && mode != "ceiling" && mode != "wall") {
+		logError("2DPerspective : mode=" + mode + " pas encore gere (floor, ceiling et wall).");
+		return;
+	}
+
+	unique_ptr<NesHdPerspectiveInfo> pp(new NesHdPerspectiveInfo());
+	pp->Ceiling = (mode == "ceiling");
+	pp->Wall = (mode == "wall");
+	pp->WallRight = (side == "right");
+	pp->Conditions = conditions;
+	pp->Priority = std::clamp((int)posNum(1, 39.0f), 0, 49);
+	pp->TileX = posNum(2, 1.0f) != 0.0f;
+	pp->TileY = posNum(3, 1.0f) != 0.0f;
+	pp->Alpha = std::clamp(posNum(4, 1.0f), 0.0f, 1.0f);
+	pp->SpeedX = cfgNum("speedx", posNum(5, 0.0f));
+	pp->SpeedY = cfgNum("speedy", posNum(6, 0.0f));
+	pp->HorizonSet = !str("horizon").empty();
+	pp->Horizon = pp->Wall ? std::max(0.0f, cfgNum("horizon", 0.0f)) : std::clamp(cfgNum("horizon", 120.0f), 0.0f, 239.0f);
+	pp->CySet = !str("cy").empty();
+	pp->Cy = cfgNum("cy", 120.0f);
+	pp->Depth = std::max(1.0f, cfgNum("depth", 64.0f));
+	pp->Repeat = std::max(0.0f, cfgNum("repeat", 0.0f));
+	string lim = str("limit");
+	if(lim.empty() || lim[0] == '+') {
+		pp->LimitOffset = std::max(0.0f, cfgNum("limit", 0.0f));
+	} else {
+		logError("2DPerspective : limit doit etre ecrit +N (relatif a l'horizon), ignore : " + lim);
+	}
+	pp->FogRange = std::max(0.0f, cfgNum("fogrange", 0.0f));
+	string fog = StringUtilities::Trim(str("fog"));
+	if(!fog.empty()) {
+		if(fog[0] == '#') fog = fog.substr(1);
+		try { pp->Fog = (uint32_t)std::stoul(fog, nullptr, 16) & 0xFFFFFF; } catch(...) { logError("2DPerspective : fog invalide : " + fog); }
+	}
+
+	string tex = StringUtilities::Trim(pos[0]);
+	HdPackBitmapInfo* found = nullptr;
+	for(auto& bitmap : _data->ImageFileData) {
+		if(bitmap->PngName == tex) {
+			found = bitmap.get();
+			break;
+		}
+	}
+	if(found == nullptr) {
+		_data->ImageFileData.push_back(unique_ptr<HdPackBitmapInfo>(new HdPackBitmapInfo()));
+		HdPackBitmapInfo* bitmapInfo = _data->ImageFileData.back().get();
+		bitmapInfo->PngName = tex;
+		if(!LoadFile(tex, bitmapInfo->FileData)) {
+			logError("2DPerspective texture not found: " + tex);
+		}
+		found = bitmapInfo;
+	}
+	pp->Texture = found;
+
+	_data->Perspectives.push_back(std::move(pp));
 }
 
 // <2DLiquid> : liquide 2D, vue de profil (phase 1). Syntaxe : [cond]<2DLiquid>cle=valeur,...

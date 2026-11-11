@@ -958,6 +958,217 @@ uint32_t HdNesPack<scale>::BlendLiquidPixel(const NesHdLiquidInfo& liq, float xN
 	return 0xFF000000u | (R << 16) | (G << 8) | B;
 }
 
+// <2DPerspective> (NES) : sol incline, ancre sur le scroll PPU par ligne. Passe finale (apres les distorsions, avant les videos).
+// out : buffer de sortie (stride = largeur HD), padHd / centreHd : zone NES en widescreen (bandes hors zone).
+// Centre : z NES (_zNes). Bandes widescreen : z des bandes (_wsZ). Meme test z que les overlays.
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessPerspectivesLayout(uint32_t* out, uint32_t stride, uint32_t padHd, uint32_t centreHd, float originNes, uint32_t hdHeight, float topNes, float bottomNes, bool ws)
+{
+	if(out == nullptr || stride == 0 || hdHeight == 0) {
+		return;
+	}
+	const float S = (float)scale;
+	const float cx = 128.0f; // centre horizontal (pixels NES absolus, identique en 4:3 et en widescreen)
+	const int hdRows = (int)hdHeight;
+
+	for(auto& ppPtr : _hdData->Perspectives) {
+		NesHdPerspectiveInfo& pp = *ppPtr;
+
+		// Ancrage par ligne (meme regle que <2DOverlay> : saut > 64 ignore). Continue meme quand l'effet est inactif.
+		if(pp.OffX.size() != 240) {
+			pp.OffX.assign(240, 0.0f); pp.OffY.assign(240, 0.0f);
+			pp.LastX.assign(240, 0); pp.LastY.assign(240, 0);
+			pp.HaveScroll = false;
+		}
+		for(int L = 0; L < 240; L++) {
+			const int sx = _lineScrollX[L], sy = _lineScrollY[L];
+			if(pp.HaveScroll) {
+				const int dx = ((sx - pp.LastX[L]) % 512 + 512 + 256) % 512 - 256; // scroll X sur 9 bits
+				const int dy = ((sy - pp.LastY[L]) % 480 + 480 + 240) % 480 - 240; // scroll Y sur 480 lignes
+				if(std::abs(dx) <= 64) pp.OffX[L] += (float)dx * pp.SpeedX;
+				if(std::abs(dy) <= 64) pp.OffY[L] += (float)dy * pp.SpeedY;
+				pp.OffX[L] = std::fmod(pp.OffX[L], 512.0f);
+				pp.OffY[L] = std::fmod(pp.OffY[L], 480.0f);
+			}
+			pp.LastX[L] = sx;
+			pp.LastY[L] = sy;
+		}
+		pp.HaveScroll = true;
+
+		pp.Active = pp.MatchesCondition();
+		if(!pp.Active) {
+			continue;
+		}
+		const HdPackBitmapInfo* tex = pp.Texture;
+		if(!tex || tex->Width == 0 || tex->Height == 0 || tex->PixelData.size() < (size_t)tex->Width * tex->Height) {
+			continue;
+		}
+		const int texW = (int)tex->Width, texH = (int)tex->Height;
+		if(pp.Wall) {
+			// paroi verticale (side=left|right) : profondeur horizontale vers le bord, hauteur centree sur cy
+			const bool right = pp.WallRight;
+			const float xv = pp.HorizonSet ? pp.Horizon : cx;                  // colonne de fuite (NES absolue)
+			const float cyN = pp.CySet ? pp.Cy : (topNes + bottomNes) * 0.5f;   // centre vertical (NES absolue)
+			const float limitX = right ? xv + pp.LimitOffset : xv - pp.LimitOffset;
+			const float farX = right ? originNes + (float)stride / S : originNes; // bord lointain de l'ecran
+			float sScale = 1.0f;
+			if(pp.Repeat > 0.0f) {
+				const float kFar = pp.Depth / std::max(1.0f, std::fabs(farX - xv));
+				const float kLimit = pp.Depth / std::max(1.0f, std::fabs(limitX - xv));
+				if(kLimit > kFar) sScale = pp.Repeat * (float)texW / (kLimit - kFar);
+			}
+			const int cyLine = std::clamp((int)cyN, 0, 239);
+			const float offD = pp.OffX[cyLine]; // defilement le long du mur (texels)
+			const float offL = pp.OffY[cyLine]; // defilement vertical (texels)
+			const float fogR = (float)((pp.Fog >> 16) & 0xFF);
+			const float fogG = (float)((pp.Fog >> 8) & 0xFF);
+			const float fogB = (float)(pp.Fog & 0xFF);
+			auto packW = [](float r, float g, float b) -> uint32_t {
+				const uint32_t R = (uint32_t)std::clamp(r + 0.5f, 0.0f, 255.0f);
+				const uint32_t G = (uint32_t)std::clamp(g + 0.5f, 0.0f, 255.0f);
+				const uint32_t B = (uint32_t)std::clamp(b + 0.5f, 0.0f, 255.0f);
+				return 0xFF000000u | (R << 16) | (G << 8) | B;
+			};
+			const int nT = std::max(1, std::min(_pool.Size(), hdRows));
+			const int bandRows = (hdRows + nT - 1) / nT;
+			_pool.Run(nT, [&](int t) {
+				const int r0 = t * bandRows;
+				const int r1 = std::min(hdRows, r0 + bandRows);
+				for(int hy = r0; hy < r1; hy++) {
+					const float yN = topNes + ((float)hy + 0.5f) / S; // ligne NES absolue
+					const float lat = yN - cyN;
+					const int rowLine = std::clamp((int)yN, 0, 239);
+					uint32_t* row = out + (size_t)hy * stride;
+					for(uint32_t hx = 0; hx < stride; hx++) {
+						const float xN = originNes + ((float)hx + 0.5f) / S;
+						const int nx = std::clamp((int)xN, 0, 255);
+						const bool inCentre = !ws || (hx >= padHd && hx < padHd + centreHd);
+						uint8_t& zRef = inCentre ? _zNes[((size_t)rowLine << 8) | (size_t)nx] : _wsZ[(size_t)hy * stride + hx];
+						if(pp.Priority < zRef) continue; // z-test : cache par un fond de priorite superieure
+						if(right ? xN < limitX : xN > limitX) continue;
+						const float dx = right ? xN - xv : xv - xN; // distance a la colonne de fuite
+						if(dx <= 0.0f) continue;
+						const float kL = pp.Depth / dx;  // facteur de profondeur : hauteur
+						const float kD = kL * sScale;    // profondeur : x echelle repeat
+						int tx = (int)std::floor(kD + offD);
+						if(pp.TileX) { tx %= texW; if(tx < 0) tx += texW; }
+						else if(tx < 0 || tx >= texW) continue;
+						int ty = (int)std::floor(lat * kL + offL);
+						if(pp.TileY) { ty %= texH; if(ty < 0) ty += texH; }
+						else if(ty < 0 || ty >= texH) continue;
+						const uint32_t c = tex->PixelData[(size_t)ty * texW + tx];
+						const float a = ((float)((c >> 24) & 0xFF) / 255.0f) * pp.Alpha;
+						if(a <= 0.0f) continue;
+						float fogF = 0.0f;
+						if(pp.FogRange > 0.0f) fogF = std::clamp(1.0f - std::fabs(xN - limitX) / pp.FogRange, 0.0f, 1.0f);
+						float sr = (float)((c >> 16) & 0xFF), sg = (float)((c >> 8) & 0xFF), sb = (float)(c & 0xFF);
+						if(fogF > 0.0f) {
+							sr += (fogR - sr) * fogF;
+							sg += (fogG - sg) * fogF;
+							sb += (fogB - sb) * fogF;
+						}
+						const uint32_t dst = row[hx];
+						const float dr = (float)((dst >> 16) & 0xFF), dg = (float)((dst >> 8) & 0xFF), db = (float)(dst & 0xFF);
+						row[hx] = packW(dr + (sr - dr) * a, dg + (sg - dg) * a, db + (sb - db) * a);
+						if(a >= 0.5f) zRef = (uint8_t)pp.Priority;
+					}
+				}
+			});
+			continue;
+		}
+
+		const bool ceil = pp.Ceiling;
+		// sol : limite = Horizon + N, la profondeur croit vers le bas. plafond : limite = Horizon - N, la profondeur croit vers le haut
+		const float limitY = ceil ? pp.Horizon - pp.LimitOffset : pp.Horizon + pp.LimitOffset;
+		const float farNes = ceil ? topNes : bottomNes; // bord lointain de l'ecran, en lignes NES
+
+		// repeat=N : echelle en profondeur seulement (la largeur garde la echelle de depth)
+		float sScale = 1.0f;
+		if(pp.Repeat > 0.0f) {
+			const float kFar = pp.Depth / std::max(1.0f, ceil ? pp.Horizon - farNes : farNes - pp.Horizon);
+			const float kLimit = pp.Depth / std::max(1.0f, std::fabs(limitY - pp.Horizon));
+			if(kLimit > kFar) sScale = pp.Repeat * (float)texH / (kLimit - kFar);
+		}
+
+		const float fogR = (float)((pp.Fog >> 16) & 0xFF);
+		const float fogG = (float)((pp.Fog >> 8) & 0xFF);
+		const float fogB = (float)(pp.Fog & 0xFF);
+		auto pack = [](float r, float g, float b) -> uint32_t {
+			const uint32_t R = (uint32_t)std::clamp(r + 0.5f, 0.0f, 255.0f);
+			const uint32_t G = (uint32_t)std::clamp(g + 0.5f, 0.0f, 255.0f);
+			const uint32_t B = (uint32_t)std::clamp(b + 0.5f, 0.0f, 255.0f);
+			return 0xFF000000u | (R << 16) | (G << 8) | B;
+		};
+
+		const int nT = std::max(1, std::min(_pool.Size(), hdRows));
+		const int bandRows = (hdRows + nT - 1) / nT;
+		_pool.Run(nT, [&](int t) {
+			const int r0 = t * bandRows;
+			const int r1 = std::min(hdRows, r0 + bandRows);
+			for(int hy = r0; hy < r1; hy++) {
+				const float yN = topNes + ((float)hy + 0.5f) / S; // ligne NES absolue
+				if(ceil ? yN > limitY : yN < limitY) continue;
+				const float dy = ceil ? pp.Horizon - yN : yN - pp.Horizon;
+				if(dy <= 0.0f) continue;
+				const int line = std::clamp((int)yN, 0, 239);
+				const float kX = pp.Depth / dy;
+				const float k = kX * sScale;
+				const float offU = pp.OffX[line];
+				const float offV = pp.OffY[line];
+				float fogF = 0.0f;
+				if(pp.FogRange > 0.0f) fogF = std::clamp(1.0f - std::fabs(yN - limitY) / pp.FogRange, 0.0f, 1.0f);
+				int ty = (int)std::floor(k + offV);
+				if(pp.TileY) { ty %= texH; if(ty < 0) ty += texH; }
+				else if(ty < 0 || ty >= texH) continue;
+				uint32_t* row = out + (size_t)hy * stride;
+				for(uint32_t hx = 0; hx < stride; hx++) {
+					const float xN = originNes + ((float)hx + 0.5f) / S;
+					const int nx = std::clamp((int)xN, 0, 255);
+					const bool inCentre = !ws || (hx >= padHd && hx < padHd + centreHd);
+					uint8_t& zRef = inCentre ? _zNes[((size_t)line << 8) | (size_t)nx] : _wsZ[(size_t)hy * stride + hx];
+					if(pp.Priority < zRef) continue; // z-test : cache par un fond de priorite superieure
+					int tx = (int)std::floor((xN - cx) * kX + offU);
+					if(pp.TileX) { tx %= texW; if(tx < 0) tx += texW; }
+					else if(tx < 0 || tx >= texW) continue;
+					const uint32_t c = tex->PixelData[(size_t)ty * texW + tx];
+					const float a = ((float)((c >> 24) & 0xFF) / 255.0f) * pp.Alpha;
+					if(a <= 0.0f) continue;
+					float sr = (float)((c >> 16) & 0xFF), sg = (float)((c >> 8) & 0xFF), sb = (float)(c & 0xFF);
+					if(fogF > 0.0f) {
+						sr += (fogR - sr) * fogF;
+						sg += (fogG - sg) * fogF;
+						sb += (fogB - sb) * fogF;
+					}
+					const uint32_t dst = row[hx];
+					const float dr = (float)((dst >> 16) & 0xFF), dg = (float)((dst >> 8) & 0xFF), db = (float)(dst & 0xFF);
+					row[hx] = pack(dr + (sr - dr) * a, dg + (sg - dg) * a, db + (sb - db) * a);
+					if(a >= 0.5f) zRef = (uint8_t)pp.Priority;
+				}
+			}
+		});
+	}
+}
+
+// 4:3 : le cadre visible est le buffer de sortie
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessPerspectives(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan)
+{
+	const uint32_t hdHeight = (240 - overscan.Top - overscan.Bottom) * scale;
+	ProcessPerspectivesLayout(outputBuffer, screenWidth, 0, screenWidth, (float)overscan.Left, hdHeight, (float)overscan.Top, (float)(240 - overscan.Bottom), false);
+}
+
+// Widescreen : meme mise en page que les overlays (bandes gauche/droite avec padHd)
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessWidescreenPerspectives(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom)
+{
+	if(!_zEnabled || out == nullptr || outWidth == 0 || _hdData->Perspectives.empty()) {
+		return;
+	}
+	const float ws = (float)padHd / (float)scale;
+	const uint32_t hdHeight = (240 - overscanTop - overscanBottom) * scale;
+	ProcessPerspectivesLayout(out, outWidth, padHd, outWidth - 2 * padHd, (float)overscanLeft - ws, hdHeight, (float)overscanTop, (float)(240 - overscanBottom), true);
+}
+
 template<uint32_t scale>
 void HdNesPack<scale>::ProcessDistortions(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan)
 {
@@ -1770,7 +1981,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	_liquidOffX = overscan.Left;
 	_liquidOffY = overscan.Top;
 	PrepareLiquids(screenWidth);
-	_zEnabled = !_hdData->Videos.empty() || !_hdData->Overlays.empty();
+	_zEnabled = !_hdData->Videos.empty() || !_hdData->Overlays.empty() || !_hdData->Perspectives.empty();
 	if(_zEnabled) {
 		std::fill(_zNes.begin(), _zNes.end(), (uint8_t)0);
 	}
@@ -1779,6 +1990,11 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	//Passe 1 (sequentielle) : quelle tile HD pour chaque pixel (fond + sprites)
 	for(uint32_t i = yStart; i < yEnd; i++) {
 		OnLineStart(hdScreenInfo->ScreenTiles[i << 8]);
+		{
+			const HdPpuPixelInfo& lp = hdScreenInfo->ScreenTiles[i << 8];
+			_lineScrollX[i] = ((lp.TmpVideoRamAddr & 0x1F) << 3) | lp.XScroll | ((lp.TmpVideoRamAddr & 0x400) ? 0x100 : 0);
+			_lineScrollY[i] = (((lp.TmpVideoRamAddr & 0x3E0) >> 2) | ((lp.TmpVideoRamAddr & 0x7000) >> 12)) + ((lp.TmpVideoRamAddr & 0x800) ? 240 : 0);
+		}
 		for(uint32_t j = xStart; j < xEnd; j++) {
 			ResolvePixel(j, i, hdScreenInfo->ScreenTiles[i * 256 + j]);
 		}
@@ -1829,6 +2045,10 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	//Distorsions : deplacement horizontal des lignes de l'image composee (apres les calques, avant les videos)
 	if(!_wsMode) {
 		ProcessDistortions(outputBuffer, screenWidth, overscan);
+	}
+	//Plans <2DPerspective> : apres les distorsions, avant les videos (voie 1 widescreen : a venir)
+	if(!_wsMode && !_hdData->Perspectives.empty()) {
+		ProcessPerspectives(outputBuffer, screenWidth, overscan);
 	}
 	lap(5);
 	//Videos : appliquees en dernier (apres grayscale/emphasis), sequentiellement

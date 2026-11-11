@@ -711,6 +711,41 @@ struct HdIgnore2DRule
 };
 
 // <2DLiquid> (vue de profil, phase 1) : liquide sous une surface ondulee. Dimensions en pixels NES.
+// <2DPerspective> (NES) : sol incline a partir d'un PNG, ancre sur le scroll PPU par ligne. Coordonnees NES absolues.
+struct NesHdPerspectiveInfo
+{
+	vector<HdPackCondition*> Conditions;
+	bool Active = false;
+	bool Ceiling = false;                 // mode=ceiling : plafond (lignes au-dessus de l'horizon)
+	bool Wall = false, WallRight = false; // mode=wall : paroi verticale, a gauche (side=left) ou a droite (side=right)
+	bool HorizonSet = false, CySet = false; // horizon= et cy= explicites (sinon centre de l'ecran)
+	float Cy = 120.0f;                    // cy= : centre vertical de la paroi (lignes NES)
+	float Horizon = 120.0f;               // ligne NES de l'horizon
+	float Depth = 64.0f;                  // distance (lignes NES) sous l'horizon ou la texture est a 1:1
+	float Repeat = 0.0f;                  // repeat=N : repetitions de la texture entre la limite et le bas (profondeur seulement)
+	float LimitOffset = 0.0f;             // limit=+N : premiere ligne dessinee = Horizon + N
+	float FogRange = 0.0f;                // lignes du fondu vers le brouillard (0 = coupure)
+	uint32_t Fog = 0x000000;
+	float Alpha = 1.0f;
+	bool TileX = true, TileY = true;
+	float SpeedX = 0.0f, SpeedY = 0.0f;   // ratios de defilement par rapport au scroll PPU
+	int Priority = 39;                    // Z : meme echelle que <background> NES (0 a 49)
+	HdPackBitmapInfo* Texture = nullptr;
+	vector<float> OffX, OffY;             // decalage par ligne NES (240 lignes), en texels
+	vector<int> LastX, LastY;             // dernier scroll PPU lu par ligne
+	bool HaveScroll = false;
+
+	bool MatchesCondition()
+	{
+		for(HdPackCondition* cond : Conditions) {
+			if(!cond->CheckCondition(0, 0, nullptr)) {
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
 struct NesHdLiquidInfo
 {
 	vector<HdPackCondition*> Conditions;
@@ -766,6 +801,7 @@ public:
 	vector<unique_ptr<NesHdVideoInfo>> Videos;
 	vector<unique_ptr<NesHdOverlayInfo>> Overlays;
 	vector<unique_ptr<NesHdLiquidInfo>> Liquids; // <2DLiquid>
+	vector<unique_ptr<NesHdPerspectiveInfo>> Perspectives; // <2DPerspective>
 
 	// <Ignore2DOverlays> : regles ligne seule, et drapeau si un bloc ou une regle existe dans le pack
 	vector<unique_ptr<HdIgnore2DRule>> Ignore2DRules;

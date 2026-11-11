@@ -79,6 +79,7 @@ private:
 	void ProcessBgmTag(vector<string> &tokens);
 	void ProcessVideoTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessPerspectiveTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessLiquidTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessSfxTag(vector<string> &tokens);
 

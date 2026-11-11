@@ -2669,11 +2669,16 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			if(mode.empty()) mode = "floor";
 			if(pos.empty()) {
 				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : fichier PNG manquant.");
-			} else if(mode != "floor") {
-				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : mode=" + mode + " pas encore gere (floor seulement).");
+			} else if(mode == "wall" && StringUtilities::ToLower(cfgStr("side")) != "left" && StringUtilities::ToLower(cfgStr("side")) != "right") {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : mode=wall demande side=left ou side=right, ignore.");
+			} else if(mode != "floor" && mode != "ceiling" && mode != "wall") {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> : mode=" + mode + " pas encore gere (floor, ceiling et wall).");
 			} else {
 				auto pp = std::make_unique<SnesHdPerspectiveInfo>();
 				pp->Conditions = currentConditions;
+				pp->Ceiling = (mode == "ceiling");
+				pp->Wall = (mode == "wall");
+				pp->WallRight = (StringUtilities::ToLower(cfgStr("side")) == "right");
 				pp->ZIndex = std::clamp((int)posNum(1, 20.0f), 0, 255);
 				pp->TileX = posNum(2, 1.0f) != 0.0f;
 				pp->TileY = posNum(3, 1.0f) != 0.0f;
@@ -2682,7 +2687,10 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				pp->SpeedY = posNum(6, 0.0f);
 				pp->SpeedX = cfgNum("speedx", pp->SpeedX); // speedX=/speedY= nommes : prioritaires sur la position
 				pp->SpeedY = cfgNum("speedy", pp->SpeedY);
-				pp->Horizon = std::clamp(cfgNum("horizon", 112.0f), 0.0f, 240.0f);
+				pp->HorizonSet = !cfgStr("horizon").empty();
+				pp->Horizon = pp->Wall ? std::max(0.0f, cfgNum("horizon", 0.0f)) : std::clamp(cfgNum("horizon", 112.0f), 0.0f, 240.0f);
+				pp->CySet = !cfgStr("cy").empty();
+				pp->Cy = std::clamp(cfgNum("cy", 112.0f), 0.0f, 240.0f);
 				pp->Depth = std::max(1.0f, cfgNum("depth", 64.0f));
 				pp->Repeat = std::max(0.0f, cfgNum("repeat", 0.0f));
 				std::string lim = cfgStr("limit");
@@ -2717,7 +2725,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 					outData->ImageFileData.push_back(std::move(bitmap));
 				}
 
-				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> floor enregistre (z " + std::to_string(pp->ZIndex) + ", horizon " + std::to_string((int)pp->Horizon) + ").");
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DPerspective> " + mode + " enregistre (z " + std::to_string(pp->ZIndex) + ", horizon " + std::to_string((int)pp->Horizon) + ").");
 				outData->Perspectives.push_back(std::move(pp));
 			}
 		}

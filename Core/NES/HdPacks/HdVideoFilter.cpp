@@ -125,6 +125,7 @@ void HdVideoFilter::ApplyFilter(uint16_t *ppuOutputBuffer)
 	_hdNesPack->ProcessWidescreenScreenLayers(out, (uint32_t)dstW, (uint32_t)offX, overscan.Left, overscan.Top, overscan.Bottom);
 	wsLap(2);
 	_hdNesPack->ProcessWidescreenDistortions(out, (uint32_t)dstW, (uint32_t)offX, overscan.Left, overscan.Top, overscan.Bottom);
+	_hdNesPack->ProcessWidescreenPerspectives(out, (uint32_t)dstW, (uint32_t)offX, overscan.Left, overscan.Top, overscan.Bottom);
 	wsLap(3);
 	if(++wsFrames >= 300) {
 		double total = wsMs[0] + wsMs[1] + wsMs[2] + wsMs[3];

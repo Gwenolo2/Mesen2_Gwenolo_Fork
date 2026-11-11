@@ -27,6 +27,7 @@ public:
 	virtual void SetWidescreenMode(bool on, float widthNes) = 0;
 	virtual void ProcessWidescreenOverlays(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
 	virtual void ProcessWidescreenScreenLayers(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
+	virtual void ProcessWidescreenPerspectives(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
 
 	HdScreenInfo* GetScreenInfo() { return _hdScreenInfo; }
 
@@ -79,6 +80,8 @@ private:
 	bool _cacheEnabled = false;
 	bool _useCachedTile = false;
 	int32_t _scrollX = 0;
+	int32_t _lineScrollX[240] = {}; // scroll PPU par ligne NES (<2DPerspective>)
+	int32_t _lineScrollY[240] = {};
 
 	// Rendu multi-coeur : passe 1 (sequentielle) = recherche des tiles HD, passe 2 (parallele) = dessin.
 	SnesHdThreadPool _pool;
@@ -118,6 +121,9 @@ private:
 	void ProcessOverlays(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
 	void ProcessScreenLayers(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
 	void ProcessDistortions(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
+	void ProcessPerspectivesLayout(uint32_t* out, uint32_t stride, uint32_t padHd, uint32_t centreHd, float originNes, uint32_t hdHeight, float topNes, float bottomNes, bool ws);
+	void ProcessPerspectives(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
+	void ProcessWidescreenPerspectives(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
 	void PrepareLiquids(uint32_t screenWidth);
 	void DrawWidescreenBands(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
 	void ProcessWidescreenDistortions(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
