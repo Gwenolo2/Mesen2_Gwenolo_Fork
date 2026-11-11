@@ -1354,8 +1354,8 @@ void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondit
 	};
 
 	string type = StringUtilities::ToLower(str("type"));
-	if(!type.empty() && type != "particles" && type != "plainscreen" && type != "ellipse" && type != "shadows" && type != "clouds" && type != "fog" && type != "rays" && type != "distortion") {
-		logError("2DOverlay type '" + type + "' is not supported on NES yet (particles, plainscreen, ellipse, shadows, clouds, fog, rays, distortion)");
+	if(!type.empty() && type != "particles" && type != "plainscreen" && type != "ellipse" && type != "shadows" && type != "clouds" && type != "fog" && type != "rays" && type != "distortion" && type != "aurora") {
+		logError("2DOverlay type '" + type + "' is not supported on NES yet (particles, plainscreen, ellipse, shadows, clouds, fog, rays, distortion, aurora)");
 		return;
 	}
 
@@ -1411,6 +1411,7 @@ void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondit
 	overlay->IsNoise = (type == "shadows" || type == "clouds" || type == "fog");
 	overlay->NoiseKind = (type == "clouds") ? 1 : ((type == "fog") ? 2 : 0);
 	overlay->IsRays = (type == "rays");
+	overlay->IsAurora = (type == "aurora");
 	overlay->IsDistortion = (type == "distortion");
 	if(overlay->IsDistortion) {
 		// distorsion : amplitude en px NES, longueur d'onde en lignes NES, vitesse en cycles/s, phase en degres
@@ -1421,7 +1422,7 @@ void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondit
 		overlay->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f); overlay->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
 		overlay->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f); overlay->ZoneY1 = std::clamp(num("ymax", 1.0f), 0.0f, 1.0f);
 	}
-	if(overlay->IsPlainScreen || overlay->IsEllipse || overlay->IsNoise || overlay->IsRays) {
+	if(overlay->IsPlainScreen || overlay->IsEllipse || overlay->IsNoise || overlay->IsRays || overlay->IsAurora) {
 		overlay->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f);
 		overlay->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
 		overlay->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f);
@@ -1457,6 +1458,15 @@ void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondit
 			overlay->RaySpeed = num("rayspeed", 0.2f);
 			overlay->RayWobble = num("raywobble", 3.0f);
 			overlay->RayColor = namedColor("raycolor", 0xFFE8A0);
+		}
+		if(overlay->IsAurora) {
+			overlay->AuroraSize = std::max(4.0f, num("size", 40.0f));
+			overlay->AuroraSpeed = num("speed", 6.0f);
+			overlay->AuroraCoverage = std::clamp(num("coverage", 0.5f), 0.0f, 1.0f);
+			overlay->AuroraFall = std::clamp(num("fall", 0.7f), 0.05f, 1.0f);
+			overlay->AuroraWave = std::max(0.0f, num("wave", 6.0f));
+			overlay->AuroraColor1 = namedColor("color1", 0x3CFF8C);
+			overlay->AuroraColor2 = namedColor("color2", 0x8C4BFF);
 		}
 		if(overlay->IsNoise) {
 			overlay->FxSize = std::max(4.0f, num("size", 48.0f));

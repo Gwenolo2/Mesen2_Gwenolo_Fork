@@ -728,6 +728,15 @@ struct SnesHdOverlayInfo
 	float RayWidth = 4.0f, RayLength = 0.8f;   // demi-largeur (degres) et longueur (fraction de la diagonale)
 	float RaySpeed = 0.2f, RayWobble = 3.0f;   // scintillement (cycles/s) et oscillation angulaire (degres)
 	uint32_t RayColor = 0xFFE8A0;
+
+	// Aurore boreale (type=aurora) : rideaux additifs qui derivent, bord inferieur ondule, couleur entre color1 et color2
+	bool IsAurora = false;
+	float AuroraSize = 40.0f;       // largeur d'un rideau (pixels SNES)
+	float AuroraSpeed = 6.0f;       // derive horizontale (pixels SNES / s)
+	float AuroraCoverage = 0.5f;    // part de la zone couverte par les rideaux (0 a 1)
+	float AuroraFall = 0.7f;        // fraction de la zone sur laquelle la lumiere s'estompe vers le haut
+	float AuroraWave = 6.0f;        // ondulation du bord inferieur (pixels SNES)
+	uint32_t AuroraColor1 = 0x3CFF8C, AuroraColor2 = 0x8C4BFF;
 	// Calques plein ecran et nuages (types plainscreen, ellipse, shadows, clouds, fog)
 	bool IsPlainScreen = false, IsEllipse = false, IsNoise = false;
 	int NoiseKind = 0;                  // IsNoise : 0 = ombres, 1 = nuages, 2 = brouillard

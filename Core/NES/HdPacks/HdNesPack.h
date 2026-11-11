@@ -79,6 +79,10 @@ private:
 	vector<HdPackTileInfo*> _resolvedSprites; // 4 entrees par pixel NES (sprites HD ou nullptr)
 	// Z-index par pixel NES (256x240), utilise seulement si le pack contient un <video>
 	vector<uint8_t> _zNes;
+	// Chronometrage des passes (journal [HD-PASS] NES toutes les 300 frames) :
+	// preparation, resolution des tiles, dessin, particules, calques, distorsion, videos
+	double _passMs[7] = {};
+	int _passFrames = 0;
 	vector<uint8_t> _ignNes;                  // 1 par pixel NES : pixel net pendant la distorsion (<Ignore2DOverlays>)
 	bool _zEnabled = false;
 	

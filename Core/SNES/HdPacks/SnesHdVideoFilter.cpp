@@ -1062,6 +1062,11 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		const int32_t wsM7 = (int32_t)std::min<uint32_t>(wsExt, 128u); // bande 16:9 en colonnes SNES
 		uint32_t imgScale = m7Img->Scale;
 		uint32_t mapDim = 1024 * imgScale;
+		// imgScale puissance de 2 : la division par pixel HD des <m7tiles> devient un decalage (-1 = division)
+		int imgShift = -1;
+		if(imgScale > 0 && (imgScale & (imgScale - 1)) == 0) { imgShift = 0; while((1u << imgShift) < imgScale) imgShift++; }
+		// log2(echelle de la tile / echelle de la carte) : garde d'un pixel a l'autre tant que l'echelle ne change pas
+		uint32_t tLogScale = 0; double tLog = 0.0;
 
 		bool applyColorMath = !m7Img->IgnoreColorMath;
 		uint8_t pixelZ = 20 + (refM7Data.SnesPriorityLevel * 4);
@@ -1140,6 +1145,29 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			const uint32_t fx = (uint32_t)(lX & 0xFF), fy = (uint32_t)(lY & 0xFF);
 			const uint32_t wx[2] = { 256 - fx, fx };
 			const uint32_t wy[2] = { 256 - fy, fy };
+			// Chemin rapide : les 4 texels sont opaques (cas courant d'une piste pleine).
+			// La ponderation par l'alpha se simplifie : moyenne entiere, sans 64 bits par canal ni division.
+			// Meme resultat que le calcul general ci-dessous, a l'arrondi pres.
+			{
+				const int32_t ix1 = ix + 1, iy1 = iy + 1;
+				const bool inside = !largeMap || (ix >= 0 && iy >= 0 && ix1 < (int32_t)dim && iy1 < (int32_t)dim);
+				if(inside) {
+					const size_t r0 = (size_t)(iy & (int32_t)mask) * dim, r1 = (size_t)(iy1 & (int32_t)mask) * dim;
+					const uint32_t x0 = (uint32_t)(ix & (int32_t)mask), x1 = (uint32_t)(ix1 & (int32_t)mask);
+					const uint32_t c00 = px[r0 + x0], c10 = px[r0 + x1], c01 = px[r1 + x0], c11 = px[r1 + x1];
+					if((c00 & c10 & c01 & c11) >= 0xFF000000u) {
+						const uint32_t w00 = wx[0] * wy[0], w10 = wx[1] * wy[0], w01 = wx[0] * wy[1], w11 = wx[1] * wy[1];
+						// rouge dans les bits 32+, bleu dans les bits 0+ : une multiplication pour deux canaux
+						auto rb = [](uint32_t c) -> uint64_t { return ((uint64_t)(c & 0xFF0000u) << 16) | (uint64_t)(c & 0xFFu); };
+						const uint64_t sRB = rb(c00) * w00 + rb(c10) * w10 + rb(c01) * w01 + rb(c11) * w11;
+						const uint32_t sGi = ((c00 >> 8) & 0xFF) * w00 + ((c10 >> 8) & 0xFF) * w10 + ((c01 >> 8) & 0xFF) * w01 + ((c11 >> 8) & 0xFF) * w11;
+						const uint32_t r = (uint32_t)(((sRB >> 32) + 32768) >> 16);
+						const uint32_t b = (uint32_t)(((sRB & 0xFFFFFFFFull) + 32768) >> 16);
+						const uint32_t g = (sGi + 32768) >> 16;
+						return 0xFF000000u | (r << 16) | (g << 8) | b;
+					}
+				}
+			}
 			uint64_t sA = 0, sR = 0, sG = 0, sB = 0; // poids x alpha (somme des 4 poids = 65536)
 			for(int j = 0; j < 2; j++) {
 				const int32_t qy = iy + j;
@@ -1325,6 +1353,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				float majX, majY;
 				if(lenX >= lenY) { majX = (float)stepX; majY = (float)stepY; } else { majX = dyX; majY = dyY; }
 				const float wTap = 1.0f / (float)taps;
+				// niveau de detail d'une <m7tiles> : constant pour les pixels HD de ce pixel SNES tant que l'echelle de la tile ne change pas
+				uint32_t ltScale = 0; int ltCached = 0;
 
 				for(uint32_t sx = 0; sx < outScale; sx++) {
 					uint32_t hdColorFromPng = 0;
@@ -1364,17 +1394,18 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					// --- Tile Mode 7 individuelle presente dans cette case de la carte ? ---
 					if(anyM7Cell) {
 						const int64_t W16 = (int64_t)1024 << 16;
-						int64_t mX = posFX / (int64_t)imgScale; // coordonnee carte, 16.16 texels SNES
-						int64_t mY = posFY / (int64_t)imgScale;
+						int64_t mX, mY; // coordonnee carte, 16.16 texels SNES
+						if(imgShift >= 0) { mX = posFX >> imgShift; mY = posFY >> imgShift; }
+						else { mX = posFX / (int64_t)imgScale; mY = posFY / (int64_t)imgScale; }
 						SnesHdMode7Image* timg = nullptr;
 						int64_t lx16, ly16; // position dans la case (16.16 texels SNES, 0..8)
 						bool outside = (mX < 0 || mY < 0 || mX >= W16 || mY >= W16);
 						if(outside && largeMap) {
 							timg = m7OutsideTile;
 							const int64_t C16 = (int64_t)8 << 16;
-							lx16 = ((mX % C16) + C16) % C16; ly16 = ((mY % C16) + C16) % C16;
+							lx16 = mX & (C16 - 1); ly16 = mY & (C16 - 1); // C16 puissance de 2 : modulo positif = masque
 						} else {
-							int64_t wx = ((mX % W16) + W16) % W16, wy = ((mY % W16) + W16) % W16;
+							int64_t wx = mX & (W16 - 1), wy = mY & (W16 - 1); // W16 puissance de 2 : modulo positif = masque
 							int64_t cx = wx >> 19, cy = wy >> 19;
 							timg = m7CellTile[(size_t)cy * 128 + (size_t)cx];
 							lx16 = wx - (cx << 19); ly16 = wy - (cy << 19);
@@ -1382,7 +1413,12 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						if(timg) {
 							const uint32_t tScale = timg->Scale;
 							const int tLevels = (int)timg->TileMips.size();
-							int lt = (int)std::lround(tileLambdaBase + std::log2((double)tScale / (double)imgScale));
+							if(tScale != ltScale) {
+								if(tScale != tLogScale) { tLogScale = tScale; tLog = std::log2((double)tScale / (double)imgScale); }
+								ltScale = tScale;
+								ltCached = (int)std::lround(tileLambdaBase + tLog);
+							}
+							int lt = ltCached;
 							lt = std::clamp(lt, 0, tLevels - 1);
 							const uint32_t dim = (8 * tScale) >> lt;
 							const uint32_t* tp = timg->TileMips[lt].data();
@@ -2007,7 +2043,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			SnesHdOverlayInfo& ov = *hdOverlays[i];
 			ov.Active = ov.MatchesCondition();
 			if(!ov.Active) continue; // effet fige tant que sa condition est fausse
-			if(ov.IsDistortion || ov.IsRays || ov.IsPlainScreen || ov.IsEllipse || ov.IsNoise) { ov.Time += 1.0f / 60.0f; continue; } // distorsion : appliquee plus tard sur l'image finale, pas de particules
+			if(ov.IsDistortion || ov.IsRays || ov.IsAurora || ov.IsPlainScreen || ov.IsEllipse || ov.IsNoise) { ov.Time += 1.0f / 60.0f; continue; } // distorsion : appliquee plus tard sur l'image finale, pas de particules
 			ovActive[i] = 1;
 			ov.FieldWidthPx = (float)cropWidth * ov.FieldW;
 			ov.FieldHeightPx = (float)cropHeight * ov.FieldH;
@@ -4489,6 +4525,100 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						const float tx = fx - (float)ix;
 						const float I = (n0[ix] * (1.0f - tx) + n0[ix + 1] * tx) * (1.0f - ty) + (n1[ix] * (1.0f - tx) + n1[ix + 1] * tx) * ty;
 						if(I <= 0.0f) continue;
+						const uint32_t c = row[x];
+						const float rr = (float)((c >> 16) & 0xFF) + cR * I;
+						const float gg = (float)((c >> 8) & 0xFF) + cG * I;
+						const float bb = (float)(c & 0xFF) + cB * I;
+						row[x] = 0xFF000000 | ((uint32_t)std::min(255.0f, rr) << 16) | ((uint32_t)std::min(255.0f, gg) << 8) | (uint32_t)std::min(255.0f, bb);
+					}
+				}
+			});
+		}
+	}
+
+	// <2DOverlay> type=aurora : rideaux additifs animes (derive, bord inferieur ondule), couleur entre color1 et color2 ; HUD (<Ignore2DOverlays>) respecte
+	// Meme principe que les rayons : intensite sur une grille de noeuds (pas de 4 px HD), interpolee bilineairement.
+	{
+		auto auHash = [](int x, int y, int seed) -> float {
+			uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u + (uint32_t)seed * 2246822519u;
+			h = (h ^ (h >> 13)) * 1274126177u;
+			h ^= h >> 16;
+			return (float)(h & 0xFFFF) / 65535.0f;
+		};
+		auto auNoise = [&auHash](float x, float y, int seed) -> float { // bruit de valeur lisse, 0..1 (memes fonctions que les calques)
+			const int xi = (int)std::floor(x), yi = (int)std::floor(y);
+			const float fx = x - (float)xi, fy = y - (float)yi;
+			const float ux = fx * fx * (3.0f - 2.0f * fx), uy = fy * fy * (3.0f - 2.0f * fy);
+			const float a = auHash(xi, yi, seed), b = auHash(xi + 1, yi, seed);
+			const float c = auHash(xi, yi + 1, seed), d = auHash(xi + 1, yi + 1, seed);
+			const float top = a + (b - a) * ux, bot = c + (d - c) * ux;
+			return top + (bot - top) * uy;
+		};
+		const int kAuStep = 4;
+		const float S = (float)scale;
+		for(size_t i = 0; i < hdOverlays.size(); i++) {
+			const SnesHdOverlayInfo& ov = *hdOverlays[i];
+			if(!ov.IsAurora || !ov.Active) continue;
+			const uint32_t zy0 = (uint32_t)std::clamp(ov.ZoneY0 * (float)hdHeight, 0.0f, (float)hdHeight);
+			const uint32_t zy1 = (uint32_t)std::clamp(ov.ZoneY1 * (float)hdHeight, 0.0f, (float)hdHeight);
+			const uint32_t zx0 = (uint32_t)std::clamp(ov.ZoneX0 * (float)outWidth, 0.0f, (float)outWidth);
+			const uint32_t zx1 = (uint32_t)std::clamp(ov.ZoneX1 * (float)outWidth, 0.0f, (float)outWidth);
+			if(zx0 >= zx1 || zy0 >= zy1) continue;
+			const float zhS = (float)(zy1 - zy0) / S;                             // hauteur de la zone (pixels SNES)
+			const float size = std::max(4.0f, ov.AuroraSize);
+			const float drift = ov.AuroraSpeed * ov.Time;                         // derive (pixels SNES)
+			const float thr = 1.0f - std::clamp(ov.AuroraCoverage, 0.0f, 1.0f);
+			const float fall = std::max(0.05f, ov.AuroraFall);
+			const float waveT = (zhS > 0.0f) ? ov.AuroraWave / zhS : 0.0f;        // ondulation en fraction de la zone
+			const int seed = ov.FxSeed;
+			const int gx = (int)((zx1 - zx0) / kAuStep) + 2;
+			const int gy = (int)((zy1 - zy0) / kAuStep) + 2;
+			std::vector<float> nI((size_t)gx * gy, 0.0f), nM((size_t)gx * gy, 0.0f);
+			const int nN = std::max(1, std::min(_pool.Size(), gy));
+			_pool.Run(nN, [&](int tk) {
+				for(int j = tk; j < gy; j += nN) {
+					const float y = (float)(zy0 + (uint32_t)(j * kAuStep)) + 0.5f;
+					const float py = y / S;
+					const float t = (y - (float)zy0) / std::max(1.0f, (float)(zy1 - zy0)); // 0 en haut de la zone, 1 en bas
+					for(int ii = 0; ii < gx; ii++) {
+						const float x = (float)(zx0 + (uint32_t)(ii * kAuStep)) + 0.5f;
+						const float u = (x / S - drift) / size;
+						const float v = py / (size * 3.0f) + ov.Time * 0.05f;
+						const float n = 0.65f * auNoise(u, v, seed) + 0.35f * auNoise(u * 2.03f + 17.0f, v * 2.03f + 9.0f, seed + 1);
+						const float edge = auNoise(u * 0.5f + 3.0f, ov.Time * 0.3f, seed + 2) - 0.5f;
+						const float tn = t + waveT * edge * 2.0f;
+						float prof = std::clamp((tn - (1.0f - fall)) / fall, 0.0f, 1.0f);
+						prof = prof * prof * (3.0f - 2.0f * prof);
+						float m = std::clamp((n - thr) / 0.12f, 0.0f, 1.0f);
+						m = m * m * (3.0f - 2.0f * m);
+						nI[(size_t)j * gx + ii] = m * prof * ov.Alpha;
+						nM[(size_t)j * gx + ii] = auNoise(u * 0.5f + 5.0f, v * 0.5f + 1.0f, seed + 3);
+					}
+				}
+			});
+			const float c1R = (float)((ov.AuroraColor1 >> 16) & 0xFF), c1G = (float)((ov.AuroraColor1 >> 8) & 0xFF), c1B = (float)(ov.AuroraColor1 & 0xFF);
+			const float c2R = (float)((ov.AuroraColor2 >> 16) & 0xFF), c2G = (float)((ov.AuroraColor2 >> 8) & 0xFF), c2B = (float)(ov.AuroraColor2 & 0xFF);
+			const int nT = std::max(1, std::min(_pool.Size(), (int)(zy1 - zy0)));
+			_pool.Run(nT, [&](int tk) {
+				for(uint32_t r = zy0 + (uint32_t)tk; r < zy1; r += (uint32_t)nT) {
+					uint32_t* row = out + (size_t)r * outWidth;
+					const uint8_t* ign = ign2dOn ? &s_ign2D[(size_t)r * outWidth] : nullptr;
+					const float fy = (float)(r - zy0) / (float)kAuStep;
+					const int jy = (int)fy;
+					const float ty = fy - (float)jy;
+					const float* i0 = &nI[(size_t)jy * gx];
+					const float* i1 = &nI[(size_t)(jy + 1) * gx];
+					const float* m0 = &nM[(size_t)jy * gx];
+					const float* m1 = &nM[(size_t)(jy + 1) * gx];
+					for(uint32_t x = zx0; x < zx1; x++) {
+						if(ign && ign[x]) continue; // <Ignore2DOverlays> : HUD reste net
+						const float fx = (float)(x - zx0) / (float)kAuStep;
+						const int ix = (int)fx;
+						const float tx = fx - (float)ix;
+						const float I = (i0[ix] * (1.0f - tx) + i0[ix + 1] * tx) * (1.0f - ty) + (i1[ix] * (1.0f - tx) + i1[ix + 1] * tx) * ty;
+						if(I <= 0.0f) continue;
+						const float M = (m0[ix] * (1.0f - tx) + m0[ix + 1] * tx) * (1.0f - ty) + (m1[ix] * (1.0f - tx) + m1[ix + 1] * tx) * ty;
+						const float cR = c1R + (c2R - c1R) * M, cG = c1G + (c2G - c1G) * M, cB = c1B + (c2B - c1B) * M;
 						const uint32_t c = row[x];
 						const float rr = (float)((c >> 16) & 0xFF) + cR * I;
 						const float gg = (float)((c >> 8) & 0xFF) + cG * I;

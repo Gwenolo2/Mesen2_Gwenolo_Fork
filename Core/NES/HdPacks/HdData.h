@@ -648,6 +648,15 @@ struct NesHdOverlayInfo
 	float RaySpeed = 0.2f, RayWobble = 3.0f;
 	uint32_t RayColor = 0xFFE8A0;
 
+	// Aurore boreale (type=aurora) : rideaux additifs qui derivent, bord inferieur ondule, couleur entre color1 et color2
+	bool IsAurora = false;
+	float AuroraSize = 40.0f;       // largeur d'un rideau (pixels NES)
+	float AuroraSpeed = 6.0f;       // derive horizontale (pixels NES / s)
+	float AuroraCoverage = 0.5f;    // part de la zone couverte par les rideaux (0 a 1)
+	float AuroraFall = 0.7f;        // fraction de la zone sur laquelle la lumiere s'estompe vers le haut
+	float AuroraWave = 6.0f;        // ondulation du bord inferieur (pixels NES)
+	uint32_t AuroraColor1 = 0x3CFF8C, AuroraColor2 = 0x8C4BFF;
+
 	// Distorsion (type=distortion) : deformation horizontale sinusoidale de l'image finale (zone = ZoneX0..ZoneY1)
 	bool IsDistortion = false;
 	float DistAmp1 = 0, DistWave1 = 32, DistSpeed1 = 0.5f, DistPhase1 = 0;  // amplitude (px NES), longueur d'onde (lignes NES), vitesse (cycles/s), phase (degres)

@@ -2406,12 +2406,13 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				std::string type = StringUtilities::ToLower(str("type"));
 				ov->IsDistortion = (type == "distortion");
 				ov->IsRays = (type == "rays");
+				ov->IsAurora = (type == "aurora");
 				ov->IsPlainScreen = (type == "plainscreen");
 				ov->IsEllipse = (type == "ellipse");
 				ov->IsNoise = (type == "shadows" || type == "clouds" || type == "fog");
 				ov->NoiseKind = (type == "clouds") ? 1 : ((type == "fog") ? 2 : 0);
-				if(!type.empty() && type != "particles" && !ov->IsDistortion && !ov->IsRays && !ov->IsPlainScreen && !ov->IsEllipse && !ov->IsNoise) {
-					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> : type '" + type + "' pas encore gere (particles, distortion, rays, plainscreen, ellipse, shadows, clouds, fog).");
+				if(!type.empty() && type != "particles" && !ov->IsDistortion && !ov->IsRays && !ov->IsAurora && !ov->IsPlainScreen && !ov->IsEllipse && !ov->IsNoise) {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DOverlay> : type '" + type + "' pas encore gere (particles, distortion, rays, aurora, plainscreen, ellipse, shadows, clouds, fog).");
 				}
 				if(ov->IsDistortion) {
 					// distorsion : parametres sinusoidaux (amplitude en px SNES, longueur d'onde en lignes SNES, vitesse en cycles/s, phase en degres)
@@ -2462,6 +2463,14 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 					ov->FxSpeed = num("speed", 8.0f); ov->FxDirection = num("direction", 0.0f);
 					ov->FxCoverage = std::clamp(num("coverage", 0.5f), 0.0f, 1.0f);
 					ov->FxSeed = (int)num("seed", 1.0f);
+				}
+				if(ov->IsAurora) {
+					ov->ZoneX0 = std::clamp(num("xmin", 0.0f), 0.0f, 1.0f); ov->ZoneX1 = std::clamp(num("xmax", 1.0f), 0.0f, 1.0f);
+					ov->ZoneY0 = std::clamp(num("ymin", 0.0f), 0.0f, 1.0f); ov->ZoneY1 = std::clamp(num("ymax", 1.0f), 0.0f, 1.0f);
+					ov->AuroraSize = std::max(4.0f, num("size", 40.0f)); ov->AuroraSpeed = num("speed", 6.0f);
+					ov->AuroraCoverage = std::clamp(num("coverage", 0.5f), 0.0f, 1.0f);
+					ov->AuroraFall = std::clamp(num("fall", 0.7f), 0.05f, 1.0f); ov->AuroraWave = std::max(0.0f, num("wave", 6.0f));
+					ov->AuroraColor1 = fxColor("color1", 0x3CFF8C); ov->AuroraColor2 = fxColor("color2", 0x8C4BFF);
 				}
 
 				ov->ZIndex = (int)num("z", num("zindex", 95.0f));

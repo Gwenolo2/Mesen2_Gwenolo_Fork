@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <cmath>
 #include <cstdlib>
+#include <chrono>
 #include "NES/HdPacks/HdNesPack.h"
 #include "NES/HdPacks/HdPackLoader.h"
 #include "NES/NesConsole.h"
@@ -421,7 +422,7 @@ void HdNesPack<scale>::SimulateOverlays(HdScreenInfo* hdScreenInfo)
 
 		const float fieldW = 256.0f * ov.FieldW;
 		const float fieldH = 240.0f * ov.FieldH;
-		if(ov.IsNoise || ov.IsRays || ov.IsDistortion) {
+		if(ov.IsNoise || ov.IsRays || ov.IsAurora || ov.IsDistortion) {
 			ov.Time += dt;
 			continue;
 		}
@@ -456,7 +457,7 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 
 	for(auto& ovPtr : _hdData->Overlays) {
 		NesHdOverlayInfo& ov = *ovPtr;
-		if(!ov.Active || !(ov.IsPlainScreen || ov.IsEllipse || ov.IsNoise || ov.IsRays)) {
+		if(!ov.Active || !(ov.IsPlainScreen || ov.IsEllipse || ov.IsNoise || ov.IsRays || ov.IsAurora)) {
 			continue;
 		}
 		const int zx0 = (int)std::clamp(ov.ZoneX0 * visW, 0.0f, visW);
@@ -558,6 +559,64 @@ void HdNesPack<scale>::ProcessScreenLayers(uint32_t* outputBuffer, uint32_t scre
 					const float tx = fx - (float)ix;
 					const float I = (n0[ix] * (1.0f - tx) + n0[ix + 1] * tx) * (1.0f - ty) + (n1[ix] * (1.0f - tx) + n1[ix + 1] * tx) * ty;
 					if(I <= 0.0f) continue;
+					const uint32_t c = row[x];
+					const float rr = (float)((c >> 16) & 0xFF) + cR * I;
+					const float gg = (float)((c >> 8) & 0xFF) + cG * I;
+					const float bb = (float)(c & 0xFF) + cB * I;
+					row[x] = 0xFF000000 | ((uint32_t)std::min(255.0f, rr) << 16) | ((uint32_t)std::min(255.0f, gg) << 8) | (uint32_t)std::min(255.0f, bb);
+				}
+			}
+		} else if(ov.IsAurora) {
+			// Aurore : rideaux additifs (bruit etire en hauteur, derive horizontal), plus lumineux vers le bas de la zone,
+			// bord inferieur ondule ; couleur melangee entre color1 et color2. Grille de noeuds (pas de 4 px HD), interpolee.
+			const int kStep = 4;
+			const float zh = (float)(zy1 - zy0);
+			const float size = std::max(4.0f, ov.AuroraSize);
+			const float drift = ov.AuroraSpeed * ov.Time;                       // pixels NES
+			const float thr = 1.0f - std::clamp(ov.AuroraCoverage, 0.0f, 1.0f);
+			const float fall = std::max(0.05f, ov.AuroraFall);
+			const float waveT = (zh > 0.0f) ? ov.AuroraWave / (zh / fScale) : 0.0f; // ondulation en fraction de la zone
+			const int seed = ov.FxSeed;
+			const int gx = (zx1 - zx0) / kStep + 2, gy = (zy1 - zy0) / kStep + 2;
+			std::vector<float> nI((size_t)gx * gy, 0.0f), nM((size_t)gx * gy, 0.0f);
+			for(int j = 0; j < gy; j++) {
+				const float y = (float)(zy0 + j * kStep) + 0.5f;
+				const float py = y / fScale;
+				const float t = (y - (float)zy0) / std::max(1.0f, zh);            // 0 en haut de la zone, 1 en bas
+				for(int ii = 0; ii < gx; ii++) {
+					const float x = (float)(zx0 + ii * kStep) + 0.5f;
+					const float u = (x / fScale - drift) / size;
+					const float v = py / (size * 3.0f) + ov.Time * 0.05f;
+					const float n = 0.65f * FxNoise(u, v, seed) + 0.35f * FxNoise(u * 2.03f + 17.0f, v * 2.03f + 9.0f, seed + 1);
+					const float edge = FxNoise(u * 0.5f + 3.0f, ov.Time * 0.3f, seed + 2) - 0.5f;
+					const float tn = t + waveT * edge * 2.0f;
+					float prof = std::clamp((tn - (1.0f - fall)) / fall, 0.0f, 1.0f);
+					prof = prof * prof * (3.0f - 2.0f * prof);
+					float m = std::clamp((n - thr) / 0.12f, 0.0f, 1.0f);
+					m = m * m * (3.0f - 2.0f * m);
+					nI[(size_t)j * gx + ii] = m * prof * ov.Alpha;
+					nM[(size_t)j * gx + ii] = FxNoise(u * 0.5f + 5.0f, v * 0.5f + 1.0f, seed + 3);
+				}
+			}
+			const float c1R = (float)((ov.AuroraColor1 >> 16) & 0xFF), c1G = (float)((ov.AuroraColor1 >> 8) & 0xFF), c1B = (float)(ov.AuroraColor1 & 0xFF);
+			const float c2R = (float)((ov.AuroraColor2 >> 16) & 0xFF), c2G = (float)((ov.AuroraColor2 >> 8) & 0xFF), c2B = (float)(ov.AuroraColor2 & 0xFF);
+			for(int y = zy0; y < zy1; y++) {
+				uint32_t* row = outputBuffer + (size_t)y * screenWidth;
+				const float fy = (float)(y - zy0) / (float)kStep;
+				const int jy = (int)fy;
+				const float ty = fy - (float)jy;
+				const float* i0 = &nI[(size_t)jy * gx];
+				const float* i1 = &nI[(size_t)(jy + 1) * gx];
+				const float* m0 = &nM[(size_t)jy * gx];
+				const float* m1 = &nM[(size_t)(jy + 1) * gx];
+				for(int x = zx0; x < zx1; x++) {
+					const float fx = (float)(x - zx0) / (float)kStep;
+					const int ix = (int)fx;
+					const float tx = fx - (float)ix;
+					const float I = (i0[ix] * (1.0f - tx) + i0[ix + 1] * tx) * (1.0f - ty) + (i1[ix] * (1.0f - tx) + i1[ix + 1] * tx) * ty;
+					if(I <= 0.0f) continue;
+					const float M = (m0[ix] * (1.0f - tx) + m0[ix + 1] * tx) * (1.0f - ty) + (m1[ix] * (1.0f - tx) + m1[ix + 1] * tx) * ty;
+					const float cR = c1R + (c2R - c1R) * M, cG = c1G + (c2G - c1G) * M, cB = c1B + (c2B - c1B) * M;
 					const uint32_t c = row[x];
 					const float rr = (float)((c >> 16) & 0xFF) + cR * I;
 					const float gg = (float)((c >> 8) & 0xFF) + cG * I;
@@ -1293,6 +1352,14 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	const uint32_t yStart = overscan.Top, yEnd = 240 - overscan.Bottom;
 	const uint32_t xStart = overscan.Left, xEnd = 256 - overscan.Right;
 
+	// Chronometrage par passe (journal [HD-PASS] NES toutes les 300 frames)
+	auto tLap = std::chrono::steady_clock::now();
+	auto lap = [&](int pass) {
+		const auto tNow = std::chrono::steady_clock::now();
+		_passMs[pass] += std::chrono::duration<double, std::milli>(tNow - tLap).count();
+		tLap = tNow;
+	};
+
 	OnBeforeApplyFilter();
 	UpdateBackgroundFrames(hdScreenInfo);
 
@@ -1303,6 +1370,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 		std::fill(_zNes.begin(), _zNes.end(), (uint8_t)0);
 	}
 
+	lap(0);
 	//Passe 1 (sequentielle) : quelle tile HD pour chaque pixel (fond + sprites)
 	for(uint32_t i = yStart; i < yEnd; i++) {
 		OnLineStart(hdScreenInfo->ScreenTiles[i << 8]);
@@ -1311,6 +1379,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 		}
 	}
 
+	lap(1);
 	//Passe 2 (parallele) : dessin. Chaque ligne NES ecrit ses propres lignes HD, sans recouvrement.
 	auto drawLine = [&](uint32_t i) {
 		HdBgConfig lineCfg[50];
@@ -1339,17 +1408,35 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 		});
 	}
 
+	lap(2);
 	//Overlays puis videos : appliques apres grayscale/emphasis, sequentiellement
 	if(_zEnabled) {
 		ProcessOverlays(outputBuffer, screenWidth, overscan);
 	}
+	lap(3);
 	//Ecrans plainscreen / ellipse : apres les overlays, avant les videos
 	ProcessScreenLayers(outputBuffer, screenWidth, overscan);
+	lap(4);
 	//Distorsions : deplacement horizontal des lignes de l'image composee (apres les calques, avant les videos)
 	ProcessDistortions(outputBuffer, screenWidth, overscan);
+	lap(5);
 	//Videos : appliquees en dernier (apres grayscale/emphasis), sequentiellement
 	if(_zEnabled) {
 		ProcessVideos(outputBuffer, screenWidth, overscan);
+	}
+	lap(6);
+
+	// Moyenne sur 300 frames, meme principe que le filtre SNES
+	if(++_passFrames >= 300) {
+		double total = 0;
+		for(double ms : _passMs) total += ms;
+		char buf[320];
+		snprintf(buf, sizeof(buf), "[HD-PASS] NES ms/frame : preparation %.2f, resolution des tiles (1 coeur) %.2f, dessin %.2f, particules %.2f, calques %.2f, distorsion %.2f, videos %.2f (total %.2f, %d threads)",
+			_passMs[0] / _passFrames, _passMs[1] / _passFrames, _passMs[2] / _passFrames, _passMs[3] / _passFrames,
+			_passMs[4] / _passFrames, _passMs[5] / _passFrames, _passMs[6] / _passFrames, total / _passFrames, _pool.Size());
+		MessageManager::Log(buf);
+		for(double& ms : _passMs) ms = 0;
+		_passFrames = 0;
 	}
 }
 
