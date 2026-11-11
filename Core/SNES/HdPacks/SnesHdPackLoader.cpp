@@ -340,6 +340,20 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 	std::vector<std::string> imageCatalog;
 	std::unordered_map<std::string, SnesHdPackCondition*> conditionsByName;
 
+	// Conditions integrees (comme Mesen NES) : [hmirror] [!hmirror] [vmirror] [!vmirror]
+	// Vraies selon le sens REEL de la tile a l'ecran (contexte passe par GetHdTile / <2DSpriteLight>)
+	for(int inv = 0; inv < 2; inv++) {
+		for(int axis = 0; axis < 2; axis++) {
+			std::unique_ptr<SnesHdPackCondition> c;
+			if(axis == 0) c = std::make_unique<SnesHdPackHorizontalMirroringCondition>();
+			else c = std::make_unique<SnesHdPackVerticalMirroringCondition>();
+			c->Name = std::string(inv ? "!" : "") + (axis == 0 ? "hmirror" : "vmirror");
+			c->Initialize(&outData->ScreenInfo, outData.get());
+			conditionsByName[c->Name] = c.get();
+			outData->Conditions.emplace_back(std::move(c));
+		}
+	}
+
 	//Dictionnaire pour stocker les alias (Clé = "@Nom", Valeur = "remplacement")
 	std::unordered_map<std::string, std::string> aliases;
 
@@ -388,6 +402,8 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			else if(k == "self" || k == "selflight") L.SelfLight = std::clamp(std::stof(v), 0.0f, 1.0f);
 			else if(k == "glow" || k == "lueur") L.Glow = std::clamp(std::stof(v), 0.0f, 4.0f);
 			else if(k == "halo") L.Halo = std::clamp(std::stof(v), 0.0f, 64.0f);
+			else if(k == "dx" || k == "offsetx") L.OffsetX = std::stof(v);
+			else if(k == "dy" || k == "offsety") L.OffsetY = std::stof(v);
 			else if(k == "distance" || k == "airdistance") L.AirDistance = std::max(0.0f, std::stof(v));
 			else if(k == "plane" || k == "map" || k == "carte") L.PlaneViews = !(v == "0" || StringUtilities::ToLower(v) == "false" || StringUtilities::ToLower(v) == "non");
 			else return false;
@@ -1765,6 +1781,33 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 		/// PARSING <SpriteLight> : lumiere 3D attachee a une tile de sprite
 		// [conditions]<SpriteLight>HASH_TILE[,palette|*][,radius=48][,color=FFA040][,intensity=1.4][,height=auto][,flicker=0][,speed=9][,mode=light|add]
+		/// PARSING <2DSpriteLight> : halo 2D attache au centre d'une tile de sprite (syntaxe de <SpriteLight>, sans hauteur)
+		// [conditions]<2DSpriteLight>HASH_TILE[,palette|*][,radius=48][,color=FFA040][,intensity=1.4][,flicker=0][,speed=9][,mode=light|add|shadow]
+		else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<2dspritelight>") {
+			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(15), ',');
+			auto L = std::make_unique<SnesHdSpriteLightInfo>();
+			L->Conditions = currentConditions;
+			int pos = 0; bool ok = false;
+			for(std::string tok : tokens) {
+				tok = StringUtilities::Trim(tok);
+				if(tok.empty()) continue;
+				size_t eq = tok.find('=');
+				if(eq != std::string::npos) { parseSpriteLightKey(*L, tok.substr(0, eq), tok.substr(eq + 1)); continue; }
+				if(pos == 0) { try { L->Hash = std::stoull(tok, nullptr, 16); ok = true; } catch(...) {} }
+				else if(pos == 1) {
+					std::string p = StringUtilities::ToLower(tok);
+					if(!(p == "*" || p == "all")) { try { L->Palette = (uint32_t)std::stoul(p); L->AnyPalette = false; } catch(...) {} }
+				}
+				pos++;
+			}
+			if(ok) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DSpriteLight> tile " + HexUtilities::ToHex32((uint32_t)L->Hash) +
+					", rayon " + std::to_string((int)L->Radius));
+				outData->Sprite2DLights.push_back(std::move(L));
+			} else {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DSpriteLight> : hash invalide.");
+			}
+		}
 		else if(StringUtilities::ToLower(lineContent.substr(0, 13)) == "<spritelight>") {
 			std::vector<std::string> tokens = StringUtilities::Split(lineContent.substr(13), ',');
 			auto L = std::make_unique<SnesHdSpriteLightInfo>();

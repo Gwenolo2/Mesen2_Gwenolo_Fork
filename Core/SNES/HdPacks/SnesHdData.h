@@ -1361,6 +1361,8 @@ struct SnesHdSpriteLightInfo
 	float FlickerSpeed = 9.0f;
 	bool Additive = false;
 	bool Shadow = false;          // mode=shadow : assombrit au lieu d'eclairer
+	float OffsetX = 0.0f;         // <2DSpriteLight> dx= : decalage du halo (pixels SNES), inverse si la tile est retournee
+	float OffsetY = 0.0f;         // <2DSpriteLight> dy=
 	float SelfLight = 1.0f;       // part de la lumiere recue par le sprite lui-meme (0 = eclaire autour, pas le sprite)
 	float Glow = 0.0f;            // lueur propre du sprite (ajoute la couleur sur ses pixels, meme en l'air / hors eclairage)
 	float Halo = 0.0f;            // halo lumineux autour du sprite (rayon en pixels SNES)
@@ -1839,6 +1841,7 @@ public:
 	std::vector<std::unique_ptr<SnesHdM7AmbientInfo>> M7Ambients;
 	std::vector<std::unique_ptr<SnesHdNoLightRule>> NoLightRules; // <NoLightFXOnSprite>
 	std::vector<std::unique_ptr<SnesHdSpriteLightInfo>> SpriteLights; // <SpriteLight>
+	std::vector<std::unique_ptr<SnesHdSpriteLightInfo>> Sprite2DLights; // <2DSpriteLight> : halo 2D au centre des tiles reconnues
 	std::vector<std::unique_ptr<SnesHdNoLightRule>> NoReflectRules; // <NoLiquidReflect> : tiles sans reflet dans l'eau / la lave
 	std::vector<std::unique_ptr<SnesHdNoLightRule>> FrontOf3DRules; // <FrontOf3D> : devant relief / panneaux / modeles / effets
 	std::vector<std::unique_ptr<SnesHdNoLightRule>> Ignore2DOverlaysRules; // <Ignore2DOverlays> : tiles nettes pendant la distorsion <2DOverlay> (HUD)

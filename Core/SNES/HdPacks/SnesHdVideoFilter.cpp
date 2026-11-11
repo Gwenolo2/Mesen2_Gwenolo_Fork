@@ -5045,6 +5045,51 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	}
 
+		// <2DSpriteLight> : halo 2D au centre de chaque tile reconnue (sans sol). Additif, ou assombrissant en mode=shadow
+		if(!_framePack->Sprite2DLights.empty()) {
+			struct Light2D { float cx, cy, rad, cr, cg, cb, inten; bool shadow; };
+			std::vector<Light2D> lights2d;
+			const float S2 = (float)scale;
+			const float tSec = (float)_framePack->ScreenInfo.FrameNumber / 60.0f;
+			for(const auto& item : tilesToExpand) {
+				if(!item.Tile) continue; // oamIndex=128 = addition HD (pas OAM) : le halo doit aussi les voir
+				// contexte des conditions : sens reel de la tile a l'ecran ([hmirror], [!hmirror], [vmirror]...)
+				SnesHdPixelData condCtx2d;
+				condCtx2d.Tile = item.Tile; condCtx2d.HFlip = item.hFlip; condCtx2d.VFlip = item.vFlip; condCtx2d.IsSprite = true;
+				for(auto& rule : _framePack->Sprite2DLights) {
+					if(!rule->Matches(item.Tile)) continue;
+					bool condOk = true;
+					for(auto* c : rule->Conditions) { if(!c->CheckCondition(0, 0, &condCtx2d)) { condOk = false; break; } }
+					if(!condOk) continue;
+					// centre de la tile, en pixels SNES de la sortie (meme repere que les calques)
+					// dx / dy : decalage en pixels SNES, inverse quand la tile est retournee (convention des conditions "nearby")
+					const float ox = (float)(item.startX - (int)srcX + (int)dstX) + 0.5f * (float)item.Tile->Width + (item.hFlip ? -rule->OffsetX : rule->OffsetX);
+					const float oy = (float)(item.startY - (int)srcY + (int)dstY) + 0.5f * (float)item.Tile->Height + (item.vFlip ? -rule->OffsetY : rule->OffsetY);
+					const float fk = rule->Flicker > 0.0f ? 1.0f - rule->Flicker * 0.5f * (1.0f + std::sin(rule->FlickerSpeed * tSec)) : 1.0f;
+					lights2d.push_back({ ox * S2, oy * S2, std::max(1.0f, rule->Radius) * S2,
+						(float)((rule->Color >> 16) & 0xFF), (float)((rule->Color >> 8) & 0xFF), (float)(rule->Color & 0xFF),
+						rule->Intensity * fk, rule->Shadow });
+				}
+			}
+			for(const Light2D& L : lights2d) {
+				const int x0 = std::max(0, (int)std::floor(L.cx - L.rad)), x1 = std::min((int)outWidth - 1, (int)std::ceil(L.cx + L.rad));
+				const int y0 = std::max(0, (int)std::floor(L.cy - L.rad)), y1 = std::min((int)hdHeight - 1, (int)std::ceil(L.cy + L.rad));
+				for(int y = y0; y <= y1; y++) {
+					uint32_t* row = out + (size_t)y * outWidth;
+					for(int x = x0; x <= x1; x++) {
+						const float ddx = (float)x + 0.5f - L.cx, ddy = (float)y + 0.5f - L.cy;
+						const float f = std::clamp(1.0f - std::sqrt(ddx * ddx + ddy * ddy) / L.rad, 0.0f, 1.0f);
+						const float k = f * f * L.inten;
+						if(k <= 0.0f) continue;
+						const uint32_t d = row[x];
+						float r = (float)((d >> 16) & 0xFF), g = (float)((d >> 8) & 0xFF), b = (float)(d & 0xFF);
+						if(L.shadow) { const float keep = std::clamp(1.0f - k, 0.0f, 1.0f); r *= keep; g *= keep; b *= keep; }
+						else { r += L.cr * k; g += L.cg * k; b += L.cb * k; }
+						row[x] = 0xFF000000u | ((uint32_t)std::clamp(r + 0.5f, 0.0f, 255.0f) << 16) | ((uint32_t)std::clamp(g + 0.5f, 0.0f, 255.0f) << 8) | (uint32_t)std::clamp(b + 0.5f, 0.0f, 255.0f);
+					}
+				}
+			}
+		}
 		// <2DOverlay> type=plainscreen / ellipse / shadows / clouds / fog : calques poses sur l'image finale (apres la distorsion ; <Ignore2DOverlays> respecte)
 	{
 		auto fxBlend = [](uint32_t d, uint32_t s, float a) -> uint32_t {
