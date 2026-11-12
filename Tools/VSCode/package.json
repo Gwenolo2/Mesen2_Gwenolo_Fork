@@ -1,0 +1,55 @@
+{
+  "name": "mesen-hd-pack-snes",
+  "displayName": "Mesen HD Pack (SNES)",
+  "description": "Coloration, aide et vérifications pour les packs HD SNES de Mesen2 Gwenolo (snes_hires.txt).",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:mesen-snes-hd"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "mesen-snes-hd",
+        "aliases": [
+          "Mesen HD Pack (SNES)"
+        ],
+        "filenames": [
+          "snes_hires.txt"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "mesen-snes-hd",
+        "scopeName": "source.mesen-snes-hd",
+        "path": "./syntaxes/mesen-snes-hd.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "mesenHd.listConditions",
+        "title": "Mesen HD : lister les conditions et includes du pack"
+      }
+    ]
+  },
+  "scripts": {
+    "generate:grammar": "python3 scripts/generate-grammar.py",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

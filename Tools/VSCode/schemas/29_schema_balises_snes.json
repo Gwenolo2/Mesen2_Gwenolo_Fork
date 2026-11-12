@@ -1,0 +1,3853 @@
+{
+  "schemaVersion": 1,
+  "console": "snes",
+  "fileName": "snes_hires.txt",
+  "generatedFrom": {
+    "code": "Core/SNES/HdPacks/SnesHdPackLoader.cpp (fonction LoadHdPack, numéros de ligne indicatifs)",
+    "docs": [
+      "claude/03_Format_HdPack.md",
+      "claude/20_Tags_HdPack_SNES.md",
+      "claude/22_Idees_Features.md"
+    ],
+    "date": "2026-11-12 (régénéré : relecture complète du loader)"
+  },
+  "conventions": {
+    "status": {
+      "implemented": "lu par le loader, paramètres vérifiés dans le code",
+      "partial": "lu par le loader, paramètres partiellement vérifiés (le reste vient des docs)",
+      "docOnly": "décrit dans les docs, non vérifié dans le code lu",
+      "unknown": "présent dans le code, non documenté",
+      "planned": "décrit comme idée (doc 22), absent du loader",
+      "notRecognized": "cité dans les docs, absent du loader SNES"
+    },
+    "paramSource": "code | doc",
+    "decimalOrHex": "les hashs (tile, carte Mode 7) sont en hexadécimal ; les palettes sont en décimal (std::stoul base 10) ; les positions et tailles sont en décimal",
+    "comments": "# jusqu'en fin de ligne, retiré par le loader SNES (sauf dans la ligne traitée avant parsing)",
+    "lineEndings": "CRLF et LF acceptés (le loader retire les \\r)",
+    "caseSensitivity": "les balises sont comparées en minuscules pour certaines (voir matching.caseInsensitive), exactement pour les autres"
+  },
+  "matching": {
+    "caseSensitive": [
+      "<tile>",
+      "<tile_hflip>",
+      "<tile_vflip>",
+      "<tile_hvflip>",
+      "<img>",
+      "<scale>",
+      "<condition>",
+      "<background>",
+      "<alias>",
+      "<include>",
+      "<fallback",
+      "<addition>",
+      "<overscan>",
+      "<widescreen>",
+      "<setLayersOrder>",
+      "<video>",
+      "<patch>",
+      "<msuToOgg> (recherche n'importe où dans la ligne)",
+      "<2DOverlay>",
+      "<2DLiquid>",
+      "<2DPerspective>",
+      "<LoadingScreen>",
+      "<m7img>",
+      "<m7tiles>",
+      "<m7light>",
+      "<m7ambient>",
+      "<m7model>",
+      "<m7relief>",
+      "<m7billboard>",
+      "<3DParticles>",
+      "<gpu3d>",
+      "<disableTile>",
+      "<disableOriginalTiles>",
+      "<disableOriginalSprites>",
+      "<disableBg1..4>",
+      "<disablesublayer>",
+      "<disableSubLayer>",
+      "<disableColorMath>",
+      "<disableAllColorMathWindow>",
+      "<disableColorMathWindow>"
+    ],
+    "caseInsensitive": [
+      "<frontof3d>",
+      "<ignore2doverlays>",
+      "<spritelight>",
+      "<2dspritelight>",
+      "<noliquidreflect>",
+      "<noliquidrefelct> (faute acceptée)",
+      "<nolightfxonsprite>",
+      "<m7effect>",
+      "<m7liquidbackground>",
+      "<m7material>"
+    ],
+    "note": "Une balise écrite avec une casse non prévue est ignorée sans message. Le plugin doit signaler la casse si la balise n'est reconnue qu'en minuscules ou en majuscules différentes."
+  },
+  "conditionsPrefix": {
+    "syntax": "[nom] ou [nom1&nom2] (ET). [!nom] = inverse, créée automatiquement pour chaque condition déclarée.",
+    "operatorOr": "non implémenté (prévu, doc 22 §5 : |, parenthèses)",
+    "declaredBefore": true,
+    "note": "Les noms inconnus sont ignorés silencieusement dans le préfixe : [nomInconnu]<tile>… s'applique sans condition. Le plugin doit signaler un nom non déclaré."
+  },
+  "tags": [
+    {
+      "name": "<include>",
+      "status": "implemented",
+      "block": false,
+      "syntax": "<include>chemin",
+      "params": [
+        {
+          "pos": 1,
+          "name": "chemin",
+          "type": "path",
+          "required": true,
+          "src": "code"
+        }
+      ],
+      "notes": "Résolu avant le reste, relatif à la racine du pack. Profondeur maximale 20 (code)."
+    },
+    {
+      "name": "<alias>",
+      "status": "implemented",
+      "block": false,
+      "syntax": "<alias>Nom,valeur",
+      "params": [
+        {
+          "pos": 1,
+          "name": "Nom",
+          "type": "identifier",
+          "required": true,
+          "src": "code",
+          "desc": "Remplacé par @Nom dans les lignes suivantes"
+        },
+        {
+          "pos": 2,
+          "name": "valeur",
+          "type": "string",
+          "required": true,
+          "src": "code"
+        }
+      ],
+      "notes": "Substitution textuelle appliquée avant la lecture des tags, jusqu'à 10 passes par ligne. Un alias peut en appeler un autre."
+    },
+    {
+      "name": "<fallback>",
+      "status": "implemented",
+      "block": true,
+      "syntax": "<fallback,palette,image>{ ... }",
+      "params": [
+        {
+          "pos": 1,
+          "name": "palette",
+          "type": "int",
+          "required": true,
+          "src": "code",
+          "desc": "Palette de remplacement pour chaque <tile> du bloc"
+        },
+        {
+          "pos": 2,
+          "name": "image",
+          "type": "image",
+          "required": true,
+          "src": "code",
+          "desc": "PNG, index <img> ou texte traité comme chemin"
+        }
+      ],
+      "notes": "Chaque <tile> du bloc est enregistrée en plus avec la palette et l'image du bloc. Blocs empilables. Fermé par une ligne « } » ou « }> »."
+    },
+    {
+      "name": "<img>",
+      "status": "implemented",
+      "block": false,
+      "syntax": "<img>chemin.png",
+      "params": [
+        {
+          "pos": 1,
+          "name": "chemin",
+          "type": "path",
+          "required": true,
+          "src": "code"
+        }
+      ],
+      "notes": "Catalogue : l'index dans l'ordre d'apparition (0, 1, 2…) sert de valeur pour le champ image des <tile>."
+    },
+    {
+      "name": "<scale>",
+      "status": "implemented",
+      "block": false,
+      "syntax": "<scale>N",
+      "params": [
+        {
+          "pos": 1,
+          "name": "N",
+          "type": "int",
+          "required": true,
+          "src": "code",
+          "example": "4"
+        }
+      ],
+      "notes": "Facteur HD. Une valeur invalide est ignorée sans message."
+    },
+    {
+      "name": "<LoadingScreen>",
+      "status": "implemented",
+      "block": false,
+      "syntax": "<LoadingScreen>fichier.png,centered,display_file_names,scrollBarX,scrollBarY,scrollBarColor",
+      "params": [
+        {
+          "pos": 1,
+          "name": "fichier",
+          "type": "path",
+          "required": true,
+          "src": "code",
+          "desc": "black, blank ou vide = écran noir ; default = écran noir avec message ; fichier introuvable = écran noir."
+        },
+        {
+          "pos": 2,
+          "name": "Centered",
+          "type": "bool",
+          "required": false,
+          "src": "code",
+          "default": true
+        },
+        {
+          "pos": 3,
+          "name": "ShowFileNames",
+          "type": "bool",
+          "required": false,
+          "src": "code",
+          "default": true
+        },
+        {
+          "pos": 4,
+          "name": "BarX",
+          "type": "float",
+          "required": false,
+          "src": "code",
+          "default": 10,
+          "desc": "borné 0-100"
+        },
+        {
+          "pos": 5,
+          "name": "BarY",
+          "type": "float",
+          "required": false,
+          "src": "code",
+          "default": 95,
+          "desc": "borné 0-100"
+        },
+        {
+          "pos": 6,
+          "name": "BarColor",
+          "type": "color",
+          "required": false,
+          "src": "code"
+        }
+      ],
+      "notes": "Lu par HdLoadingScreen::ParseTag (Core/Shared/HdLoadingScreen.h)."
+    },
+    {
+      "name": "<tile>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<tile>hash,palette,image,x,y[,ignoreColorMath[,defaultPalette]]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "hash",
+          "type": "hex64",
+          "required": true,
+          "src": "code",
+          "desc": "Hash du contenu VRAM de la tile (hexadécimal)"
+        },
+        {
+          "pos": 2,
+          "name": "palette",
+          "type": "int|wildcard",
+          "required": true,
+          "values": "0-15 (décimal), *, all",
+          "src": "code",
+          "desc": "* ou all = toutes palettes"
+        },
+        {
+          "pos": 3,
+          "name": "image",
+          "type": "image",
+          "required": true,
+          "src": "code",
+          "desc": "Chemin .png, index <img>, ou disable / blank pour masquer la tile"
+        },
+        {
+          "pos": 4,
+          "name": "x",
+          "type": "int",
+          "required": true,
+          "src": "code",
+          "unit": "pixels HD"
+        },
+        {
+          "pos": 5,
+          "name": "y",
+          "type": "int",
+          "required": true,
+          "src": "code",
+          "unit": "pixels HD"
+        },
+        {
+          "pos": 6,
+          "name": "ignoreColorMath",
+          "type": "bool",
+          "required": false,
+          "default": false,
+          "values": "1, true, ignore",
+          "src": "code"
+        },
+        {
+          "pos": 7,
+          "name": "defaultPalette",
+          "type": "bool",
+          "required": false,
+          "default": false,
+          "values": "Y, yes, 1, true",
+          "src": "code",
+          "desc": "Sert aussi aux palettes sans tile explicite (dernier recours)"
+        }
+      ],
+      "notes": "La zone fait 8 × scale pixels HD. Un mot randomize ou random dans le chemin tire un sous-dossier au chargement. Avec image = disable ou blank, la tile est masquée (aucun pixel SD ni HD) ; dans ce cas seuls hash et palette sont lus."
+    },
+    {
+      "name": "<tile_hflip>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "même syntaxe que <tile>",
+      "params": "identiques à <tile>",
+      "notes": "Le PNG est déjà dessiné retourné horizontalement. Utilisé seulement quand la tile SNES est affichée retournée. Sinon la <tile> simple est retournée automatiquement."
+    },
+    {
+      "name": "<tile_vflip>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "même syntaxe que <tile>",
+      "params": "identiques à <tile>",
+      "notes": "Idem, retournée verticalement."
+    },
+    {
+      "name": "<tile_hvflip>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "même syntaxe que <tile>",
+      "params": "identiques à <tile>",
+      "notes": "Idem, retournée dans les deux sens."
+    },
+    {
+      "name": "<disableTile>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<disableTile>hash,palette",
+      "params": [
+        {
+          "pos": 1,
+          "name": "hash",
+          "type": "hex64",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "palette",
+          "type": "int",
+          "required": true,
+          "src": "code",
+          "desc": "Décimal (stoul)"
+        }
+      ],
+      "notes": "Moins de 2 paramètres = message. Crée une tile fantôme désactivée avec les conditions du préfixe."
+    },
+    {
+      "name": "<disableOriginalTiles>",
+      "status": "implemented",
+      "block": false,
+      "conditions": false,
+      "syntax": "<disableOriginalTiles>",
+      "params": [],
+      "notes": "Ligne exacte, sans paramètre et sans conditions ici (le loader compare la ligne entière). Ne dessine que les remplacements HD."
+    },
+    {
+      "name": "<disableOriginalSprites>",
+      "status": "implemented",
+      "block": false,
+      "conditions": false,
+      "syntax": "<disableOriginalSprites>",
+      "params": [],
+      "notes": "Idem pour les sprites."
+    },
+    {
+      "name": "<addition>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<addition>hashBase,paletteBase,hashAjoutee,paletteAjoutee,dx,dy[,ignorePaletteBase]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "hashBase",
+          "type": "hex64",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "paletteBase",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "hashAjoutee",
+          "type": "hex64",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "paletteAjoutee",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 5,
+          "name": "dx",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 6,
+          "name": "dy",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 7,
+          "name": "ignorePaletteBase",
+          "type": "bool",
+          "required": false,
+          "default": false,
+          "values": "1, true, ignore",
+          "src": "code"
+        }
+      ],
+      "notes": "Au moins 6 paramètres (code). Décalage miroir si le sprite est retourné."
+    },
+    {
+      "name": "<condition>",
+      "status": "implemented",
+      "block": false,
+      "syntax": "<condition>nom,type,param1,param2,...",
+      "params": [
+        {
+          "pos": 1,
+          "name": "nom",
+          "type": "identifier",
+          "required": true,
+          "src": "code",
+          "desc": "Crée nom et !nom"
+        },
+        {
+          "pos": 2,
+          "name": "type",
+          "type": "enum",
+          "required": true,
+          "src": "code",
+          "values": [
+            "memoryCheck",
+            "memoryCheckConstant",
+            "vramMemoryCheck",
+            "vramMemoryCheckConstant",
+            "ppuMemoryCheck",
+            "ppuMemoryCheckConstant",
+            "oamMemoryCheck",
+            "oamMemoryCheckConstant",
+            "cgramMemoryCheck",
+            "cgramMemoryCheckConstant",
+            "aramMemoryCheck",
+            "aramMemoryCheckConstant",
+            "spcMemoryCheck",
+            "spcMemoryCheckConstant",
+            "frameRange",
+            "tileNearby",
+            "spriteNearby",
+            "tileAtPosition",
+            "spriteAtPosition",
+            "colorWindow"
+          ]
+        },
+        {
+          "pos": 3,
+          "name": "...",
+          "type": "depends on type",
+          "required": true,
+          "src": "code",
+          "desc": "voir conditionTypes"
+        }
+      ],
+      "notes": "Au moins 4 champs (code). Le type inconnu est journalisé. Les types *MemoryCheck et *MemoryCheckConstant sont reconnus par sous-chaîne (Constant) et préfixe (vram, ppu, oam, cgram, aram, spc). Voir conditionTypes."
+    },
+    {
+      "name": "<background>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<background>fichier|dossier,luminosite,scrollX,scrollY,zindex,offsetX,offsetY,masterLayer,tileX,tileY,framesBetweenSteps,reverse,alpha,operator,widescreen",
+      "params": [
+        {
+          "pos": 1,
+          "name": "fichier",
+          "type": "path",
+          "required": true,
+          "src": "code",
+          "desc": "PNG, ou dossier de PNG = animation (triés par nom). randomize accepté."
+        },
+        {
+          "pos": 2,
+          "name": "luminosite",
+          "type": "float",
+          "default": 1.0,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "scrollX",
+          "type": "float",
+          "default": 0.0,
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "scrollY",
+          "type": "float",
+          "default": 0.0,
+          "src": "code"
+        },
+        {
+          "pos": 5,
+          "name": "zindex",
+          "type": "int",
+          "default": 0,
+          "src": "code",
+          "desc": "Tri peintre"
+        },
+        {
+          "pos": 6,
+          "name": "offsetX",
+          "type": "int",
+          "default": 0,
+          "src": "code",
+          "unit": "pixels SD"
+        },
+        {
+          "pos": 7,
+          "name": "offsetY",
+          "type": "int",
+          "default": 0,
+          "src": "code",
+          "unit": "pixels SD"
+        },
+        {
+          "pos": 8,
+          "name": "masterLayer",
+          "type": "int",
+          "default": 1,
+          "values": "1-4",
+          "src": "code"
+        },
+        {
+          "pos": 9,
+          "name": "tileX",
+          "type": "bool",
+          "default": false,
+          "src": "code",
+          "desc": "Répétition horizontale"
+        },
+        {
+          "pos": 10,
+          "name": "tileY",
+          "type": "bool",
+          "default": false,
+          "src": "code",
+          "desc": "Répétition verticale"
+        },
+        {
+          "pos": 11,
+          "name": "framesBetweenSteps",
+          "type": "int",
+          "default": 1,
+          "src": "code",
+          "desc": "Utile seulement pour un dossier"
+        },
+        {
+          "pos": 12,
+          "name": "reverse",
+          "type": "bool",
+          "default": false,
+          "src": "code",
+          "desc": "Inverse l'ordre des images du dossier"
+        },
+        {
+          "pos": 13,
+          "name": "alpha",
+          "type": "float",
+          "default": 1.0,
+          "range": "0.00-1.00",
+          "src": "code"
+        },
+        {
+          "pos": 14,
+          "name": "operator",
+          "type": "enum",
+          "default": "*",
+          "values": [
+            "*",
+            "multiply",
+            "/",
+            "divide",
+            "+",
+            "plus",
+            "-",
+            "minus"
+          ],
+          "src": "code",
+          "desc": "Mode de défilement ; + et - font défiler sans scroll du jeu"
+        },
+        {
+          "pos": 15,
+          "name": "widescreen",
+          "type": "enum",
+          "default": "",
+          "values": [
+            "on",
+            "true",
+            "1",
+            "off",
+            "false",
+            "0"
+          ],
+          "src": "code"
+        }
+      ],
+      "notes": "Champs 2 à 4 lus avant les autres (ordre du code). Le scroll est multiplié par le ratio."
+    },
+    {
+      "name": "<setLayersOrder>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<setLayersOrder>zBG1,zBG2,zBG3,zBG4",
+      "params": [
+        {
+          "pos": 1,
+          "name": "zBG1",
+          "type": "int",
+          "required": true,
+          "src": "code",
+          "default": 20
+        },
+        {
+          "pos": 2,
+          "name": "zBG2",
+          "type": "int",
+          "required": true,
+          "src": "code",
+          "default": 20
+        },
+        {
+          "pos": 3,
+          "name": "zBG3",
+          "type": "int",
+          "required": true,
+          "src": "code",
+          "default": 20
+        },
+        {
+          "pos": 4,
+          "name": "zBG4",
+          "type": "int",
+          "required": true,
+          "src": "code",
+          "default": 20
+        }
+      ],
+      "notes": "Il faut 4 valeurs. Une valeur invalide prend 20 (code)."
+    },
+    {
+      "name": "<disableBg1>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<disableBg1>",
+      "params": [],
+      "notes": "Idem <disableBg2>, <disableBg3>, <disableBg4>."
+    },
+    {
+      "name": "<disablesublayer>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<disableSubLayer>",
+      "params": [],
+      "notes": "Les deux casses sont acceptées (disableSubLayer et disablesublayer)."
+    },
+    {
+      "name": "<disableColorMath>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<disableColorMath>",
+      "params": []
+    },
+    {
+      "name": "<disableAllColorMathWindow>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<disableAllColorMathWindow>",
+      "params": [],
+      "notes": "Supprime l'effet SD de toutes les zones de color window. Voir doc 08."
+    },
+    {
+      "name": "<disableColorMathWindow>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<disableColorMathWindow>HASH",
+      "params": [
+        {
+          "pos": 1,
+          "name": "HASH",
+          "type": "hex32",
+          "required": true,
+          "src": "code",
+          "desc": "Hash de forme affiché par [HD-WINDOW] dans le journal"
+        }
+      ],
+      "notes": "Sans HASH, le loader journalise une erreur."
+    },
+    {
+      "name": "<widescreen>",
+      "status": "implemented",
+      "block": false,
+      "syntax": "<widescreen>mode,objets",
+      "params": [
+        {
+          "pos": 1,
+          "name": "mode",
+          "type": "enum",
+          "required": true,
+          "values": [
+            "mode7",
+            "all"
+          ],
+          "src": "code",
+          "desc": "Autre valeur : désactivé"
+        },
+        {
+          "pos": 2,
+          "name": "objets",
+          "type": "enum",
+          "default": "safe",
+          "values": [
+            "safe",
+            "unsafe"
+          ],
+          "src": "code"
+        }
+      ],
+      "notes": "Voies widescreen : voir docs 14 et 15."
+    },
+    {
+      "name": "<overscan>",
+      "status": "implemented",
+      "block": false,
+      "syntax": "<overscan>haut,droite,bas,gauche[,stretch]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "haut",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "droite",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "bas",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "gauche",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 5,
+          "name": "stretch",
+          "type": "bool",
+          "default": true,
+          "values": "false, 0, no, nostretch pour désactiver",
+          "src": "code"
+        }
+      ],
+      "notes": "Au moins 4 valeurs. Pas de garde sur la conversion (std::stoi), donc une valeur invalide fait planter ou est ignorée selon le cas (doc 16)."
+    },
+    {
+      "name": "<patch>",
+      "status": "implemented",
+      "block": false,
+      "syntax": "<patch>fichier.ips|fichier.bps[,sha1|*]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "fichier",
+          "type": "path",
+          "required": true,
+          "src": "code",
+          "desc": "Chemin relatif ; \\ remplacé par /. Fichier absent = message, rien n'est enregistré."
+        },
+        {
+          "pos": 2,
+          "name": "sha1",
+          "type": "hex160|wildcard",
+          "required": false,
+          "src": "code",
+          "default": "*",
+          "desc": "40 caractères hex (converti en majuscules). Absent, vide ou * = patch inconditionnel (clé FORCE)."
+        }
+      ],
+      "notes": "Un SHA-1 de longueur ≠ 40 est refusé avec message."
+    },
+    {
+      "name": "<msuToOgg>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<msuToOgg>piste,fichier.ogg[,pointDeBoucle]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "piste",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "fichier",
+          "type": "path",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "pointDeBoucle",
+          "type": "uint",
+          "required": false,
+          "src": "code",
+          "unit": "échantillons"
+        }
+      ],
+      "notes": "La balise est cherchée n'importe où dans la ligne. Les conditions ne sont lues que si la ligne commence par [. Plusieurs lignes pour une même piste, choisies par conditions."
+    },
+    {
+      "name": "<video>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<video>fichier.mpg,mode,saut,uneFois[,muet][,boucle][,x,y][,z][,alpha][,etirer]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "fichier",
+          "type": "path",
+          "required": true,
+          "src": "code",
+          "desc": "MPEG-1"
+        },
+        {
+          "pos": 2,
+          "name": "mode",
+          "type": "enum",
+          "required": true,
+          "values": [
+            "overlay",
+            "pause"
+          ],
+          "src": "code",
+          "default": "overlay"
+        },
+        {
+          "pos": 3,
+          "name": "saut",
+          "type": "list",
+          "required": true,
+          "values": [
+            "start",
+            "a",
+            "b"
+          ],
+          "src": "code",
+          "desc": "Mots recherchés dans la chaîne"
+        },
+        {
+          "pos": 4,
+          "name": "uneFois",
+          "type": "bool",
+          "required": true,
+          "values": "true, 1, yes",
+          "src": "code"
+        },
+        {
+          "pos": 5,
+          "name": "muet",
+          "type": "bool",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 6,
+          "name": "boucle",
+          "type": "false|true|int",
+          "required": false,
+          "src": "code",
+          "desc": "false/no/0 = pas de boucle ; true/yes = depuis le début ; N = frame de reprise"
+        },
+        {
+          "pos": 7,
+          "name": "x",
+          "type": "int",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 8,
+          "name": "y",
+          "type": "int",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 9,
+          "name": "z",
+          "type": "int",
+          "required": false,
+          "default": 99,
+          "src": "doc"
+        },
+        {
+          "pos": 10,
+          "name": "alpha",
+          "type": "bool",
+          "required": false,
+          "src": "doc",
+          "desc": "noir = transparent"
+        },
+        {
+          "pos": 11,
+          "name": "etirer",
+          "type": "bool",
+          "required": false,
+          "default": false,
+          "src": "doc"
+        }
+      ],
+      "notes": "Au moins 4 valeurs (code). Les paramètres 9 à 11 et leurs défauts viennent de la doc 20 (non relus dans le code)."
+    },
+    {
+      "name": "<2DOverlay>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<2DOverlay>fichier.json[,Z=95][,Layer=0][,SpeedX=1][,SpeedY=1][,Alpha=1][,FieldW=1][,FieldH=1]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "fichier",
+          "type": "path",
+          "required": true,
+          "src": "code",
+          "desc": "Fichier JSON à plat ; la clé type choisit l'effet"
+        },
+        {
+          "name": "Z",
+          "kv": true,
+          "type": "float",
+          "default": 95,
+          "src": "code"
+        },
+        {
+          "name": "Layer",
+          "kv": true,
+          "type": "int",
+          "values": "0-4",
+          "src": "code"
+        },
+        {
+          "name": "SpeedX",
+          "kv": true,
+          "type": "float",
+          "default": 1,
+          "src": "code"
+        },
+        {
+          "name": "SpeedY",
+          "kv": true,
+          "type": "float",
+          "default": 1,
+          "src": "code"
+        },
+        {
+          "name": "Alpha",
+          "kv": true,
+          "type": "float",
+          "default": 1,
+          "src": "code"
+        },
+        {
+          "name": "FieldW",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "FieldH",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        }
+      ],
+      "jsonTypes": {
+        "implemented": [
+          "particles",
+          "distortion",
+          "rays",
+          "aurora",
+          "plainscreen",
+          "ellipse",
+          "shadows",
+          "clouds",
+          "fog",
+          "torchlight"
+        ],
+        "note": "torchlight est lu par le code (IsTorch) et documenté dans la doc 09 (section Torche)."
+      },
+      "jsonKeys": {
+        "tagKeys": {
+          "Z": "alias zindex, défaut 95",
+          "Layer": "0-4, défaut 0",
+          "SpeedX": "défaut 1",
+          "SpeedY": "défaut 1",
+          "Alpha": "0-1, défaut 1",
+          "FieldW": "min 0.25, défaut 1",
+          "FieldH": "min 0.25, défaut 1"
+        },
+        "types": {
+          "particles": "maxparticles(300), rate(60), lifemin(2), lifemax(4), spawnx, spawny, spawnw, spawnh, speedmin(20), speedmax(40), anglemin(80), anglemax(100), gravityx, gravityy, windx, windy, turbulence, turbulencefreq(0.5), rotationmin, rotationmax, spinmin, spinmax, sizestart(1), sizeend, sizerandom, alphastart(1), alphaend, fadein(0.1), fadeout(0.2), colorstart, colorend, dotsize(2), prewarm(true), blend (additive), texture",
+          "distortion": "amp1, amp2 (0), wave1(32), wave2(17), speed1(0.5), speed2(0.3), phase1, phase2, xmin, xmax, ymin, ymax",
+          "rays": "xmin, xmax, ymin, ymax, rayx(0.5), rayy(0), raycount(8, 1-64), rayangle(90), rayspread(60), raywidth(4), raylength(0.8), rayspeed(0.2), raywobble(3), raycolor(FFE8A0)",
+          "aurora": "xmin, xmax, ymin, ymax, size(40, min 4), speed(6), coverage(0.5), fall(0.7), wave(6)",
+          "plainscreen": "xmin, xmax, ymin, ymax, color",
+          "ellipse": "x(128), y(112), negative(false), radiusx(32), radiusy(16, min 0.5), color",
+          "shadows / clouds / fog": "size, speed(8), direction(0), coverage(0.5), seed(1), color (défauts : fog A8B8C8, clouds FFFFFF, shadows 000000)",
+          "torchlight": "x(128), y(112), radius(48, min 1), softness(0.5, 0.01-1), dark(true), glow(0.15, 0-1), color(FFE0A0), alpha"
+        },
+        "note": "Clés lues depuis le JSON puis remplacées par les clés de la balise. Insensibles à la casse."
+      },
+      "notes": "Les kv de la balise remplacent les valeurs du JSON. Clés insensibles à la casse."
+    },
+    {
+      "name": "<2DLiquid>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<2DLiquid>view=side|top,...",
+      "params": [
+        {
+          "name": "view",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "default": "side",
+          "values": [
+            "side",
+            "top"
+          ]
+        },
+        {
+          "name": "level",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 176,
+          "range": "0-240"
+        },
+        {
+          "name": "depth",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 64,
+          "range": "min 1"
+        },
+        {
+          "name": "xmin",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0,
+          "range": "pixels SNES 0-256"
+        },
+        {
+          "name": "xmax",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 256,
+          "range": "pixels SNES 0-256"
+        },
+        {
+          "name": "ymin",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0,
+          "range": "0-240"
+        },
+        {
+          "name": "ymax",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 224,
+          "range": "0-240"
+        },
+        {
+          "name": "amplitude",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 3,
+          "range": "min 0"
+        },
+        {
+          "name": "wavelength",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 48,
+          "range": "min 1"
+        },
+        {
+          "name": "speed",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.8
+        },
+        {
+          "name": "phase",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0
+        },
+        {
+          "name": "scrollx",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0
+        },
+        {
+          "name": "texscale",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 1,
+          "range": "min 0.01"
+        },
+        {
+          "name": "foam",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.6,
+          "range": "0-1"
+        },
+        {
+          "name": "alpha",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 1,
+          "range": "0-1"
+        },
+        {
+          "name": "color",
+          "kv": true,
+          "type": "color",
+          "src": "code",
+          "default": "1E6FB0"
+        },
+        {
+          "name": "deep",
+          "kv": true,
+          "type": "color",
+          "src": "code",
+          "default": "0B2F5C"
+        },
+        {
+          "name": "glow",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0,
+          "range": "0-1"
+        },
+        {
+          "name": "glowradius",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 24,
+          "range": "min 1"
+        },
+        {
+          "name": "bubbles",
+          "kv": true,
+          "type": "int",
+          "src": "code",
+          "default": 0,
+          "range": "0-64"
+        },
+        {
+          "name": "bubblesize",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 1.5
+        },
+        {
+          "name": "bubblerise",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.4
+        },
+        {
+          "name": "prio",
+          "kv": true,
+          "type": "int",
+          "src": "code",
+          "default": 95,
+          "range": "0-255"
+        },
+        {
+          "name": "texture",
+          "kv": true,
+          "type": "path",
+          "src": "code"
+        }
+      ],
+      "notes": "Lignes 2615-2698. Clés lues ci-dessus. Non lues par le code lu : waves, specular, reflect, style, layers, viscosity (à vérifier, voir discrepancies). view=top : xmin/xmax/ymin/ymax utilisés."
+    },
+    {
+      "name": "<2DPerspective>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<2DPerspective>image.png[,zindex][,tileX][,tileY][,alpha][,speedX][,speedY][,mode=floor|ceiling|wall][,side=left|right][,horizon=][,cy=][,depth=][,repeat=][,limit=+N][,fogrange=][,layer=0-4][,fog=RRGGBB][,speedx=][,speedy=]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "image",
+          "type": "path",
+          "required": true,
+          "src": "code",
+          "desc": "Texture ; absente = message d'erreur, rien n'est dessiné"
+        },
+        {
+          "pos": 2,
+          "name": "zindex",
+          "type": "int",
+          "default": 20,
+          "range": "0-255",
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "tileX",
+          "type": "bool",
+          "default": true,
+          "src": "code",
+          "desc": "0 = pas de répétition"
+        },
+        {
+          "pos": 4,
+          "name": "tileY",
+          "type": "bool",
+          "default": true,
+          "src": "code"
+        },
+        {
+          "pos": 5,
+          "name": "alpha",
+          "type": "float",
+          "default": 1.0,
+          "range": "0-1",
+          "src": "code"
+        },
+        {
+          "pos": 6,
+          "name": "speedX",
+          "type": "float",
+          "default": 0.0,
+          "src": "code"
+        },
+        {
+          "pos": 7,
+          "name": "speedY",
+          "type": "float",
+          "default": 0.0,
+          "src": "code"
+        },
+        {
+          "name": "mode",
+          "kv": true,
+          "type": "enum",
+          "default": "floor",
+          "values": [
+            "floor",
+            "ceiling",
+            "wall"
+          ],
+          "src": "code",
+          "desc": "Autre valeur : ignorée avec message"
+        },
+        {
+          "name": "side",
+          "kv": true,
+          "type": "enum",
+          "values": [
+            "left",
+            "right"
+          ],
+          "src": "code",
+          "desc": "Obligatoire si mode=wall, sinon la balise est ignorée"
+        },
+        {
+          "name": "horizon",
+          "kv": true,
+          "type": "float",
+          "default": 112,
+          "range": "0-240 (floor, ceiling) ; >=0 (wall)",
+          "src": "code"
+        },
+        {
+          "name": "cy",
+          "kv": true,
+          "type": "float",
+          "default": 112,
+          "range": "0-240",
+          "src": "code"
+        },
+        {
+          "name": "depth",
+          "kv": true,
+          "type": "float",
+          "default": 64,
+          "min": 1,
+          "src": "code"
+        },
+        {
+          "name": "repeat",
+          "kv": true,
+          "type": "float",
+          "default": 0,
+          "min": 0,
+          "src": "code"
+        },
+        {
+          "name": "limit",
+          "kv": true,
+          "type": "+N",
+          "default": 0,
+          "src": "code",
+          "desc": "Doit commencer par + (relatif à l'horizon) ; sinon ignoré avec message"
+        },
+        {
+          "name": "fogrange",
+          "kv": true,
+          "type": "float",
+          "default": 0,
+          "min": 0,
+          "src": "code"
+        },
+        {
+          "name": "layer",
+          "kv": true,
+          "type": "int",
+          "default": 0,
+          "range": "0-4",
+          "src": "code"
+        },
+        {
+          "name": "fog",
+          "kv": true,
+          "type": "hex24",
+          "src": "code",
+          "desc": "Sans #"
+        },
+        {
+          "name": "speedx",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "desc": "Prioritaire sur le paramètre positionnel 5"
+        },
+        {
+          "name": "speedy",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "desc": "Prioritaire sur le paramètre positionnel 6"
+        }
+      ],
+      "notes": "Clés insensibles à la casse. Lu par SnesHdPackLoader.cpp (ligne ~2698). Mode wall sans side : ignoré avec message. Valeur numérique invalide : message et valeur par défaut."
+    },
+    {
+      "name": "<2DSpriteLight>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<2DSpriteLight>hash[,palette|*][,clé=valeur…]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "hash",
+          "type": "hex64",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "palette",
+          "type": "int|wildcard",
+          "required": false,
+          "default": "*",
+          "src": "code"
+        },
+        {
+          "name": "radius",
+          "kv": true,
+          "type": "float",
+          "default": 48,
+          "src": "code",
+          "alias": [
+            "rayon"
+          ]
+        },
+        {
+          "name": "color",
+          "kv": true,
+          "type": "hex24",
+          "default": "FFA040",
+          "src": "code",
+          "alias": [
+            "couleur"
+          ]
+        },
+        {
+          "name": "intensity",
+          "kv": true,
+          "type": "float",
+          "default": 1.4,
+          "src": "code",
+          "alias": [
+            "intensite"
+          ]
+        },
+        {
+          "name": "height",
+          "kv": true,
+          "type": "float|auto",
+          "src": "code",
+          "alias": [
+            "hauteur"
+          ]
+        },
+        {
+          "name": "flicker",
+          "kv": true,
+          "type": "float",
+          "range": "0-1",
+          "src": "code",
+          "alias": [
+            "scintillement"
+          ]
+        },
+        {
+          "name": "speed",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "flickerspeed",
+            "vitesse"
+          ]
+        },
+        {
+          "name": "mode",
+          "kv": true,
+          "type": "enum",
+          "values": [
+            "light",
+            "add",
+            "shadow"
+          ],
+          "src": "code",
+          "alias": [
+            "sub",
+            "ombre",
+            "additive"
+          ]
+        },
+        {
+          "name": "self",
+          "kv": true,
+          "type": "float",
+          "range": "0-1",
+          "src": "code",
+          "alias": [
+            "selflight"
+          ]
+        },
+        {
+          "name": "glow",
+          "kv": true,
+          "type": "float",
+          "range": "0-4",
+          "src": "code",
+          "alias": [
+            "lueur"
+          ]
+        },
+        {
+          "name": "halo",
+          "kv": true,
+          "type": "float",
+          "range": "0-64",
+          "src": "code"
+        },
+        {
+          "name": "distance",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "airdistance"
+          ]
+        },
+        {
+          "name": "dx",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "offsetx"
+          ]
+        },
+        {
+          "name": "dy",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "offsety"
+          ]
+        },
+        {
+          "name": "plane",
+          "kv": true,
+          "type": "bool",
+          "src": "code",
+          "alias": [
+            "map",
+            "carte"
+          ]
+        }
+      ],
+      "notes": "Implémentée. Doc 20 §3.15 : dx/dy, et la lumière exige une tuile HD. Le nom de balise est insensible à la casse. Clés lues par parseSpriteLightKey ; une clé inconnue est ignorée. Le mode de la <2DSpriteLight> écrite sans bloc n'est pas lu entièrement (partie non relue)."
+    },
+    {
+      "name": "<spritelight>",
+      "status": "implemented",
+      "block": true,
+      "conditions": true,
+      "syntax": "[cond]<SpriteLight>clé=valeur,...{ ... }   |   [cond]<SpriteLight>hash[,palette]",
+      "params": [
+        {
+          "name": "clés",
+          "kv": true,
+          "src": "code",
+          "desc": "Mêmes clés que <2dspritelight>"
+        }
+      ],
+      "notes": "En bloc, chaque <tile> du bloc porte la lumière. Les blocs peuvent s'imbriquer et héritent des conditions parentes."
+    },
+    {
+      "name": "<NoLightFXOnSprite>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<NoLightFXOnSprite>*   |   [cond]<NoLightFXOnSprite>hash[,palette|*]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "cible",
+          "type": "wildcard|hex64",
+          "required": true,
+          "values": "* = tous les sprites",
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "palette",
+          "type": "int|wildcard",
+          "required": false,
+          "default": "*",
+          "src": "code"
+        }
+      ],
+      "notes": "Exclut les sprites des lumières et de l'ambiance. Insensible à la casse."
+    },
+    {
+      "name": "<NoLiquidReflect>",
+      "status": "implemented",
+      "block": true,
+      "conditions": true,
+      "syntax": "[cond]<NoLiquidReflect>hash[,palette|*]   |   [cond]<NoLiquidReflect>{ ... }",
+      "params": [
+        {
+          "pos": 1,
+          "name": "hash",
+          "type": "hex64",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "palette",
+          "type": "int|wildcard",
+          "required": false,
+          "default": "*",
+          "src": "code"
+        }
+      ],
+      "notes": "La faute <noliquidrefelct> est acceptée. Insensible à la casse."
+    },
+    {
+      "name": "<Ignore2DOverlays>",
+      "status": "implemented",
+      "block": true,
+      "conditions": true,
+      "syntax": "[cond]<Ignore2DOverlays>hash[,palette|*]   |   [cond]<Ignore2DOverlays>{ ... }",
+      "params": [
+        {
+          "pos": 1,
+          "name": "hash",
+          "type": "hex64",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "palette",
+          "type": "int|wildcard",
+          "required": false,
+          "default": "*",
+          "src": "code"
+        }
+      ],
+      "notes": "La tile reste nette pendant une distorsion <2DOverlay>. Insensible à la casse."
+    },
+    {
+      "name": "<FrontOf3D>",
+      "status": "partial",
+      "block": true,
+      "conditions": true,
+      "syntax": "[cond]<FrontOf3D>hud|*|HASH[,palette|*]   |   [cond]<FrontOf3D>{ ... }",
+      "params": [
+        {
+          "pos": 1,
+          "name": "cible",
+          "type": "hex64|wildcard|hud",
+          "required": true,
+          "src": "doc",
+          "desc": "hud = sprites hors du sol (doc 11). Le mot hud n'a pas été vérifié dans le code."
+        },
+        {
+          "pos": 2,
+          "name": "palette",
+          "type": "int|wildcard",
+          "required": false,
+          "default": "*",
+          "src": "doc"
+        }
+      ],
+      "notes": "Forme en bloc vérifiée (code). Forme ligne : le code lit tokens[0] comme hash ; vérifier le mot hud."
+    },
+    {
+      "name": "<m7img>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7img>fichier.png,hashCarte,scale[,ignore][,filtre]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "fichier",
+          "type": "path",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "hashCarte",
+          "type": "hex32",
+          "required": true,
+          "src": "code",
+          "desc": "Hash de la tilemap Mode 7 (ici pas de liste A|B|C)"
+        },
+        {
+          "pos": 3,
+          "name": "scale",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "ignore",
+          "type": "bool",
+          "required": false,
+          "default": false,
+          "values": "1, true, ignore",
+          "src": "code"
+        },
+        {
+          "pos": 5,
+          "name": "filtre",
+          "type": "enum",
+          "default": "nearest",
+          "values": [
+            "nearest",
+            "bilinear",
+            "1",
+            "true",
+            "bilinearLight",
+            "anisotropic",
+            "2"
+          ],
+          "src": "code"
+        }
+      ],
+      "notes": "Une carte 1024 × 1024 en HD (1024 × scale). Plusieurs lignes par hash possibles, avec conditions."
+    },
+    {
+      "name": "<m7tiles>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7tiles>fichier.png,hashTile,scale[,x,y]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "fichier",
+          "type": "path",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "hashTile",
+          "type": "hex32",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "scale",
+          "type": "int",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "x",
+          "type": "int",
+          "required": false,
+          "src": "code",
+          "desc": "Position de la tuile dans un atlas"
+        },
+        {
+          "pos": 5,
+          "name": "y",
+          "type": "int",
+          "required": false,
+          "src": "code"
+        }
+      ],
+      "notes": "Au moins 3 valeurs. Prioritaire sur <m7img>."
+    },
+    {
+      "name": "<m7relief>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7relief>relief.png|full,HASH,hauteur[,x,y][,size=…][,sides=0.7][,mode=extrude|height][,color=tile|png]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "type",
+          "type": "enum",
+          "required": true,
+          "src": "code",
+          "values": [
+            "png",
+            "full"
+          ]
+        },
+        {
+          "pos": 2,
+          "name": "hash",
+          "type": "hex32",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "hauteur",
+          "type": "float",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "x",
+          "type": "float",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 5,
+          "name": "y",
+          "type": "float",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "name": "size",
+          "kv": true,
+          "type": "int",
+          "src": "code"
+        },
+        {
+          "name": "sides",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.7,
+          "range": "0-2"
+        },
+        {
+          "name": "mode",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "default": "extrude",
+          "values": [
+            "extrude",
+            "height"
+          ]
+        },
+        {
+          "name": "color",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "default": "tile",
+          "values": [
+            "tile",
+            "png"
+          ]
+        }
+      ],
+      "notes": "Lignes 1407-1470. mode=height → HeightMap."
+    },
+    {
+      "name": "<m7billboard>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7billboard>image.png,HASH_CARTE|*,x,y[,height=48][,elevation=0][,alpha=1]   |   image.png,tile=HASH",
+      "params": [
+        {
+          "pos": 1,
+          "name": "map",
+          "type": "hex32|wildcard|list",
+          "required": false,
+          "src": "code",
+          "desc": "* ou any, ou A|B|C"
+        },
+        {
+          "pos": 2,
+          "name": "x",
+          "type": "float",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "y",
+          "type": "float",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "name": "tile",
+          "kv": true,
+          "type": "hex32",
+          "src": "code",
+          "desc": "OnTile + TileHash"
+        },
+        {
+          "name": "map",
+          "kv": true,
+          "type": "hex32|wildcard|list",
+          "src": "code"
+        },
+        {
+          "name": "height",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "hauteur"
+          ]
+        },
+        {
+          "name": "elevation",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "alpha",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1"
+        }
+      ],
+      "notes": "Lignes 1470-1534. Le paramètre fichier image n'a pas été relu : à vérifier."
+    },
+    {
+      "name": "<m7effect>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7Effect>HASH_CARTE|*,type=flame|smoke|fog|magicfog|flare|clouds,x,y[,elevation=0][,params=effet.json]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "map",
+          "type": "hex32|wildcard|list",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "x",
+          "type": "float",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "y",
+          "type": "float",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "name": "tile",
+          "kv": true,
+          "type": "hex32",
+          "src": "code"
+        },
+        {
+          "name": "x",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "dx",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "dy",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "y",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "elevation",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "z",
+          "kv": true,
+          "type": "int",
+          "src": "code",
+          "alias": [
+            "zindex"
+          ]
+        },
+        {
+          "name": "maxparticles",
+          "kv": true,
+          "type": "int",
+          "src": "code",
+          "range": "1-4000"
+        },
+        {
+          "name": "rate",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "lifemin",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "lifemax",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "radius",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "rayon"
+          ]
+        },
+        {
+          "name": "risemin",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "risemax",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "drift",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "turbulence",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "turbulencefreq",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "windx",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "windy",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "size",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "sizestart",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "sizeend",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "sizerandom",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "alphastart",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "alphaend",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "fadein",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "color0",
+          "kv": true,
+          "type": "color",
+          "src": "code",
+          "alias": [
+            "colorstart"
+          ]
+        },
+        {
+          "name": "color1",
+          "kv": true,
+          "type": "color",
+          "src": "code",
+          "alias": [
+            "colormid"
+          ]
+        },
+        {
+          "name": "color2",
+          "kv": true,
+          "type": "color",
+          "src": "code",
+          "alias": [
+            "colorend"
+          ]
+        },
+        {
+          "name": "color",
+          "kv": true,
+          "type": "color",
+          "src": "code"
+        },
+        {
+          "name": "blend",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "values": [
+            "additive",
+            "add"
+          ]
+        },
+        {
+          "name": "minpixelsize",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "nearfade",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "texture",
+          "kv": true,
+          "type": "path",
+          "src": "code"
+        },
+        {
+          "name": "light",
+          "kv": true,
+          "type": "bool",
+          "src": "code",
+          "alias": [
+            "lumiere"
+          ]
+        },
+        {
+          "name": "lightradius",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "lightintensity",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "lightflicker",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1"
+        },
+        {
+          "name": "lightcolor",
+          "kv": true,
+          "type": "color",
+          "src": "code"
+        },
+        {
+          "name": "density",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "densite"
+          ]
+        },
+        {
+          "name": "start",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "debut"
+          ]
+        },
+        {
+          "name": "end",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "fin"
+          ]
+        },
+        {
+          "name": "patches",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-2",
+          "alias": [
+            "nappes"
+          ]
+        },
+        {
+          "name": "scale",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "min 4",
+          "alias": [
+            "noisescale"
+          ]
+        },
+        {
+          "name": "region",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "zone"
+          ]
+        },
+        {
+          "name": "sky",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "ciel"
+          ]
+        },
+        {
+          "name": "intensity",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "intensite"
+          ]
+        },
+        {
+          "name": "pulse",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "coverage",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "couverture"
+          ]
+        },
+        {
+          "name": "shadow",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "ombre"
+          ]
+        },
+        {
+          "name": "skyheight",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "sun",
+          "kv": true,
+          "type": "bool",
+          "src": "code",
+          "alias": [
+            "soleil"
+          ]
+        },
+        {
+          "name": "sunaz",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "azimut"
+          ]
+        },
+        {
+          "name": "sunel",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "hauteursoleil"
+          ]
+        },
+        {
+          "name": "flaresize",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "halo"
+          ]
+        },
+        {
+          "name": "ghosts",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "reflets"
+          ]
+        },
+        {
+          "name": "streak",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "trainee"
+          ]
+        },
+        {
+          "name": "color2nd",
+          "kv": true,
+          "type": "color",
+          "src": "code"
+        }
+      ],
+      "notes": "Lignes 1534-1699. Types d'effet (flame, smoke, fog, magicfog, flare, clouds) : leur position dans la ligne n'est pas confirmée."
+    },
+    {
+      "name": "<m7LiquidBackground>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7LiquidBackground>HASH_CARTE|*[,style=water|lava][,color=…][,deep=…][,sky=…][,speed=10][,scale=48][,waves=0.5][,specular=0.8][,reflect=0.65][,foam=0.6][,texture=png][,texscale=32][,objreflect=0.55][,reflectfade=40][,ripple=1][,reflectviews=all|top|bottom]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "HASH_CARTE",
+          "type": "hex32|wildcard|list",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "name": "style",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "values": [
+            "water",
+            "lava",
+            "eau",
+            "lave"
+          ]
+        },
+        {
+          "name": "color",
+          "kv": true,
+          "type": "color",
+          "src": "code",
+          "alias": [
+            "couleur"
+          ]
+        },
+        {
+          "name": "deep",
+          "kv": true,
+          "type": "color",
+          "src": "code",
+          "alias": [
+            "profond"
+          ]
+        },
+        {
+          "name": "sky",
+          "kv": true,
+          "type": "color",
+          "src": "code",
+          "alias": [
+            "ciel",
+            "hot",
+            "chaud"
+          ]
+        },
+        {
+          "name": "speed",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 10,
+          "alias": [
+            "vitesse"
+          ]
+        },
+        {
+          "name": "scale",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "min 4",
+          "alias": [
+            "echelle"
+          ]
+        },
+        {
+          "name": "waves",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-2",
+          "alias": [
+            "vagues"
+          ]
+        },
+        {
+          "name": "specular",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-4"
+        },
+        {
+          "name": "reflect",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "reflet"
+          ]
+        },
+        {
+          "name": "foam",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "ecume"
+          ]
+        },
+        {
+          "name": "objreflect",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "reflets"
+          ]
+        },
+        {
+          "name": "reflectfade",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "min 1",
+          "alias": [
+            "longueurreflet"
+          ]
+        },
+        {
+          "name": "reflectviews",
+          "kv": true,
+          "type": "int",
+          "src": "code",
+          "alias": [
+            "vuesreflet"
+          ]
+        },
+        {
+          "name": "ripple",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-8",
+          "alias": [
+            "ondulation"
+          ]
+        },
+        {
+          "name": "texture",
+          "kv": true,
+          "type": "path",
+          "src": "code"
+        },
+        {
+          "name": "texscale",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "min 1"
+        },
+        {
+          "name": "map",
+          "kv": true,
+          "type": "hex32|wildcard|list",
+          "src": "code"
+        }
+      ],
+      "notes": "Lignes 1699-1786."
+    },
+    {
+      "name": "<m7material>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7material>HASH_TILE,cle=valeur…   |   [cond]<m7material>img,map=HASH_CARTE|*,cle=valeur…",
+      "params": [
+        {
+          "name": "map",
+          "kv": true,
+          "type": "hex32|wildcard|list",
+          "src": "code"
+        },
+        {
+          "name": "tile",
+          "kv": true,
+          "type": "hex32",
+          "src": "code"
+        },
+        {
+          "name": "set",
+          "kv": true,
+          "type": "path",
+          "src": "code",
+          "alias": [
+            "dossier"
+          ]
+        },
+        {
+          "name": "albedo",
+          "kv": true,
+          "type": "path",
+          "src": "code",
+          "alias": [
+            "basecolor",
+            "color_map",
+            "diffuse"
+          ]
+        },
+        {
+          "name": "normal",
+          "kv": true,
+          "type": "path",
+          "src": "code"
+        },
+        {
+          "name": "roughness",
+          "kv": true,
+          "type": "path",
+          "src": "code"
+        },
+        {
+          "name": "gloss",
+          "kv": true,
+          "type": "path",
+          "src": "code",
+          "alias": [
+            "glossiness"
+          ]
+        },
+        {
+          "name": "metallic",
+          "kv": true,
+          "type": "path",
+          "src": "code",
+          "alias": [
+            "metalness"
+          ]
+        },
+        {
+          "name": "ao",
+          "kv": true,
+          "type": "path",
+          "src": "code",
+          "alias": [
+            "occlusion"
+          ]
+        },
+        {
+          "name": "height",
+          "kv": true,
+          "type": "path",
+          "src": "code",
+          "alias": [
+            "displacement",
+            "bump"
+          ]
+        },
+        {
+          "name": "emissive",
+          "kv": true,
+          "type": "path",
+          "src": "code",
+          "alias": [
+            "emission"
+          ]
+        },
+        {
+          "name": "orm",
+          "kv": true,
+          "type": "path",
+          "src": "code",
+          "alias": [
+            "arm"
+          ]
+        },
+        {
+          "name": "scale",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "echelle"
+          ]
+        },
+        {
+          "name": "normalconv",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "default": "gl",
+          "values": [
+            "gl",
+            "dx",
+            "directx"
+          ]
+        },
+        {
+          "name": "color",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "default": "tile",
+          "values": [
+            "tile",
+            "texture",
+            "materiau",
+            "mix",
+            "melange"
+          ],
+          "alias": [
+            "couleur"
+          ]
+        },
+        {
+          "name": "mix",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1"
+        },
+        {
+          "name": "strength",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-5",
+          "alias": [
+            "force"
+          ]
+        },
+        {
+          "name": "heightstrength",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "aostrength",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-2"
+        },
+        {
+          "name": "specular",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-4",
+          "alias": [
+            "brillance"
+          ]
+        },
+        {
+          "name": "emissivestrength",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-8"
+        },
+        {
+          "name": "rough",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "rugosite"
+          ]
+        },
+        {
+          "name": "metal",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1"
+        },
+        {
+          "name": "debug",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "values": [
+            "normal",
+            "light",
+            "lumiere",
+            "sun"
+          ]
+        }
+      ],
+      "notes": "Lignes 1942-2125. Une cible (tile= ou map=) est requise, sinon message."
+    },
+    {
+      "name": "<m7light>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7light>HASH_CARTE|*,x,y[,height=8][,radius=64][,color=FFC080][,intensity=1][,flicker=0][,speed=6][,mode=light|add]   |   tile=HASH",
+      "params": [
+        {
+          "pos": 1,
+          "name": "map_or_hash",
+          "type": "hex32|wildcard",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "name": "tile",
+          "kv": true,
+          "type": "hex32",
+          "src": "code"
+        },
+        {
+          "name": "map",
+          "kv": true,
+          "type": "hex32|wildcard|list",
+          "src": "code"
+        },
+        {
+          "name": "height",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "hauteur"
+          ]
+        },
+        {
+          "name": "radius",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "min 1",
+          "alias": [
+            "rayon"
+          ]
+        },
+        {
+          "name": "intensity",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "intensite"
+          ]
+        },
+        {
+          "name": "color",
+          "kv": true,
+          "type": "color",
+          "src": "code",
+          "alias": [
+            "couleur"
+          ]
+        },
+        {
+          "name": "flicker",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "scintillement"
+          ]
+        },
+        {
+          "name": "speed",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "flickerspeed",
+            "vitesse"
+          ]
+        },
+        {
+          "name": "mode",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "values": [
+            "add",
+            "additive",
+            "shadow",
+            "sub",
+            "ombre"
+          ]
+        },
+        {
+          "name": "x",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "y",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "dx",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "dy",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        }
+      ],
+      "notes": "Lignes 2125-2201, partie commune avec <m7ambient>."
+    },
+    {
+      "name": "<m7ambient>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7ambient>HASH_CARTE|*,luminosite[,teinte][,sky=1][,sunaz=][,sunel=][,sun=][,suncolor=]",
+      "params": [
+        {
+          "pos": 1,
+          "name": "map_or_hash",
+          "type": "hex32|wildcard|list",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 2,
+          "name": "luminosite",
+          "type": "float",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "teinte",
+          "type": "color",
+          "required": false,
+          "src": "code"
+        }
+      ],
+      "notes": "Lignes 2125-2201. Clés sunaz, sunel, sun, suncolor, sky (doc 11) non relues : à vérifier."
+    },
+    {
+      "name": "<m7model>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7model>modele.obj|.gltf|.glb,HASH_CARTE|*,x,y[,scale=8|height=…][,rotation=0][,elevation=0][,ambient=0.45][,origin=base|obj]   |   modele.obj,tile=HASH",
+      "params": [
+        {
+          "pos": 1,
+          "name": "fichier",
+          "type": "path",
+          "required": true,
+          "src": "code",
+          "desc": ".obj, .mtl, .gltf, .glb"
+        },
+        {
+          "pos": 2,
+          "name": "map",
+          "type": "hex32|wildcard|list",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 3,
+          "name": "x",
+          "type": "float",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "y",
+          "type": "float",
+          "required": false,
+          "src": "code"
+        },
+        {
+          "name": "tile",
+          "kv": true,
+          "type": "hex32",
+          "src": "code"
+        },
+        {
+          "name": "map",
+          "kv": true,
+          "type": "hex32|wildcard|list",
+          "src": "code"
+        },
+        {
+          "name": "scale",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "echelle"
+          ]
+        },
+        {
+          "name": "height",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "hauteur"
+          ]
+        },
+        {
+          "name": "rotation",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "elevation",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "ambient",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "range": "0-1",
+          "alias": [
+            "light"
+          ]
+        },
+        {
+          "name": "origin",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "values": [
+            "obj"
+          ]
+        },
+        {
+          "name": "anim",
+          "kv": true,
+          "type": "text",
+          "src": "code",
+          "alias": [
+            "animation"
+          ]
+        },
+        {
+          "name": "animspeed",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "spin",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "bobamp",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "bobfreq",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "swayamp",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "swayfreq",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "offset",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "timeoffset"
+          ]
+        },
+        {
+          "name": "speed",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "alias": [
+            "pathspeed"
+          ]
+        },
+        {
+          "name": "orient",
+          "kv": true,
+          "type": "bool",
+          "src": "code"
+        },
+        {
+          "name": "smooth",
+          "kv": true,
+          "type": "bool",
+          "src": "code"
+        },
+        {
+          "name": "loop",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "values": [
+            "pingpong",
+            "allerretour",
+            "once",
+            "false",
+            "0"
+          ]
+        },
+        {
+          "name": "path",
+          "kv": true,
+          "type": "text",
+          "src": "code",
+          "alias": [
+            "trajet"
+          ]
+        },
+        {
+          "name": "x",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "y",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        }
+      ],
+      "notes": "Lignes 2213-2325. origin=obj garde l'origine du fichier."
+    },
+    {
+      "name": "<m7CameraDebug>",
+      "status": "docOnly",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<m7CameraDebug>",
+      "params": [],
+      "notes": "Repères de caméra Mode 7 et journal [HD-M7CAM] (doc 10)."
+    },
+    {
+      "name": "<gpu3d>",
+      "status": "implemented",
+      "block": false,
+      "conditions": false,
+      "syntax": "<gpu3d>on|off",
+      "params": [
+        {
+          "pos": 1,
+          "name": "etat",
+          "type": "enum",
+          "default": "on",
+          "values": [
+            "on",
+            "off",
+            "0",
+            "false",
+            "cpu"
+          ],
+          "src": "code"
+        }
+      ],
+      "notes": "off, 0, false ou cpu : moteur processeur."
+    },
+    {
+      "name": "<3DParticles>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<3DParticles>fichier.json[,Zone=all|top|bottom][,Z=95][,Alpha=1][,clé=valeur…]",
+      "params": [
+        {
+          "name": "zone",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "values": [
+            "all",
+            "top",
+            "bottom"
+          ]
+        },
+        {
+          "name": "z",
+          "kv": true,
+          "type": "int",
+          "src": "code",
+          "default": 95,
+          "alias": [
+            "zindex"
+          ]
+        },
+        {
+          "name": "alpha",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 1,
+          "range": "0-1"
+        },
+        {
+          "name": "blend",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "values": [
+            "additive",
+            "normal"
+          ]
+        },
+        {
+          "name": "maxparticles",
+          "kv": true,
+          "type": "int",
+          "src": "code",
+          "default": 400,
+          "range": "1-20000"
+        },
+        {
+          "name": "rate",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "lifemin",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "lifemax",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "boxsize",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 512,
+          "range": "32-2048"
+        },
+        {
+          "name": "boxheight",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 128,
+          "range": "4-2048"
+        },
+        {
+          "name": "boxahead",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.35,
+          "range": "0-0.5"
+        },
+        {
+          "name": "fallmin",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 20
+        },
+        {
+          "name": "fallmax",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 40
+        },
+        {
+          "name": "driftmin",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0
+        },
+        {
+          "name": "driftmax",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 6
+        },
+        {
+          "name": "gravity",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "windx",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "windy",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "turbulence",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "turbulencefreq",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.5
+        },
+        {
+          "name": "sizestart",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 2
+        },
+        {
+          "name": "sizeend",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "sizerandom",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "minpixelsize",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 1.5
+        },
+        {
+          "name": "alphastart",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "alphaend",
+          "kv": true,
+          "type": "float",
+          "src": "code"
+        },
+        {
+          "name": "fadein",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.1
+        },
+        {
+          "name": "fadeout",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.2
+        },
+        {
+          "name": "colorstart",
+          "kv": true,
+          "type": "color",
+          "src": "code"
+        },
+        {
+          "name": "colorend",
+          "kv": true,
+          "type": "color",
+          "src": "code"
+        },
+        {
+          "name": "farfade",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.3
+        },
+        {
+          "name": "nearfade",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 24
+        },
+        {
+          "name": "groundhit",
+          "kv": true,
+          "type": "enum",
+          "src": "code",
+          "values": [
+            "die",
+            "respawn"
+          ]
+        },
+        {
+          "name": "texture",
+          "kv": true,
+          "type": "path",
+          "src": "code"
+        }
+      ],
+      "notes": "Lignes 2333-2433. Paramètres positionnels non relus : syntaxe détaillée en doc 10."
+    },
+    {
+      "name": "<SpriteLight>",
+      "status": "docOnly",
+      "block": false,
+      "conditions": true,
+      "syntax": "voir <spritelight>",
+      "params": [],
+      "notes": "Alias de <spritelight> en version doc. Vérifier la casse : le code accepte <spritelight> en minuscules et en majuscules."
+    }
+  ],
+  "conditionTypes": [
+    {
+      "name": "memoryCheck",
+      "variants": [
+        "memoryCheck",
+        "vramMemoryCheck",
+        "ppuMemoryCheck",
+        "oamMemoryCheck",
+        "cgramMemoryCheck",
+        "aramMemoryCheck",
+        "spcMemoryCheck"
+      ],
+      "constantVariants": "les mêmes noms + Constant (ex. oamMemoryCheckConstant)",
+      "params": [
+        {
+          "pos": 3,
+          "name": "adresseA",
+          "type": "hex",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "operateur",
+          "type": "enum",
+          "required": true,
+          "values": [
+            "==",
+            "!=",
+            ">",
+            "<",
+            ">=",
+            "<=",
+            "in"
+          ],
+          "src": "code"
+        },
+        {
+          "pos": 5,
+          "name": "adresseB ou constante",
+          "type": "hex|list",
+          "required": true,
+          "src": "code",
+          "desc": "Liste A|B|C avec in"
+        },
+        {
+          "pos": 6,
+          "name": "masque",
+          "type": "hex8",
+          "default": "FF",
+          "src": "code"
+        }
+      ],
+      "notes": "Espace mémoire par préfixe : vram et ppu = VRAM, oam, cgram, aram et spc = ARAM ; sans préfixe = CPU."
+    },
+    {
+      "name": "frameRange",
+      "params": [
+        {
+          "pos": 3,
+          "name": "A",
+          "type": "int",
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "B",
+          "type": "int",
+          "src": "code"
+        }
+      ],
+      "notes": "Vrai si (frame % A) >= B."
+    },
+    {
+      "name": "tileNearby",
+      "params": [
+        {
+          "pos": 3,
+          "name": "dx",
+          "type": "int|wildcard",
+          "src": "doc",
+          "desc": "* possible (doc 03) ; partiellement lu"
+        },
+        {
+          "pos": 4,
+          "name": "dy",
+          "type": "int|wildcard",
+          "src": "doc"
+        },
+        {
+          "pos": 5,
+          "name": "hash|index",
+          "type": "hex",
+          "src": "doc"
+        },
+        {
+          "pos": 6,
+          "name": "palette|ignore",
+          "type": "int|ignore",
+          "src": "doc"
+        }
+      ],
+      "notes": "Décalages relatifs à l'orientation de la tile qui porte la condition (convention NES). Positions en pixels."
+    },
+    {
+      "name": "spriteNearby",
+      "params": "identiques à tileNearby",
+      "notes": "Palette 0-7 ou 8-15 acceptée."
+    },
+    {
+      "name": "tileAtPosition",
+      "params": [
+        {
+          "pos": 3,
+          "name": "colonne",
+          "type": "int|wildcard",
+          "src": "code",
+          "desc": "en tuiles (8 px SNES)"
+        },
+        {
+          "pos": 4,
+          "name": "ligne",
+          "type": "int|wildcard",
+          "src": "doc"
+        },
+        {
+          "pos": 5,
+          "name": "hash|index",
+          "type": "hex",
+          "src": "doc"
+        },
+        {
+          "pos": 6,
+          "name": "palette|ignore",
+          "type": "int|ignore",
+          "src": "doc"
+        },
+        {
+          "pos": 7,
+          "name": "couches",
+          "type": "all|1|2|3|4",
+          "required": false,
+          "src": "doc"
+        },
+        {
+          "pos": 8,
+          "name": "scope",
+          "type": "enum",
+          "values": [
+            "layer",
+            "screen"
+          ],
+          "default": "screen",
+          "src": "doc"
+        }
+      ],
+      "notes": "Joker * / all / any reconnu pour la colonne (code). Un hash de 6 caractères ou moins est un index de tile."
+    },
+    {
+      "name": "spriteAtPosition",
+      "params": [
+        {
+          "pos": 3,
+          "name": "x",
+          "type": "int|wildcard",
+          "src": "code",
+          "desc": "en unités de 8 px (doc 03)"
+        },
+        {
+          "pos": 4,
+          "name": "y",
+          "type": "int|wildcard",
+          "src": "doc"
+        },
+        {
+          "pos": 5,
+          "name": "hash|index",
+          "type": "hex",
+          "src": "doc"
+        },
+        {
+          "pos": 6,
+          "name": "palette|ignore",
+          "type": "int|ignore",
+          "src": "doc"
+        },
+        {
+          "pos": 7,
+          "name": "considerVisible",
+          "type": "bool",
+          "default": false,
+          "src": "doc",
+          "desc": "true/1/yes prend aussi les sprites hors écran"
+        }
+      ],
+      "notes": "Joker reconnu pour x (code)."
+    },
+    {
+      "name": "colorWindow",
+      "params": [
+        {
+          "pos": 3,
+          "name": "forme",
+          "type": "hex32|any|full|VALEUR&MASQUE",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 4,
+          "name": "X",
+          "type": "int|wildcard",
+          "required": true,
+          "src": "code"
+        },
+        {
+          "pos": 5,
+          "name": "Y",
+          "type": "int|wildcard",
+          "src": "code"
+        },
+        {
+          "pos": 6,
+          "name": "tolerance",
+          "type": "int|wildcard",
+          "default": 2,
+          "src": "code"
+        },
+        {
+          "pos": 7,
+          "name": "couleur",
+          "type": "hex16|VALEUR&MASQUE|*",
+          "src": "code",
+          "desc": "BGR555 ; rouge 001F, vert 03E0, bleu 7C00"
+        }
+      ],
+      "notes": "Les fenêtres de color math. Journal [HD-WINDOW] pour trouver le hash. Doc 03 et doc 08."
+    },
+    {
+      "name": "hmirror / vmirror",
+      "builtin": true,
+      "variants": [
+        "hmirror",
+        "!hmirror",
+        "vmirror",
+        "!vmirror"
+      ],
+      "params": [],
+      "src": "code",
+      "notes": "Conditions intégrées (SnesHdPackLoader.cpp ligne ~343), vraies si la tile évaluée est retournée horizontalement (h) ou verticalement (v). Fonctionnent pour BG et sprites."
+    }
+  ],
+  "operators": {
+    "accepted": [
+      "==",
+      "!=",
+      ">",
+      "<",
+      ">=",
+      "<=",
+      "In",
+      "IN",
+      "in"
+    ],
+    "note": "In exige une liste A|B|C ; le séparateur | n'est pas un OU logique."
+  },
+  "bracketsNotImplemented": {
+    "syntax": "[a&b] seulement. Le OU (|) et les parenthèses sont prévus (doc 22 §5)."
+  },
+  "planned": [
+    {
+      "name": "<2dLightOff>",
+      "status": "planned",
+      "doc": "claude/22 §4.6"
+    },
+    {
+      "name": "<playSFX>",
+      "status": "planned",
+      "doc": "claude/22 §14"
+    },
+    {
+      "name": "<stopSFX>",
+      "status": "planned",
+      "doc": "claude/22 §14"
+    },
+    {
+      "name": "<sfxOnWrite>",
+      "status": "planned",
+      "doc": "claude/22 §7",
+      "note": "incompatible avec RetroAchievements en mode hardcore (doc 22 §16)"
+    },
+    {
+      "name": "<sprite3D>",
+      "status": "planned",
+      "doc": "claude/22 §13"
+    },
+    {
+      "name": "<2DLaser>",
+      "status": "planned",
+      "doc": "claude/22 §8"
+    },
+    {
+      "name": "<m7trail>",
+      "status": "planned",
+      "doc": "claude/22 §8.1"
+    },
+    {
+      "name": "variables $nom",
+      "status": "planned",
+      "doc": "claude/22 §1",
+      "note": "set et variableCheck"
+    },
+    {
+      "name": "OU (|) et parenthèses dans les conditions",
+      "status": "planned",
+      "doc": "claude/22 §5"
+    }
+  ],
+  "notRecognizedByLoader": [
+    {
+      "name": "<ver>",
+      "doc": "claude/03 et 20",
+      "status": "notRecognized",
+      "note": "absent de LoadHdPack (SNES)"
+    },
+    {
+      "name": "<bgm>",
+      "doc": "claude/03",
+      "status": "notRecognized",
+      "note": "absent de LoadHdPack (SNES)"
+    },
+    {
+      "name": "<sfx>",
+      "doc": "claude/03",
+      "status": "notRecognized",
+      "note": "absent de LoadHdPack (SNES)"
+    }
+  ],
+  "nesOnlyTags": {
+    "note": "Balises NES de doc 19, à ne pas proposer dans un fichier snes_hires.txt : <options>, <play_conditional_bgm>, <play_conditional_sfx>, <disable_8bits_Sound>, <conditionalBGM>, <tile> au format NES (image,tuile,palette,x,y : l'ordre des deux premiers paramètres est inversé par rapport au SNES)."
+  },
+  "discrepancies": [
+    "Résolu : <2dspritelight>/<2DSpriteLight>, <2DPerspective>, torchlight implémentés (code = référence).",
+    "<ver>, <bgm>, <sfx> : non lus par le loader SNES.",
+    "<2DLiquid> : waves, specular, reflect, style, layers, viscosity figurent dans la forme proposée de la doc 22 §10.4 (proposition « à valider ») ; non implémentés dans le code lu. Doc 20 §3.12 non vérifiée.",
+    "<FrontOf3D> : doc 03 cite le mot hud ; le code lu ne le consomme pas.",
+    "Casse mixte : certaines balises sont insensibles à la casse, d'autres non ; une balise mal casée est ignorée sans message.",
+    "Palettes lues en décimal pour <tile>, <addition>, <NoLightFXOnSprite>, <disableTile> ; hashs en hexadécimal.",
+    "<setLayersOrder> : valeur invalide prend 20 sans message.",
+    "<msuToOgg> est recherchée n'importe où dans la ligne ; conditions lues seulement si la ligne commence par [.",
+    "Noms de conditions inconnus dans le préfixe : ignorés silencieusement."
+  ],
+  "toVerifyInCode": [
+    "conditions tileNearby, spriteNearby, tileAtPosition, spriteAtPosition : positions et jokers complets (lignes 1090-1380)",
+    "<FrontOf3D> : mot hud (doc 03) absent du code lu",
+    "<2DLiquid> : waves, specular, reflect, style, layers, viscosity",
+    "<m7billboard> : paramètre fichier image",
+    "<m7effect> : position du type d'effet dans la ligne",
+    "<m7ambient> : sunaz, sunel, sun, suncolor, sky",
+    "<3DParticles> : paramètres positionnels",
+    "torchlight : vérifier alpha"
+  ]
+}

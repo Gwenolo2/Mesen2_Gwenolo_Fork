@@ -1,0 +1,102 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mesen HD Pack (SNES)",
+  "scopeName": "source.mesen-snes-hd",
+  "comment": "Généré par scripts/generate-grammar.py depuis schemas/29_schema_balises_snes.json. Ne pas éditer à la main.",
+  "patterns": [
+    {
+      "name": "comment.line.number-sign.mesen-snes-hd",
+      "match": "#.*$"
+    },
+    {
+      "name": "meta.condition.mesen-snes-hd",
+      "begin": "^\\s*\\[",
+      "end": "\\]",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.condition.begin.mesen-snes-hd"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.condition.end.mesen-snes-hd"
+        }
+      },
+      "patterns": [
+        {
+          "name": "keyword.operator.and.mesen-snes-hd",
+          "match": "&"
+        },
+        {
+          "name": "keyword.operator.not.mesen-snes-hd",
+          "match": "!"
+        },
+        {
+          "name": "support.function.condition.mesen-snes-hd",
+          "match": "\\b(?:cgramMemoryCheckConstant|vramMemoryCheckConstant|aramMemoryCheckConstant|ppuMemoryCheckConstant|oamMemoryCheckConstant|spcMemoryCheckConstant|memoryCheckConstant|hmirror\\ /\\ vmirror|spriteAtPosition|cgramMemoryCheck|aramMemoryCheck|vramMemoryCheck|tileAtPosition|spcMemoryCheck|ppuMemoryCheck|oamMemoryCheck|spriteNearby|memoryCheck|colorWindow|tileNearby|frameRange|vmirror|hmirror)\\b"
+        },
+        {
+          "name": "constant.numeric.hash.mesen-snes-hd",
+          "match": "\\b[0-9A-Fa-f]{8,16}\\b"
+        },
+        {
+          "name": "constant.numeric.mesen-snes-hd",
+          "match": "-?\\d+(?:\\.\\d+)?"
+        },
+        {
+          "name": "keyword.operator.or.mesen-snes-hd",
+          "match": "\\|"
+        }
+      ]
+    },
+    {
+      "name": "punctuation.section.block.mesen-snes-hd",
+      "match": "\\}>?|\\{"
+    },
+    {
+      "name": "keyword.control.tag.mesen-snes-hd",
+      "match": "<(?:disableAllColorMathWindow|disableColorMathWindow|disableOriginalSprites|disableOriginalTiles|disableColorMath|disablesublayer|setLayersOrder|LoadingScreen|2DPerspective|3DParticles|tile_hvflip|m7billboard|disableTile|tile_vflip|tile_hflip|background|disableBg1|widescreen|m7ambient|condition|2DOverlay|msuToOgg|2DLiquid|overscan|m7relief|addition|fallback|m7model|m7light|m7tiles|include|patch|video|m7img|alias|gpu3d|scale|tile|img)>"
+    },
+    {
+      "name": "keyword.control.tag.mesen-snes-hd",
+      "match": "(?i:<(?:m7LiquidBackground|NoLightFXOnSprite|Ignore2DOverlays|NoLiquidReflect|2DSpriteLight|spritelight|m7material|FrontOf3D|m7effect)>)"
+    },
+    {
+      "name": "invalid.deprecated.tag.mesen-snes-hd",
+      "match": "(?i:<(?:ver|bgm|sfx)>)"
+    },
+    {
+      "name": "invalid.illegal.tag.mesen-snes-hd",
+      "match": "<[^>\\s]*>"
+    },
+    {
+      "name": "variable.parameter.mesen-snes-hd",
+      "match": "(?<=[,>\\s])[A-Za-z_]\\w*(?==)"
+    },
+    {
+      "name": "string.unquoted.path.mesen-snes-hd",
+      "match": "[^\\s,\\[\\]{}<>=|#]+\\.(?i:png|ogg|json|obj|mtl|gltf|glb|mpg|mp4|txt|mesen)\\b"
+    },
+    {
+      "name": "constant.numeric.hash.mesen-snes-hd",
+      "match": "\\b[0-9A-Fa-f]{8,16}\\b"
+    },
+    {
+      "name": "constant.numeric.mesen-snes-hd",
+      "match": "(?<![\\w.])-?\\d+(?:\\.\\d+)?\\b"
+    },
+    {
+      "name": "constant.language.boolean.mesen-snes-hd",
+      "match": "\\b(?i:true|false|yes|no)\\b"
+    },
+    {
+      "name": "keyword.operator.wildcard.mesen-snes-hd",
+      "match": "\\*"
+    },
+    {
+      "name": "keyword.operator.or.mesen-snes-hd",
+      "match": "\\|"
+    }
+  ],
+  "repository": {}
+}

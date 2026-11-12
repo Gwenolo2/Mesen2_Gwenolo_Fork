@@ -719,6 +719,33 @@ struct HdIgnore2DRule
 };
 
 // <2DLiquid> (vue de profil, phase 1) : liquide sous une surface ondulee. Dimensions en pixels NES.
+// <2DSpriteLight> (NES) : halo 2D au centre d'une tile de sprite reconnue (meme principe que cote SNES).
+// Syntaxe : [cond]<2DSpriteLight>TILE[,palette|*][,radius=48][,color=FFA040][,intensity=1.4][,flicker=0][,speed=9][,mode=add|shadow][,dx=0][,dy=0]
+struct NesHdSpriteLightInfo
+{
+	HdTileKey Key;                // tile (index CHR ROM, ou 32 chiffres hexa en CHR RAM) et palette, comme <tile>
+	bool AnyPalette = true;
+	float Radius = 48.0f;         // pixels NES
+	float Intensity = 1.4f;
+	uint32_t Color = 0xFFA040;
+	float Flicker = 0.0f;
+	float FlickerSpeed = 9.0f;
+	bool Shadow = false;          // mode=shadow : assombrit au lieu d'eclairer
+	float OffsetX = 0.0f;         // dx= : decalage du halo (pixels NES), inverse si la tile est retournee
+	float OffsetY = 0.0f;         // dy=
+	vector<HdPackCondition*> Conditions;
+
+	bool Matches(const HdPpuTileInfo& t) const
+	{
+		if(Key.IsChrRamTile) {
+			if(memcmp(Key.TileData, t.TileData, sizeof(Key.TileData)) != 0) return false;
+		} else if(Key.TileIndex != t.TileIndex) {
+			return false;
+		}
+		return AnyPalette || Key.PaletteColors == t.PaletteColors;
+	}
+};
+
 // <2DPerspective> (NES) : sol incline a partir d'un PNG, ancre sur le scroll PPU par ligne. Coordonnees NES absolues.
 struct NesHdPerspectiveInfo
 {
@@ -810,6 +837,7 @@ public:
 	vector<unique_ptr<NesHdOverlayInfo>> Overlays;
 	vector<unique_ptr<NesHdLiquidInfo>> Liquids; // <2DLiquid>
 	vector<unique_ptr<NesHdPerspectiveInfo>> Perspectives; // <2DPerspective>
+	vector<unique_ptr<NesHdSpriteLightInfo>> Sprite2DLights; // <2DSpriteLight>
 
 	// <Ignore2DOverlays> : regles ligne seule, et drapeau si un bloc ou une regle existe dans le pack
 	vector<unique_ptr<HdIgnore2DRule>> Ignore2DRules;

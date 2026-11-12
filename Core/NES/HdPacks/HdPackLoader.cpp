@@ -360,6 +360,9 @@ bool HdPackLoader::LoadPack()
 			} else if(lineContent.substr(0, 15) == "<2DPerspective>") {
 				tokens = StringUtilities::Split(lineContent.substr(15), ',');
 				ProcessPerspectiveTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<2dspritelight>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				ProcessSpriteLightTag(tokens, conditions);
 			} else if(lineContent.substr(0, 5) == "<ver>") {
 				_data->Version = stoi(lineContent.substr(5));
 				if(_data->Version > BaseHdNesPack::CurrentVersion) {
@@ -1790,6 +1793,55 @@ void HdPackLoader::InitializeHdPack()
 			_data->TileByKey[tileInfo->GetKey(true)].push_back(tileInfo.get());
 		}
 	}
+}
+
+// <2DSpriteLight> (NES) : halo 2D au centre d'une tile de sprite.
+// Syntaxe : [cond]<2DSpriteLight>TILE[,palette|*][,radius=48][,color=FFA040][,intensity=1.4][,flicker=0][,speed=9][,mode=add|shadow][,dx=0][,dy=0]
+void HdPackLoader::ProcessSpriteLightTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	auto L = std::make_unique<NesHdSpriteLightInfo>();
+	L->Conditions = conditions;
+	vector<string> pos;
+	for(const string& raw : tokens) {
+		string tok = StringUtilities::Trim(raw);
+		if(tok.empty()) continue;
+		size_t eq = tok.find('=');
+		if(eq == string::npos) {
+			pos.push_back(tok);
+			continue;
+		}
+		string k = StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)));
+		string v = StringUtilities::Trim(tok.substr(eq + 1));
+		try {
+			if(k == "radius" || k == "rayon") L->Radius = std::max(1.0f, std::stof(v));
+			else if(k == "color" || k == "couleur") { if(!v.empty() && v[0] == '#') v = v.substr(1); L->Color = (uint32_t)std::stoul(v, nullptr, 16) & 0xFFFFFF; }
+			else if(k == "intensity" || k == "intensite") L->Intensity = std::max(0.0f, std::stof(v));
+			else if(k == "flicker" || k == "scintillement") L->Flicker = std::clamp(std::stof(v), 0.0f, 1.0f);
+			else if(k == "speed" || k == "flickerspeed" || k == "vitesse") L->FlickerSpeed = std::stof(v);
+			else if(k == "mode") { string m = StringUtilities::ToLower(v); L->Shadow = (m == "shadow" || m == "sub" || m == "ombre"); }
+			else if(k == "dx" || k == "offsetx") L->OffsetX = std::stof(v);
+			else if(k == "dy" || k == "offsety") L->OffsetY = std::stof(v);
+			else { logError("2DSpriteLight : cle inconnue : " + k); }
+		} catch(...) {
+			logError("2DSpriteLight : valeur invalide pour " + k + " : " + v);
+		}
+	}
+	if(pos.empty()) {
+		logError("2DSpriteLight : tile manquante.");
+		return;
+	}
+	string tileData = pos[0];
+	string palData = pos.size() >= 2 ? StringUtilities::ToLower(pos[1]) : string("*");
+	L->AnyPalette = (palData == "*" || palData == "all");
+	if(L->AnyPalette) palData = "0";
+	try {
+		ReadTileData(L->Key, tileData, palData);
+	} catch(...) {
+		logError("2DSpriteLight : tile invalide : " + tileData);
+		return;
+	}
+	MessageManager::Log("[HDPack] <2DSpriteLight> tile " + tileData + ", rayon " + std::to_string((int)L->Radius));
+	_data->Sprite2DLights.push_back(std::move(L));
 }
 
 // <2DPerspective> (NES) : sol incline. Syntaxe : [cond]<2DPerspective>fichier.png,Z,tileX,tileY,alpha,speedX,speedY,horizon=..,depth=..,repeat=..,limit=+N,fog=RRGGBB,fogrange=N

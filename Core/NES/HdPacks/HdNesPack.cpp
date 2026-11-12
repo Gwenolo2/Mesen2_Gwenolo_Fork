@@ -474,6 +474,61 @@ void HdNesPack<scale>::ProcessScreenLayersLayout(uint32_t* outputBuffer, uint32_
 		});
 	};
 
+	// <2DSpriteLight> : halo 2D au centre de chaque tile de sprite reconnue. Additif, ou assombrissant en mode=shadow.
+	// Les sprites viennent des infos PPU par pixel (zone 256 x 240) ; l'origine de la tile est deduite de l'offset du pixel.
+	if(!_hdData->Sprite2DLights.empty() && _hdScreenInfo != nullptr) {
+		struct Light2D { float cx, cy, rad, cr, cg, cb, inten; bool shadow; };
+		std::vector<Light2D> lights2d;
+		std::vector<uint32_t> seen; // (regle, origine x, origine y) deja ajoutes
+		const float tSec = (float)_hdScreenInfo->FrameNumber / 60.0f;
+		const size_t nRules = _hdData->Sprite2DLights.size();
+		for(int y = 0; y < 240; y++) {
+			for(int x = 0; x < 256; x++) {
+				HdPpuPixelInfo& pi = _hdScreenInfo->ScreenTiles[(y << 8) | x];
+				for(int s = 0; s < pi.SpriteCount; s++) {
+					HdPpuTileInfo& spr = pi.Sprite[s];
+					for(size_t r = 0; r < nRules; r++) {
+						NesHdSpriteLightInfo& rule = *_hdData->Sprite2DLights[r];
+						if(!rule.Matches(spr)) continue;
+						const int ox = x - (spr.HorizontalMirroring ? 7 - (int)spr.OffsetX : (int)spr.OffsetX);
+						const int oy = y - (spr.VerticalMirroring ? 7 - (int)spr.OffsetY : (int)spr.OffsetY);
+						const uint32_t id = ((uint32_t)(r & 0xFFF) << 20) | ((uint32_t)((ox + 16) & 0x3FF) << 10) | (uint32_t)((oy + 16) & 0x3FF);
+						if(std::find(seen.begin(), seen.end(), id) != seen.end()) continue;
+						seen.push_back(id);
+						bool condOk = true;
+						for(HdPackCondition* c : rule.Conditions) { if(!c->CheckCondition(x, y, &spr)) { condOk = false; break; } }
+						if(!condOk) continue;
+						// centre de la tile + dx / dy (inverses quand la tile est retournee)
+						const float cxNes = (float)ox + 4.0f + (spr.HorizontalMirroring ? -rule.OffsetX : rule.OffsetX);
+						const float cyNes = (float)oy + 4.0f + (spr.VerticalMirroring ? -rule.OffsetY : rule.OffsetY);
+						const float fk = rule.Flicker > 0.0f ? 1.0f - rule.Flicker * 0.5f * (1.0f + std::sin(rule.FlickerSpeed * tSec)) : 1.0f;
+						lights2d.push_back({ (cxNes - originNes) * fScale, (cyNes - (float)oTop) * fScale, std::max(1.0f, rule.Radius) * fScale,
+							(float)((rule.Color >> 16) & 0xFF), (float)((rule.Color >> 8) & 0xFF), (float)(rule.Color & 0xFF),
+							rule.Intensity * fk, rule.Shadow });
+					}
+				}
+			}
+		}
+		for(const Light2D& L : lights2d) {
+			const int x0 = std::max(0, (int)std::floor(L.cx - L.rad)), x1 = std::min((int)screenWidth - 1, (int)std::ceil(L.cx + L.rad));
+			const int y0 = std::max(0, (int)std::floor(L.cy - L.rad)), y1 = std::min(hdHeight - 1, (int)std::ceil(L.cy + L.rad));
+			for(int y = y0; y <= y1; y++) {
+				uint32_t* row = outputBuffer + (size_t)y * screenWidth;
+				for(int x = x0; x <= x1; x++) {
+					const float ddx = (float)x + 0.5f - L.cx, ddy = (float)y + 0.5f - L.cy;
+					const float f = std::clamp(1.0f - std::sqrt(ddx * ddx + ddy * ddy) / L.rad, 0.0f, 1.0f);
+					const float k = f * f * L.inten;
+					if(k <= 0.0f) continue;
+					const uint32_t d = row[x];
+					float r = (float)((d >> 16) & 0xFF), g = (float)((d >> 8) & 0xFF), b = (float)(d & 0xFF);
+					if(L.shadow) { const float keep = std::clamp(1.0f - k, 0.0f, 1.0f); r *= keep; g *= keep; b *= keep; }
+					else { r += L.cr * k; g += L.cg * k; b += L.cb * k; }
+					row[x] = 0xFF000000u | ((uint32_t)std::clamp(r + 0.5f, 0.0f, 255.0f) << 16) | ((uint32_t)std::clamp(g + 0.5f, 0.0f, 255.0f) << 8) | (uint32_t)std::clamp(b + 0.5f, 0.0f, 255.0f);
+				}
+			}
+		}
+	}
+
 	for(auto& ovPtr : _hdData->Overlays) {
 		NesHdOverlayInfo& ov = *ovPtr;
 		if(!ov.Active || !(ov.IsPlainScreen || ov.IsEllipse || ov.IsTorch || ov.IsNoise || ov.IsRays || ov.IsAurora)) {
