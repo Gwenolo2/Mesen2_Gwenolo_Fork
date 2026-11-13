@@ -5,10 +5,13 @@
 #include "Gameboy/GbMemoryManager.h"
 #include "Gameboy/GbDmaController.h"
 #include "Gameboy/GbConstants.h"
+#include "Gameboy/HdPacks/GbHdPackBuilder.h"
 #include "Shared/Emulator.h"
 #include "Shared/EmuSettings.h"
 #include "Shared/RewindManager.h"
 #include "Shared/BaseControlManager.h"
+#include "Gameboy/HdPacks/GbHdPackLoader.h"
+#include "Shared/MessageManager.h"
 #include "Shared/RenderedFrame.h"
 #include "Shared/Video/VideoDecoder.h"
 #include "Shared/NotificationManager.h"
@@ -461,6 +464,7 @@ void GbPpu::RunDrawCycle()
 					WriteObjPixel(((sprite.Attributes & 0x10) ? 4 : 0) | colorIndex);
 				}
 				_lastPixelType = GbPixelType::Object;
+				RecordHdPixel(sprite, 2);
 			} else {
 				if(!cfg.DisableBackground) {
 					if(_state.CgbEnabled) {
@@ -473,6 +477,7 @@ void GbPpu::RunDrawCycle()
 				}
 				_lastPixelType = GbPixelType::Background;
 				_lastBgColor = entry.Color;
+				RecordHdPixel(entry, (cfg.DisableBackground || (!_state.CgbEnabled && !_state.BgEnabled) || _insertGlitchBgPixel) ? 0 : 1);
 			}
 		}
 
@@ -488,6 +493,30 @@ void GbPpu::RunDrawCycle()
 	}
 
 	ClockTileFetcher();
+}
+
+static uint64_t HashHdTile(const uint8_t* data)
+{
+	// Meme hash que le builder : hash*31 + octet, sur les 16 octets de la tile
+	uint64_t hash = 0;
+	for(int i = 0; i < 16; i++) {
+		hash = (hash * 31) + data[i];
+	}
+	return hash;
+}
+
+void GbPpu::RecordHdPixel(const GbFifoEntry& e, uint8_t layer)
+{
+	if(_hdCur == nullptr) {
+		return;
+	}
+	GbHdPixelInfo& p = _hdCur[_state.Scanline * GbConstants::ScreenWidth + _drawnPixels];
+	p.Hash = e.HdHash;
+	p.Palette = e.HdPalette;
+	p.Flags = e.HdFlags;
+	p.Row = e.HdRow;
+	p.Col = e.HdCol;
+	p.Layer = layer;
 }
 
 void GbPpu::WriteBgPixel(uint8_t colorIndex)
@@ -586,6 +615,35 @@ void GbPpu::ClockSpriteFetcher()
 			uint16_t sprTileAddr = (sprTile * 16 + sprOffsetY * 2) | tileBank;
 			_oamFetcher.Addr = sprTileAddr;
 			_oamFetcher.Attributes = sprAttr;
+			if(_hdEnabled) {
+				int dataTile = sprTile + (sprOffsetY >> 3);
+				_oamFetcher.HdHash = HashHdTile(&_vram[(uint16_t)((dataTile * 16) | tileBank)]);
+				_oamFetcher.HdPalette = _state.CgbEnabled ? (uint32_t)(8 + (sprAttr & 0x07)) : (uint32_t)(256 + ((sprAttr & 0x10) ? _state.ObjPalette1 : _state.ObjPalette0));
+				_oamFetcher.HdFlags = (uint8_t)(((sprAttr & 0x20) ? 2 : 0) | ((sprAttr & 0x40) ? 4 : 0));
+				_oamFetcher.HdRow = (uint8_t)((_state.Scanline - sprY) & 0x07);
+			}
+
+			if(GbHdPackBuilder::IsActive()) {
+				// Objets : palette 8-15 (GBC) ou 256 + OBP (DMG), 8×16 = deux tiles
+				uint16_t colors[4] = {};
+				uint32_t palId = 0;
+				if(_state.CgbEnabled) {
+					uint8_t pal = sprAttr & 0x07;
+					palId = 8 + pal;
+					for(int c = 0; c < 4; c++) colors[c] = _state.CgbObjPalettes[pal * 4 + c];
+				} else {
+					uint8_t obp = (sprAttr & 0x10) ? _state.ObjPalette1 : _state.ObjPalette0;
+					palId = 256 + obp;
+					uint8_t bankOffset = (sprAttr & 0x10) ? 4 : 0;
+					for(int c = 0; c < 4; c++) colors[c] = _state.CgbObjPalettes[bankOffset + ((obp >> (c * 2)) & 0x03)];
+				}
+				bool sprHFlip = (sprAttr & 0x20) != 0;
+				bool sprVFlip = (sprAttr & 0x40) != 0;
+				GbHdPackBuilder::ProcessTile(&_vram[(sprTile * 16) | tileBank], palId, colors, true, sprHFlip, sprVFlip);
+				if(_state.LargeSprites) {
+					GbHdPackBuilder::ProcessTile(&_vram[((sprTile | 1) * 16) | tileBank], palId, colors, true, sprHFlip, sprVFlip);
+				}
+			}
 			break;
 		}
 
@@ -648,6 +706,28 @@ void GbPpu::ClockTileFetcher()
 			tileRowAddr |= tileBank;
 			_bgFetcher.Addr = tileRowAddr;
 			_bgFetcher.Attributes = (attributes & 0xBF);
+			if(_hdEnabled) {
+				_bgFetcher.HdHash = HashHdTile(&_vram[tileRowAddr - tileY * 2]);
+				_bgFetcher.HdPalette = _state.CgbEnabled ? (uint32_t)(attributes & 0x07) : (uint32_t)_state.BgPalette;
+				_bgFetcher.HdFlags = (uint8_t)(((attributes & 0x20) ? 2 : 0) | ((attributes & 0x40) ? 4 : 0));
+				_bgFetcher.HdRow = (uint8_t)(yOffset & 0x07);
+			}
+
+			if(GbHdPackBuilder::IsActive()) {
+				// Tile de fond : 16 octets relus à l'adresse de base (le PPU ne lit qu'une ligne à la fois)
+				uint16_t tileBase = tileRowAddr - tileY * 2;
+				uint16_t colors[4] = {};
+				uint32_t palId = 0;
+				if(_state.CgbEnabled) {
+					uint8_t pal = attributes & 0x07;
+					palId = pal;
+					for(int c = 0; c < 4; c++) colors[c] = _state.CgbBgPalettes[pal * 4 + c];
+				} else {
+					palId = _state.BgPalette;
+					for(int c = 0; c < 4; c++) colors[c] = _state.CgbBgPalettes[(_state.BgPalette >> (c * 2)) & 0x03];
+				}
+				GbHdPackBuilder::ProcessTile(&_vram[tileBase], palId, colors, false, (attributes & 0x20) != 0, (attributes & 0x40) != 0);
+			}
 			break;
 		}
 
@@ -707,6 +787,11 @@ void GbPpu::PushSpriteToPixelFifo()
 			_oamFifo.Content[pos].Color = bits;
 			_oamFifo.Content[pos].Attributes = _oamFetcher.Attributes;
 			_oamFifo.Content[pos].Index = spriteIndex;
+			_oamFifo.Content[pos].HdHash = _oamFetcher.HdHash;
+			_oamFifo.Content[pos].HdPalette = _oamFetcher.HdPalette;
+			_oamFifo.Content[pos].HdFlags = _oamFetcher.HdFlags;
+			_oamFifo.Content[pos].HdRow = _oamFetcher.HdRow;
+			_oamFifo.Content[pos].HdCol = (uint8_t)i;
 		}
 		pos = (pos + 1) & 0x07;
 	}
@@ -723,6 +808,11 @@ void GbPpu::PushTileToPixelFifo()
 
 		_bgFifo.Content[i].Color = bits;
 		_bgFifo.Content[i].Attributes = _bgFetcher.Attributes;
+		_bgFifo.Content[i].HdHash = _bgFetcher.HdHash;
+		_bgFifo.Content[i].HdPalette = _bgFetcher.HdPalette;
+		_bgFifo.Content[i].HdFlags = _bgFetcher.HdFlags;
+		_bgFifo.Content[i].HdRow = _bgFetcher.HdRow;
+		_bgFifo.Content[i].HdCol = (uint8_t)i;
 	}
 
 	_fetchColumn = (_fetchColumn + 1) & 0x1F;
@@ -799,6 +889,18 @@ PpuMode GbPpu::GetMode()
 
 void GbPpu::SendFrame()
 {
+	// Packs HD : releve par pixel (etape 2, aucun rendu encore)
+	bool hdWanted = _gameboy->IsHdPackActive();
+	if(hdWanted && _hdInfo[0].size() != (size_t)GbConstants::PixelCount) {
+		_hdInfo[0].assign(GbConstants::PixelCount, GbHdPixelInfo());
+		_hdInfo[1].assign(GbConstants::PixelCount, GbHdPixelInfo());
+	}
+	_hdEnabled = hdWanted;
+
+	if(GbHdPackBuilder::IsActive()) {
+		GbHdPackBuilder::SnapshotFrame(_oam, _vram, _state.LargeSprites, _state.CgbEnabled, _state.ObjPalette0, _state.ObjPalette1);
+		GbHdPackBuilder::SnapshotBackground(_vram, _state.BgTilemapSelect, _state.BgTileSelect, _state.ScrollX, _state.ScrollY, _state.CgbEnabled, _state.BgPalette);
+	}
 	_emu->ProcessEvent(EventType::EndFrame, CpuType::Gameboy);
 	_state.FrameCount++;
 
@@ -823,11 +925,39 @@ void GbPpu::SendFrame()
 	_isFirstFrame = false;
 
 	RenderedFrame frame(_currentBuffer, GbConstants::ScreenWidth, GbConstants::ScreenHeight, 1.0, _state.FrameCount, _gameboy->GetControlManager()->GetPortStates());
+	frame.Data = _hdEnabled ? (void*)_hdInfo[_hdIndex].data() : nullptr;
 	bool rewinding = _emu->GetRewindManager()->IsRewinding();
 	_emu->GetVideoDecoder()->UpdateFrame(frame, rewinding, rewinding);
 
 	_emu->ProcessEndOfFrame();
 	_gameboy->ProcessEndOfFrame();
+
+	// Packs HD : journal de couverture toutes les 300 images, puis tampon suivant
+	if(_hdEnabled && ++_hdLogCounter >= 300) {
+		_hdLogCounter = 0;
+		const GbHdPackData& pack = _gameboy->GetHdPackData();
+		const GbHdPixelInfo* info = _hdInfo[_hdIndex].data();
+		uint32_t bgTotal = 0, bgFound = 0, objTotal = 0, objFound = 0;
+		for(int px = 0; px < GbConstants::PixelCount; px++) {
+			if(info[px].Layer == 0) {
+				continue;
+			}
+			bool found = pack.Tiles.count(std::make_tuple(info[px].Hash, info[px].Palette, info[px].Flags)) > 0;
+			if(info[px].Layer == 1) {
+				bgTotal++;
+				if(found) bgFound++;
+			} else {
+				objTotal++;
+				if(found) objFound++;
+			}
+		}
+		MessageManager::Log("[HD-GB-PIX] 300 images : fond " + std::to_string(bgTotal) + " pixels, " + std::to_string(bgFound) + " couverts par le pack ; objets " + std::to_string(objTotal) + " pixels, " + std::to_string(objFound) + " couverts");
+	}
+	_hdIndex ^= 1;
+	_hdCur = _hdEnabled ? _hdInfo[_hdIndex].data() : nullptr;
+	if(_hdEnabled) {
+		std::fill(_hdInfo[_hdIndex].begin(), _hdInfo[_hdIndex].end(), GbHdPixelInfo());
+	}
 
 	_currentBuffer = _currentBuffer == _outputBuffers[0] ? _outputBuffers[1] : _outputBuffers[0];
 }

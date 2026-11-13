@@ -768,7 +768,7 @@ namespace Mesen.ViewModels
 				new MainMenuAction() {
 					ActionType = ActionType.HdPacks,
 					// On autorise NES OU SNES
-					IsVisible = () => MainWindow.RomInfo.ConsoleType == ConsoleType.Nes || MainWindow.RomInfo.ConsoleType == ConsoleType.Snes,
+					IsVisible = () => MainWindow.RomInfo.ConsoleType == ConsoleType.Nes || MainWindow.RomInfo.ConsoleType == ConsoleType.Snes || MainWindow.RomInfo.ConsoleType == ConsoleType.Gameboy,
 					SubActions = new List<object> {
 						new MainMenuAction() {
 							ActionType = ActionType.InstallHdPack,
@@ -777,7 +777,7 @@ namespace Mesen.ViewModels
 						new MainMenuAction() {
 							ActionType = ActionType.HdPackBuilder,
 							// Optionnel : on peut aussi forcer la visibilité ici si nécessaire
-							IsVisible = () => MainWindow.RomInfo.ConsoleType == ConsoleType.Nes || MainWindow.RomInfo.ConsoleType == ConsoleType.Snes,
+							IsVisible = () => MainWindow.RomInfo.ConsoleType == ConsoleType.Nes || MainWindow.RomInfo.ConsoleType == ConsoleType.Snes || MainWindow.RomInfo.ConsoleType == ConsoleType.Gameboy,
 							OnClick = () => {
 								ApplicationHelper.GetOrCreateUniqueWindow(wnd, () => new HdPackBuilderWindow());
 							}
@@ -1127,6 +1127,8 @@ namespace Mesen.ViewModels
 				},
 				new MainMenuAction() {
 					ActionType = ActionType.CheckForUpdates,
+					// Désactivé : ce fork ne suit pas les mises à jour de Mesen officiel
+					IsEnabled = () => false,
 					OnClick = () => CheckForUpdate(wnd, false)
 				},
 				new MainMenuAction() {

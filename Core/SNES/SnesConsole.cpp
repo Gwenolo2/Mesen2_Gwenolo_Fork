@@ -639,6 +639,9 @@ void SnesConsole::ProcessNotification(ConsoleNotificationType type,
         SnesHdPackBuilder::StartRecording(options);
       }
       break;
+    case EmulatorShortcut::GrabFrameHdPack:
+      SnesHdPackBuilder::RequestFrameGrab();
+      break;
     case EmulatorShortcut::StopRecordHdPack:
       SnesHdPackBuilder::StopRecording();
       break;

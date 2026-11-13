@@ -40,14 +40,14 @@ export function stripLine(raw: string): string {
     return text.replace(/^[ \t]+/, '');
 }
 
-function collect(file: string, rootFolder: string, depth: number, out: RawLine[], errors: string[], override?: string): void {
+function collect(file: string, rootFolder: string, depth: number, out: RawLine[], errors: string[], openTexts?: Map<string, string>): void {
     if (depth > MAX_INCLUDE_DEPTH) {
         errors.push(`Profondeur d'include dépassée à : ${file}`);
         return;
     }
     let content: string;
     try {
-        content = override ?? fs.readFileSync(file, 'utf8');
+        content = openTexts?.get(file) ?? fs.readFileSync(file, 'utf8');
     } catch {
         errors.push(`Fichier inclus introuvable : ${file}`);
         return;
@@ -57,7 +57,7 @@ function collect(file: string, rootFolder: string, depth: number, out: RawLine[]
         const stripped = stripLine(raw);
         if (stripped.startsWith('<include>')) {
             const target = stripped.slice('<include>'.length).trim();
-            collect(path.resolve(rootFolder, target.replace(/\\/g, '/')), rootFolder, depth + 1, out, errors);
+            collect(path.resolve(rootFolder, target.replace(/\\/g, '/')), rootFolder, depth + 1, out, errors, openTexts);
         } else {
             out.push({ text, file, line: index + 1 });
         }
@@ -92,14 +92,38 @@ export function expandAliases(text: string, aliases: Map<string, string>): { tex
 }
 
 /**
- * Lit le fichier d'entrée et ses <include>, puis applique les alias dans l'ordre de lecture.
- * Reproduit LoadFileLinesRecursive et la boucle principale de SnesHdPackLoader.cpp.
+ * Fichier d'entrée du pack : le snes_hires.txt du dossier du fichier ouvert ou d'un de ses parents.
+ * Un .mesen inclus n'est donc pas sa propre racine : ses chemins se lisent depuis le dossier de snes_hires.txt.
+ * Si aucun snes_hires.txt n'est trouvé, le fichier ouvert lui-même sert d'entrée.
  */
-export function resolvePack(entryFile: string, entryText?: string): ResolvedPack {
+export function findPackEntry(file: string): string {
+    const start = path.resolve(file);
+    let dir = path.dirname(start);
+    for (;;) {
+        const candidate = path.join(dir, 'snes_hires.txt');
+        if (fs.existsSync(candidate)) return candidate;
+        const parent = path.dirname(dir);
+        if (parent === dir) return start;
+        dir = parent;
+    }
+}
+
+/** Racine du pack (dossier de l'entrée) : base de tous les chemins et des <include>. */
+export function packRoot(file: string): string {
+    return path.dirname(findPackEntry(file));
+}
+
+/**
+ * Lit le fichier d'entrée du pack et ses <include>, puis applique les alias dans l'ordre de lecture.
+ * Reproduit LoadFileLinesRecursive et la boucle principale de SnesHdPackLoader.cpp.
+ * `openTexts` remplace le contenu disque des fichiers ouverts dans l'éditeur (chemins absolus).
+ */
+export function resolvePack(file: string, openTexts?: Map<string, string>): ResolvedPack {
+    const entryFile = findPackEntry(file);
     const rootFolder = path.dirname(entryFile);
     const raw: RawLine[] = [];
     const errors: string[] = [];
-    collect(entryFile, rootFolder, 0, raw, errors, entryText);
+    collect(entryFile, rootFolder, 0, raw, errors, openTexts);
 
     const aliases = new Map<string, string>();
     const lines: ResolvedLine[] = [];

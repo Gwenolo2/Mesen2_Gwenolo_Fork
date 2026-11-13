@@ -3,7 +3,7 @@ import { declaredConditions, resolvePack } from './resolver';
 import { Schema, USABLE, conditionPrefix, tagBefore } from './schema';
 
 /** Conditions intégrées (SnesHdPackLoader.cpp, ligne ~343). */
-const BUILTIN_CONDITIONS = ['hmirror', 'vmirror'];
+const BUILTIN_CONDITIONS = ['hmirror', 'vmirror', 'gpu3d', 'widescreen', 'widescreenMode7'];
 
 export class PackCompletionProvider implements vscode.CompletionItemProvider {
     constructor(private readonly schema: Schema) {}

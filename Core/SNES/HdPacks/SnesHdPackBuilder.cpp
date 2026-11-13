@@ -10,6 +10,7 @@
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/HexUtilities.h"
 #include "Utilities/PNGHelper.h"
+#include "Shared/MessageManager.h"
 
 #include "Utilities/StringUtilities.h"
 
@@ -116,7 +117,38 @@ std::map<int, std::set<std::pair<int, int>>> SnesHdPackBuilder::_usedSmartBlocks
 
 std::unordered_set<uint32_t> SnesHdPackBuilder::_m7SingleTilesDone;
 
-bool SnesHdPackBuilder::IsActive() { return _isActive; }
+bool SnesHdPackBuilder::_grabRequested = false;
+bool SnesHdPackBuilder::_grabActive = false;
+uint32_t SnesHdPackBuilder::_grabFrame = 0;
+uint32_t SnesHdPackBuilder::_lastFrame = 0;
+
+// Frame Grabbing : en mode grab, rien n'est capturé tant que "Record frame" n'a pas été pressé.
+// La frame suivante est capturée en entier, puis la capture s'arrête à la frame suivante.
+bool SnesHdPackBuilder::IsActive() {
+  if(!_isActive) return false;
+  if(!_options.FrameGrabbing) return true;
+  return _grabRequested || _grabActive;
+}
+
+void SnesHdPackBuilder::RequestFrameGrab() {
+  if(_isActive && _options.FrameGrabbing) _grabRequested = true;
+}
+
+bool SnesHdPackBuilder::CanCapture(uint32_t frameCount) {
+  _lastFrame = frameCount;
+  if(!_options.FrameGrabbing) return true;
+  if(_grabRequested) {
+    _grabRequested = false;
+    _grabActive = true;
+    _grabFrame = frameCount;
+  }
+  if(!_grabActive) return false;
+  if(frameCount != _grabFrame) {
+    _grabActive = false;
+    return false;
+  }
+  return true;
+}
 //--------------------------------------------------------------------------------------------------------
 
 void SnesHdPackBuilder::StartRecording(HdPackBuilderOptions options) {
@@ -125,6 +157,20 @@ void SnesHdPackBuilder::StartRecording(HdPackBuilderOptions options) {
   _processedTiles.clear();
   _paletteTiles.clear();
   _isActive = true;
+  _grabRequested = false;
+  _grabActive = false;
+  _snesObjects.clear();
+  _snesObjSizes.clear();
+  _snesObjOffscreen = 0;
+  _snesObjCapped = 0;
+  _snesObjSnapshots = 0;
+  _snesObjMerged = 0;
+  _snesObjSplit = 0;
+  _snesScreens.clear();
+  _snesBgTiles.clear();
+  _snesScreenFrames = 0;
+  _snesScreenCapped = 0;
+  _snesScreenSkipped = 0;
 
 
   // Validation et repli sur 16 si les valeurs sont hors limites
@@ -329,6 +375,13 @@ void SnesHdPackBuilder::ProcessMode7(uint16_t* vram, uint16_t* cgram)
 {
 	if(!_isActive || vram == nullptr || cgram == nullptr) {
 		return;
+	}
+	if(_options.FrameGrabbing) {
+		// Mode 7 n'est capturé que pour la frame en cours de grab
+		if(!_grabActive || _lastFrame != _grabFrame) {
+			_grabActive = false;
+			return;
+		}
 	}
 
 	// =====================================================================
@@ -629,6 +682,8 @@ void SnesHdPackBuilder::DumpMode7Texture(uint16_t *vram, uint16_t *cgram,
 void SnesHdPackBuilder::StopRecording()
 {
 	_isActive = false;
+	_grabRequested = false;
+	_grabActive = false;
 
 	// FORCE BRUTE POUR TESTER LE JSON !
 	_options.GenerateHdPackMetadata = true;
@@ -1080,6 +1135,16 @@ void SnesHdPackBuilder::StopRecording()
 	file.close();
 
 	// =========================================================
+	// 3 bis. OBJETS COMPOSES (une entree OAM = un objet)
+	// =========================================================
+	if(_options.GenerateSnesObjects) {
+		WriteObjectFiles();
+	} else {
+		MessageManager::Log("[HD-SNES] Objets composes desactives : aucun PNG ni .mesen par objet");
+	}
+	WriteScreenFiles();
+
+	// =========================================================
 	// 4. ÉCRITURE DES MÉTADONNÉES JSON
 	// =========================================================
 	if(_options.GenerateHdPackMetadata && !_metadataCollection.empty()) {
@@ -1136,6 +1201,9 @@ void SnesHdPackBuilder::ProcessTile(const uint8_t* tileData, size_t dataSize,
                                     bool isSprite, uint16_t vramTileIndex,
 												int screenX, int screenY, uint32_t frameCount, bool hMirror, bool vMirror) {
   if (!_isActive || dataSize == 0 || tileData == nullptr || cgram == nullptr) {
+    return;
+  }
+  if (!CanCapture(frameCount)) {
     return;
   }
 
@@ -1355,4 +1423,553 @@ void SnesHdPackBuilder::SaveTilePng(const uint8_t *tileData, size_t dataSize,
   _paletteTiles[paletteIndex].push_back(std::move(img));
 
 
+}
+
+
+// =====================================================================
+// HD PACK SNES : objets composes (une entree OAM = un objet)
+// =====================================================================
+namespace {
+  // Lecture d'une tile 4bpp (32 octets) en VRAM, comme SnesPpu::FetchSpritePosition
+  void ReadSnesObjTile(const uint16_t* vram, uint16_t addr, uint8_t* bytes) {
+    for(size_t k = 0; k < 16; k++) {
+      uint16_t word = vram[(addr + k) & 0x7FFF];
+      bytes[k * 2] = word & 0xFF;
+      bytes[k * 2 + 1] = word >> 8;
+    }
+  }
+
+  // Meme hash que SnesPpu (hash*31 + octet) : celui que GetHdTile recherche
+  uint64_t HashSnesObjTile(const uint8_t* bytes) {
+    uint64_t hash = 0;
+    for(size_t k = 0; k < 32; k++) {
+      hash = (hash * 31) + bytes[k];
+    }
+    return hash;
+  }
+
+  // Decodage 4bpp en ARGB (orientation source, couleur 0 transparente)
+  void DecodeSnesObjTile(const uint8_t* bytes, const uint16_t* cgram, uint32_t palette, std::vector<uint32_t>& out) {
+    out.assign(64, 0);
+    for(int py = 0; py < 8; py++) {
+      for(int px = 0; px < 8; px++) {
+        int bit = 7 - px;
+        int color = ((bytes[py * 2] >> bit) & 1)
+                  | (((bytes[py * 2 + 1] >> bit) & 1) << 1)
+                  | (((bytes[16 + py * 2] >> bit) & 1) << 2)
+                  | (((bytes[16 + py * 2 + 1] >> bit) & 1) << 3);
+        if(color == 0) continue;
+        uint16_t c = cgram[palette * 16 + color];
+        uint32_t r = c & 0x1F;        r = (r << 3) | (r >> 2);
+        uint32_t g = (c >> 5) & 0x1F; g = (g << 3) | (g >> 2);
+        uint32_t b = (c >> 10) & 0x1F; b = (b << 3) | (b >> 2);
+        out[py * 8 + px] = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+      }
+    }
+  }
+}
+
+void SnesHdPackBuilder::ProcessObjects(const uint8_t* oam, const uint16_t* vram, const uint16_t* cgram,
+                                       uint8_t oamMode, uint16_t oamBase, uint16_t oamGap)
+{
+  if(!_isActive || !_options.GenerateSnesObjects || oam == nullptr || vram == nullptr || cgram == nullptr) {
+    return;
+  }
+  // Frame Grabbing : seulement pendant la frame en cours de capture
+  if(_options.FrameGrabbing && (!_grabActive || _grabFrame != _lastFrame)) {
+    return;
+  }
+
+  // Tailles selon OBSEL (mode) et le bit de taille de la table haute (identique a SnesPpu)
+  static constexpr int oamWidth[16]  = {8, 8, 8, 16, 16, 32, 16, 16, 16, 32, 64, 32, 64, 64, 32, 32};
+  static constexpr int oamHeight[16] = {8, 8, 8, 16, 16, 32, 32, 32, 16, 32, 64, 32, 64, 64, 64, 32};
+  _snesObjSnapshots++;
+
+  // Phase 1 : entrees OAM visibles de cette frame, avec leurs tiles
+  struct FrameEntry {
+    int X = 0;
+    int Y = 0;
+    int W = 0;
+    int H = 0;
+    std::vector<SnesObjMember> Members; // positions relatives a l'entree
+  };
+  std::vector<FrameEntry> entries;
+
+  for(int i = 0; i < 128; i++) {
+    const uint8_t attr = oam[i * 4 + 3];
+    uint8_t highValue = oam[0x200 | (i >> 2)] >> ((i << 1) & 0x06);
+    int16_t x = (int16_t)((highValue & 0x01) ? (0xFF00 | oam[i * 4]) : oam[i * 4]);
+    int y = oam[i * 4 + 1];
+    int mode = (oamMode | ((highValue & 0x02) << 2)) & 0x0F;
+    int w = oamWidth[mode];
+    int h = oamHeight[mode];
+
+    bool offX = (x != -256) && (x >= 256 || x + w <= 0);
+    bool offY = (y >= 240) && (y + h <= 256);
+    if(offX || offY) {
+      _snesObjOffscreen++;
+      continue;
+    }
+    _snesObjSizes[std::to_string(w) + "x" + std::to_string(h)]++;
+
+    const bool hf = (attr & 0x40) != 0;
+    const bool vf = (attr & 0x80) != 0;
+    const uint32_t palette = ((attr >> 1) & 0x07) + 8; // D8 : sprites 8..15
+    const bool useSecond = (attr & 0x01) != 0;
+    const uint8_t tileRow = (oam[i * 4 + 2] >> 4) & 0x0F;
+    const uint8_t tileCol = oam[i * 4 + 2] & 0x0F;
+    const int cols = w / 8;
+    const int rows = h / 8;
+
+    FrameEntry fe;
+    fe.X = x;
+    fe.Y = y;
+    fe.W = w;
+    fe.H = h;
+    for(int r = 0; r < rows; r++) {
+      for(int c = 0; c < cols; c++) {
+        // Les flips de l'entree OAM inversent l'ordre des colonnes et des lignes de tiles
+        int srcC = hf ? (cols - 1 - c) : c;
+        int srcR = vf ? (rows - 1 - r) : r;
+        uint8_t tileIdx = (uint8_t)((((tileRow + srcR) & 0x0F) << 4) | ((tileCol + srcC) & 0x0F));
+        SnesObjMember m;
+        m.X = c * 8;
+        m.Y = r * 8;
+        m.Palette = palette;
+        m.HFlip = hf;
+        m.VFlip = vf;
+        m.VramAddr = (uint16_t)(oamBase + (tileIdx << 4) + (useSecond ? oamGap : 0));
+        uint8_t bytes[32];
+        ReadSnesObjTile(vram, m.VramAddr, bytes);
+        m.Hash = HashSnesObjTile(bytes);
+        fe.Members.push_back(std::move(m));
+      }
+    }
+    entries.push_back(std::move(fe));
+  }
+
+  // Phase 2 : regroupement des entrees qui se touchent ou se chevauchent (union-find)
+  const size_t n = entries.size();
+  std::vector<size_t> parent(n);
+  for(size_t k = 0; k < n; k++) parent[k] = k;
+  auto findRoot = [&parent](size_t k) {
+    while(parent[k] != k) {
+      parent[k] = parent[parent[k]];
+      k = parent[k];
+    }
+    return k;
+  };
+  for(size_t a = 0; a < n; a++) {
+    for(size_t b = a + 1; b < n; b++) {
+      const FrameEntry& ea = entries[a];
+      const FrameEntry& eb = entries[b];
+      // Regroupement si les boites se touchent ou sont separees par un petit ecart
+      const int g = SnesClusterGapPx;
+      bool touch = ea.X <= eb.X + eb.W + g && eb.X <= ea.X + ea.W + g
+                && ea.Y <= eb.Y + eb.H + g && eb.Y <= ea.Y + ea.H + g;
+      if(touch) {
+        size_t ra = findRoot(a), rb = findRoot(b);
+        if(ra != rb) parent[rb] = ra;
+      }
+    }
+  }
+  std::map<size_t, std::vector<size_t>> groups;
+  for(size_t k = 0; k < n; k++) groups[findRoot(k)].push_back(k);
+
+  // Phase 3 : un objet par groupe (ou par entree si le groupe depasse la taille max)
+  uint8_t bytes[32];
+  auto emitObject = [&](const std::vector<size_t>& part) {
+    int bx0 = 1 << 30, by0 = 1 << 30, bx1 = -(1 << 30), by1 = -(1 << 30);
+    for(size_t k : part) {
+      bx0 = std::min(bx0, entries[k].X);
+      by0 = std::min(by0, entries[k].Y);
+      bx1 = std::max(bx1, entries[k].X + entries[k].W);
+      by1 = std::max(by1, entries[k].Y + entries[k].H);
+    }
+    const int bw = bx1 - bx0;
+    const int bh = by1 - by0;
+
+    std::vector<SnesObjMember> members;
+    for(size_t k : part) {
+      for(const auto& m : entries[k].Members) {
+        SnesObjMember mm = m;
+        mm.X += entries[k].X - bx0;
+        mm.Y += entries[k].Y - by0;
+        members.push_back(std::move(mm));
+      }
+    }
+    std::sort(members.begin(), members.end(), [](const SnesObjMember& a, const SnesObjMember& b) {
+      return a.Y != b.Y ? a.Y < b.Y : a.X < b.X;
+    });
+
+    // Signature independante de la position ecran
+    std::string sig = std::to_string(bw) + "x" + std::to_string(bh) + ";";
+    for(const auto& m : members) {
+      sig += std::to_string(m.X) + "," + std::to_string(m.Y) + "," + std::to_string(m.Hash) + ","
+           + std::to_string(m.Palette) + (m.HFlip ? "h" : "-") + (m.VFlip ? "v" : "-") + ";";
+    }
+
+    auto it = _snesObjects.find(sig);
+    if(it == _snesObjects.end()) {
+      if(_snesObjects.size() >= MaxSnesObjectKinds) {
+        _snesObjCapped++;
+        return;
+      }
+      SnesObjEntry obj;
+      obj.W = bw;
+      obj.H = bh;
+      obj.Count = 0;
+      for(auto& m : members) {
+        ReadSnesObjTile(vram, m.VramAddr, bytes);
+        DecodeSnesObjTile(bytes, cgram, m.Palette, m.Pixels);
+      }
+      obj.Members = std::move(members);
+      it = _snesObjects.emplace(sig, std::move(obj)).first;
+    }
+    it->second.Count++;
+    if(part.size() > 1) _snesObjMerged++;
+  };
+
+  for(const auto& g : groups) {
+    const std::vector<size_t>& part = g.second;
+    int gx0 = 1 << 30, gy0 = 1 << 30, gx1 = -(1 << 30), gy1 = -(1 << 30);
+    for(size_t k : part) {
+      gx0 = std::min(gx0, entries[k].X);
+      gy0 = std::min(gy0, entries[k].Y);
+      gx1 = std::max(gx1, entries[k].X + entries[k].W);
+      gy1 = std::max(gy1, entries[k].Y + entries[k].H);
+    }
+    if(gx1 - gx0 > SnesMaxClusterPx || gy1 - gy0 > SnesMaxClusterPx) {
+      // Groupe trop grand : on ne le fusionne pas (evite de coller deux personnages)
+      _snesObjSplit++;
+      for(size_t k : part) {
+        emitObject(std::vector<size_t>{ k });
+      }
+    } else {
+      emitObject(part);
+    }
+  }
+}
+
+void SnesHdPackBuilder::WriteObjectFiles()
+{
+  if(!_options.GenerateSnesObjects) {
+    return;
+  }
+
+  std::string sizesTxt;
+  for(const auto& s : _snesObjSizes) {
+    sizesTxt += s.first + " : " + std::to_string(s.second) + "  ";
+  }
+  if(sizesTxt.empty()) sizesTxt = "aucune";
+
+  typedef std::pair<const std::string, SnesObjEntry> ObjRef;
+  std::vector<const ObjRef*> kept;
+  int belowThreshold = 0;
+  for(const auto& entry : _snesObjects) {
+    if(entry.second.Count >= SnesMinObjectFrames) kept.push_back(&entry);
+    else belowThreshold++;
+  }
+  std::sort(kept.begin(), kept.end(), [](const ObjRef* a, const ObjRef* b) {
+    return a->second.Count != b->second.Count ? a->second.Count > b->second.Count : a->first < b->first;
+  });
+  size_t overCap = 0;
+  if(kept.size() > MaxSnesObjectsWritten) {
+    overCap = kept.size() - MaxSnesObjectsWritten;
+    kept.resize(MaxSnesObjectsWritten);
+  }
+
+  MessageManager::Log("[HD-SNES] Objets : " + std::to_string(kept.size()) + " retenus (seuil "
+    + std::to_string(SnesMinObjectFrames) + " apparitions) sur " + std::to_string(_snesObjects.size())
+    + " types, " + std::to_string(_snesObjSnapshots) + " releves OAM");
+  MessageManager::Log("[HD-SNES] Objets : tailles rencontrees : " + sizesTxt);
+  MessageManager::Log("[HD-SNES] Objets : " + std::to_string(_snesObjMerged) + " vues formees de plusieurs entrees OAM (regroupement par contact, max "
+    + std::to_string(SnesMaxClusterPx) + " px), " + std::to_string(_snesObjSplit) + " groupes trop grands decoupes");
+  MessageManager::Log("[HD-SNES] Objets ignores : " + std::to_string(belowThreshold) + " sous le seuil, "
+    + std::to_string(overCap) + " au-dela du plafond (" + std::to_string(MaxSnesObjectsWritten) + "), "
+    + std::to_string(_snesObjCapped) + " nouveaux types refuses (limite " + std::to_string(MaxSnesObjectKinds)
+    + "), " + std::to_string(_snesObjOffscreen) + " entrees hors ecran");
+
+  if(!kept.empty() && !_saveFolder.empty()) {
+    std::string tilesDir = FolderUtilities::CombinePath(_saveFolder, "Tiles");
+    std::string sprDir = FolderUtilities::CombinePath(tilesDir, "Sprites");
+    std::string objDir = FolderUtilities::CombinePath(sprDir, "Objects");
+    FolderUtilities::CreateFolder(tilesDir);
+    FolderUtilities::CreateFolder(sprDir);
+    FolderUtilities::CreateFolder(objDir);
+
+    int scale = _options.Scale;
+    if(scale < 1) scale = 4; // meme repli que le reste du builder SNES
+
+    int idx = 0;
+    for(const ObjRef* ref : kept) {
+      idx++;
+      const SnesObjEntry& entry = ref->second;
+      std::string baseName = "obj_" + std::to_string(idx);
+      std::string pngName = baseName + "_x" + std::to_string(entry.Count) + ".png";
+      std::string imgRel = "Tiles/Sprites/Objects/" + pngName;
+
+      int canvasW = entry.W * scale;
+      int canvasH = entry.H * scale;
+      std::vector<uint32_t> canvas((size_t)canvasW * canvasH, 0);
+      for(const auto& m : entry.Members) {
+        for(int py = 0; py < 8; py++) {
+          for(int px = 0; px < 8; px++) {
+            int sx = m.HFlip ? (7 - px) : px;
+            int sy = m.VFlip ? (7 - py) : py;
+            uint32_t color = m.Pixels[sy * 8 + sx];
+            if((color >> 24) == 0) continue;
+            for(int dy = 0; dy < scale; dy++) {
+              for(int dx = 0; dx < scale; dx++) {
+                int ox = (m.X + px) * scale + dx;
+                int oy = (m.Y + py) * scale + dy;
+                canvas[(size_t)oy * canvasW + ox] = color;
+              }
+            }
+          }
+        }
+      }
+      if(!PNGHelper::WritePNG(FolderUtilities::CombinePath(objDir, pngName), canvas.data(), canvasW, canvasH, 32)) {
+        MessageManager::Log("[HD-SNES] Echec d'ecriture : " + pngName);
+      }
+
+      // Definition de l'objet : tiles triees Y puis X (ordre de construction)
+      std::ofstream out(FolderUtilities::CombinePath(objDir, baseName + ".mesen"));
+      if(out.is_open()) {
+        out << "# Objet " << baseName << " : " << entry.W << "x" << entry.H << ", vu sur " << entry.Count << " images\n";
+        out << "# Image entiere : " << imgRel << "\n";
+        out << "# Tiles de l'objet ; [x,y] = position dans l'objet, en pixels SNES (hflip/vflip = flips OAM)\n";
+        for(const auto& m : entry.Members) {
+          out << "<tile>" << std::hex << std::uppercase << m.Hash << std::dec << ","
+              << m.Palette << "," << imgRel << "," << (m.X * scale) << "," << (m.Y * scale)
+              << "   # [" << m.X << "," << m.Y << "] hflip=" << (m.HFlip ? 1 : 0)
+              << " vflip=" << (m.VFlip ? 1 : 0) << "\n";
+        }
+      }
+    }
+    MessageManager::Log("[HD-SNES] Objets ecrits : " + std::to_string(idx) + " PNG + .mesen dans Tiles/Sprites/Objects");
+  }
+
+  _snesObjects.clear();
+  _snesObjSizes.clear();
+}
+
+
+// =====================================================================
+// HD PACK SNES : ecrans de fond (equivalent de GbHdPackBuilder::SnapshotBackground)
+// =====================================================================
+namespace {
+  // Decodage d'une tile de fond (2, 4 ou 8 bpp) en ARGB, orientation source, couleur 0 transparente
+  void DecodeSnesBgTile(const uint8_t* bytes, int bpp, const uint16_t* cgram, uint32_t palette, std::vector<uint32_t>& out) {
+    out.assign(64, 0);
+    int palOffset = (bpp == 2) ? (int)palette * 4 : (bpp == 4 ? (int)palette * 16 : 0);
+    for(int py = 0; py < 8; py++) {
+      for(int px = 0; px < 8; px++) {
+        int bit = 7 - px;
+        int color = 0;
+        for(int p = 0; p < bpp; p++) {
+          int planeByte = (p / 2) * 16 + py * 2 + (p & 1);
+          color |= ((bytes[planeByte] >> bit) & 1) << p;
+        }
+        if(color == 0) continue;
+        uint16_t c = cgram[palOffset + color];
+        uint32_t r = c & 0x1F;         r = (r << 3) | (r >> 2);
+        uint32_t g = (c >> 5) & 0x1F;  g = (g << 3) | (g >> 2);
+        uint32_t b = (c >> 10) & 0x1F; b = (b << 3) | (b >> 2);
+        out[py * 8 + px] = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+      }
+    }
+  }
+}
+
+void SnesHdPackBuilder::ProcessScreens(const uint16_t* vram, const uint16_t* cgram, uint8_t bgMode,
+                                       uint8_t mainLayers, const SnesHdBgLayerInfo* layers)
+{
+  if(!_isActive || vram == nullptr || cgram == nullptr || layers == nullptr) {
+    return;
+  }
+  if(_options.FrameGrabbing && (!_grabActive || _grabFrame != _lastFrame)) {
+    return;
+  }
+  // Bits per pixel par calque selon le mode (0 = calque absent), comme SnesPpu
+  static constexpr int bppTable[8][4] = {
+    {2, 2, 2, 2}, {4, 4, 2, 0}, {4, 4, 0, 0}, {8, 4, 0, 0},
+    {8, 2, 0, 0}, {4, 2, 0, 0}, {4, 0, 0, 0}, {0, 0, 0, 0}
+  };
+  _snesScreenFrames++;
+
+  uint8_t bytes[64];
+  for(int L = 0; L < 4; L++) {
+    if(!(mainLayers & (1 << L))) continue;
+    int bpp = bppTable[bgMode & 7][L];
+    if(bpp == 0) continue;
+    const SnesHdBgLayerInfo& lay = layers[L];
+    if(lay.LargeTiles) {
+      _snesScreenSkipped++; // 16x16 : pas encore gere (v1)
+      continue;
+    }
+
+    // Visible : 32x28 cases de 8 px, decalees par le scroll (au pas de 8 px, comme le GB)
+    std::vector<SnesScreenCell> cells;
+    cells.reserve(32 * 28);
+    uint64_t key = 1469598103934665603ULL ^ (uint64_t)L;
+    const int hs = lay.HScroll >> 3;
+    const int vs = lay.VScroll >> 3;
+    const int wordCount = 4 * bpp;
+    for(int row = 0; row < 28; row++) {
+      for(int col = 0; col < 32; col++) {
+        int mapX = (hs + col) & (lay.DoubleWidth ? 0x3F : 0x1F);
+        int mapY = (vs + row) & (lay.DoubleHeight ? 0x3F : 0x1F);
+        int blockX = lay.DoubleWidth ? ((mapX >> 5) & 1) : 0;
+        int blockY = lay.DoubleHeight ? ((mapY >> 5) & 1) : 0;
+        uint16_t addr = (uint16_t)(lay.Tilemap + (blockY * (lay.DoubleWidth ? 2 : 1) + blockX) * 0x400
+                                 + ((mapY & 0x1F) << 5) + (mapX & 0x1F));
+        uint16_t entry = vram[addr & 0x7FFF];
+        uint16_t tileIdx = entry & 0x3FF;
+        uint32_t pal = (entry >> 10) & 0x07;
+        bool hf = (entry & 0x4000) != 0;
+        bool vf = (entry & 0x8000) != 0;
+
+        uint16_t tileStart = (uint16_t)(lay.Chr + tileIdx * 4 * bpp);
+        for(int k = 0; k < wordCount; k++) {
+          uint16_t word = vram[(tileStart + k) & 0x7FFF];
+          bytes[k * 2] = word & 0xFF;
+          bytes[k * 2 + 1] = word >> 8;
+        }
+        uint64_t hash = 0;
+        for(int k = 0; k < wordCount * 2; k++) {
+          hash = (hash * 31) + bytes[k];
+        }
+
+        SnesScreenCell cell;
+        cell.Col = col;
+        cell.Row = row;
+        cell.Hash = hash;
+        cell.Palette = pal;
+        cell.Bpp = (uint8_t)bpp;
+        cell.HFlip = hf;
+        cell.VFlip = vf;
+        cells.push_back(cell);
+        key = (key * 1099511628211ULL) ^ hash ^ (pal * 7919ULL) ^ (bpp * 104729ULL) ^ (uint64_t)(row * 32 + col);
+
+        // Tile decodee une seule fois (cache par hash, palette, bpp)
+        auto tkey = std::make_tuple(hash, pal, (uint8_t)bpp);
+        if(_snesBgTiles.find(tkey) == _snesBgTiles.end() && _snesBgTiles.size() < SnesMaxBgTiles) {
+          std::vector<uint32_t> px;
+          DecodeSnesBgTile(bytes, bpp, cgram, pal, px);
+          _snesBgTiles.emplace(tkey, std::move(px));
+        }
+      }
+    }
+
+    auto it = _snesScreens.find(key);
+    if(it == _snesScreens.end()) {
+      if(_snesScreens.size() >= SnesMaxScreenKinds) {
+        _snesScreenCapped++;
+        continue;
+      }
+      SnesScreenInfo info;
+      info.Layer = L;
+      info.Count = 0;
+      info.Cells = std::move(cells);
+      it = _snesScreens.emplace(key, std::move(info)).first;
+    }
+    it->second.Count++;
+  }
+}
+
+void SnesHdPackBuilder::WriteScreenFiles()
+{
+  if(_snesScreens.empty() || _saveFolder.empty()) {
+    _snesScreens.clear();
+    _snesBgTiles.clear();
+    return;
+  }
+
+  typedef std::pair<const uint64_t, SnesScreenInfo> ScrRef;
+  std::vector<const ScrRef*> kept;
+  int belowThreshold = 0;
+  for(const auto& entry : _snesScreens) {
+    if(entry.second.Count >= SnesMinObjectFrames) kept.push_back(&entry);
+    else belowThreshold++;
+  }
+  std::sort(kept.begin(), kept.end(), [](const ScrRef* a, const ScrRef* b) {
+    return a->second.Count != b->second.Count ? a->second.Count > b->second.Count : a->first < b->first;
+  });
+  if(kept.size() > MaxSnesObjectsWritten) kept.resize(MaxSnesObjectsWritten);
+
+  MessageManager::Log("[HD-SNES] Ecrans de fond : " + std::to_string(kept.size()) + " retenus (seuil "
+    + std::to_string(SnesMinObjectFrames) + " images) sur " + std::to_string(_snesScreens.size())
+    + " types, " + std::to_string(_snesScreenFrames) + " releves, " + std::to_string(belowThreshold)
+    + " sous le seuil, " + std::to_string(_snesScreenCapped) + " refuses (limite " + std::to_string(SnesMaxScreenKinds)
+    + "), " + std::to_string(_snesScreenSkipped) + " calques 16x16 ou mode 7 ignores");
+
+  if(!kept.empty()) {
+    std::string tilesDir = FolderUtilities::CombinePath(_saveFolder, "Tiles");
+    std::string bgDir = FolderUtilities::CombinePath(tilesDir, "Backgrounds");
+    std::string scrDir = FolderUtilities::CombinePath(bgDir, "Screens");
+    FolderUtilities::CreateFolder(tilesDir);
+    FolderUtilities::CreateFolder(bgDir);
+    FolderUtilities::CreateFolder(scrDir);
+
+    int scale = _options.Scale;
+    if(scale < 1) scale = 4;
+
+    int idx = 0;
+    for(const ScrRef* ref : kept) {
+      idx++;
+      const SnesScreenInfo& scr = ref->second;
+      std::string baseName = "ecran_" + std::to_string(idx) + "_x" + std::to_string(scr.Count);
+      std::string imgRel = "Tiles/Backgrounds/Screens/" + baseName + ".png";
+
+      int canvasW = 256 * scale;
+      int canvasH = 224 * scale;
+      std::vector<uint32_t> canvas((size_t)canvasW * canvasH, 0xFF000000);
+
+      std::ostringstream out;
+      out << "# Ecran " << baseName << " : calque BG" << (scr.Layer + 1) << ", vu sur " << scr.Count << " images\n";
+      out << "# Image entiere : " << imgRel << "\n";
+      out << "# Tiles de l'ecran ; [col,row] = case de 8 pixels SNES dans l'ecran (hflip/vflip = flips de la tilemap)\n";
+
+      for(const SnesScreenCell& cell : scr.Cells) {
+        auto tile = _snesBgTiles.find(std::make_tuple(cell.Hash, cell.Palette, cell.Bpp));
+        if(tile == _snesBgTiles.end()) continue;
+        const std::vector<uint32_t>& px = tile->second;
+        int cx = cell.Col * 8 * scale;
+        int cy = cell.Row * 8 * scale;
+        for(int py = 0; py < 8; py++) {
+          for(int pxx = 0; pxx < 8; pxx++) {
+            int sx = cell.HFlip ? (7 - pxx) : pxx;
+            int sy = cell.VFlip ? (7 - py) : py;
+            uint32_t color = px[sy * 8 + sx];
+            if((color >> 24) == 0) continue;
+            for(int dy = 0; dy < scale; dy++) {
+              for(int dx = 0; dx < scale; dx++) {
+                canvas[(size_t)(cy + py * scale + dy) * canvasW + (cx + pxx * scale + dx)] = color;
+              }
+            }
+          }
+        }
+
+        out << "<tile>" << std::hex << std::uppercase << cell.Hash << std::dec << ","
+            << cell.Palette << "," << imgRel << "," << cx << "," << cy
+            << "   # [" << cell.Col << "," << cell.Row << "] bpp=" << (int)cell.Bpp
+            << " hflip=" << (cell.HFlip ? 1 : 0) << " vflip=" << (cell.VFlip ? 1 : 0) << "\n";
+      }
+
+      if(!PNGHelper::WritePNG(FolderUtilities::CombinePath(scrDir, baseName + ".png"), canvas.data(), canvasW, canvasH, 32)) {
+        MessageManager::Log("[HD-SNES] Echec d'ecriture : " + baseName + ".png");
+      }
+      std::ofstream mesen(FolderUtilities::CombinePath(scrDir, baseName + ".mesen"));
+      if(mesen.is_open()) {
+        mesen << out.str();
+      } else {
+        MessageManager::Log("[HD-SNES] Echec d'ecriture : " + baseName + ".mesen");
+      }
+    }
+    MessageManager::Log("[HD-SNES] Ecrans ecrits : " + std::to_string(idx) + " PNG + .mesen dans Tiles/Backgrounds/Screens");
+  }
+
+  _snesScreens.clear();
+  _snesBgTiles.clear();
 }

@@ -635,6 +635,9 @@ struct HdPackBuilderOptions
 	//paramètres pour les dimensions des planches PNG
 	uint32_t SheetWidth;  // Nombre de tuiles en largeur (1 - 256, défaut : 16)
 	uint32_t SheetHeight; // Nombre de tuiles en hauteur (1 - 256, défaut : 16)
+	bool FrameGrabbing = false;
+	bool GenerateGbObjects = true;
+	bool GenerateSnesObjects = true;
 
 };
 
@@ -1072,6 +1075,7 @@ enum class EmulatorShortcut
 	VsInsertCoin4,
 	StartRecordHdPack,
 	StopRecordHdPack,
+	GrabFrameHdPack,
 
 	ShortcutCount,
 };

@@ -354,6 +354,23 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 		}
 	}
 
+	// Conditions systeme en dur, derivees des tags du pack : [gpu3d] [widescreen] [widescreenMode7] (+ [!...])
+	{
+		const char* sysNames[3] = { "gpu3d", "widescreen", "widescreenMode7" };
+		for(int inv = 0; inv < 2; inv++) {
+			for(int k = 0; k < 3; k++) {
+				auto sc = std::make_unique<SnesHdPackSystemCondition>();
+				sc->Flag = (SnesHdSystemFlag)k;
+				sc->BaseName = sysNames[k];
+				sc->Name = std::string(inv ? "!" : "") + sysNames[k];
+				sc->Initialize(&outData->ScreenInfo, outData.get());
+				conditionsByName[sc->Name] = sc.get();
+				std::unique_ptr<SnesHdPackCondition> c = std::move(sc);
+				outData->Conditions.emplace_back(std::move(c));
+			}
+		}
+	}
+
 	//Dictionnaire pour stocker les alias (Clé = "@Nom", Valeur = "remplacement")
 	std::unordered_map<std::string, std::string> aliases;
 

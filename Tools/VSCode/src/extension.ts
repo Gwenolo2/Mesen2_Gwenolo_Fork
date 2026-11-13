@@ -4,6 +4,7 @@ import { PackCompletionProvider } from './completion';
 import { computeDiagnostics } from './diagnostics';
 import { PackHoverProvider } from './hover';
 import { PackLinkProvider } from './links';
+import { openPackTexts } from './openDocs';
 import { declaredConditions, resolvePack } from './resolver';
 import { PackSignatureProvider } from './signature';
 import { loadSchema } from './schema';
@@ -36,7 +37,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 vscode.window.showWarningMessage('Ouvrez un snes_hires.txt.');
                 return;
             }
-            const pack = resolvePack(doc.uri.fsPath, doc.getText());
+            const pack = resolvePack(doc.uri.fsPath, openPackTexts());
             const conditions = declaredConditions(pack);
             output.show(true);
             output.appendLine(`--- Pack : ${pack.rootFolder}`);

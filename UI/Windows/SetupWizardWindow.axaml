@@ -86,7 +86,7 @@
 
 				<c:OptionSection Header="{l:Translate lblMiscOptions}" Margin="0 25 0 0" IsVisible="{Binding !IsOsx}">
 					<CheckBox Content="{l:Translate chkCreateShortcut}" IsChecked="{Binding CreateShortcut}" />
-					<CheckBox Content="{l:Translate chkCheckForUpdates}" IsChecked="{Binding CheckForUpdates}" />
+					<CheckBox Content="{l:Translate chkCheckForUpdates}" IsChecked="False" IsEnabled="False" ToolTip.Tip="Désactivé : ce fork ne suit pas les mises à jour de Mesen officiel." />
 				</c:OptionSection>
 			</StackPanel>
 		</DockPanel>

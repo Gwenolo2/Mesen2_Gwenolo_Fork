@@ -320,7 +320,8 @@ enum class SnesHdPackConditionType
 	TileOnScreen,
 	TileNearby,    
 	SpriteNearby,
-	ColorWindow
+	ColorWindow,
+	SystemFlag
 };
 //-----------------------------------------------------------------------
 struct SnesHdPackCondition

@@ -449,6 +449,7 @@
     <ClInclude Include="Gameboy\Debugger\GbPpuTools.h" />
     <ClInclude Include="Gameboy\GbConstants.h" />
     <ClInclude Include="Gameboy\GbDefaultVideoFilter.h" />
+    <ClInclude Include="Gameboy\GbHdVideoFilter.h" />
     <ClInclude Include="Gameboy\GbsHeader.h" />
     <ClInclude Include="Gameboy\Input\GbController.h" />
     <ClInclude Include="NES\BaseNesPpu.h" />
@@ -628,6 +629,8 @@
     <ClInclude Include="Gameboy\GbMemoryManager.h" />
     <ClInclude Include="Gameboy\APU\GbNoiseChannel.h" />
     <ClInclude Include="Gameboy\GbPpu.h" />
+    <ClInclude Include="Gameboy\HdPacks\GbHdPackBuilder.h" />
+    <ClInclude Include="Gameboy\HdPacks\GbHdPackLoader.h" />
     <ClInclude Include="Gameboy\APU\GbSquareChannel.h" />
     <ClInclude Include="Gameboy\GbTimer.h" />
     <ClInclude Include="Gameboy\GbTypes.h" />
@@ -833,6 +836,7 @@
     <ClCompile Include="Gameboy\Debugger\GbPpuTools.cpp" />
     <ClCompile Include="Gameboy\GbControlManager.cpp" />
     <ClCompile Include="Gameboy\GbDefaultVideoFilter.cpp" />
+    <ClCompile Include="Gameboy\GbHdVideoFilter.cpp" />
     <ClCompile Include="GBA\APU\GbaApu.cpp" />
     <ClCompile Include="GBA\APU\GbaNoiseChannel.cpp" />
     <ClCompile Include="GBA\APU\GbaSquareChannel.cpp" />
@@ -1028,6 +1032,8 @@
     <ClCompile Include="Gameboy\GbMemoryManager.cpp" />
     <ClCompile Include="Gameboy\APU\GbNoiseChannel.cpp" />
     <ClCompile Include="Gameboy\GbPpu.cpp" />
+    <ClCompile Include="Gameboy\HdPacks\GbHdPackBuilder.cpp" />
+    <ClCompile Include="Gameboy\HdPacks\GbHdPackLoader.cpp" />
     <ClCompile Include="Gameboy\APU\GbSquareChannel.cpp" />
     <ClCompile Include="Gameboy\GbTimer.cpp" />
     <ClCompile Include="Gameboy\APU\GbWaveChannel.cpp" />

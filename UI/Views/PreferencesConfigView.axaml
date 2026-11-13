@@ -26,7 +26,7 @@
 						<TextBlock Text="{l:Translate lblTheme}" Margin="3 0 5 0" />
 						<c:EnumComboBox SelectedItem="{Binding Config.Theme}" Width="75" />
 					</StackPanel>
-					<CheckBox Content="{l:Translate chkAutomaticallyCheckForUpdates}" IsChecked="{Binding Config.AutomaticallyCheckForUpdates}" />
+					<CheckBox Content="{l:Translate chkAutomaticallyCheckForUpdates}" IsChecked="False" IsEnabled="False" ToolTip.Tip="Désactivé : les mises à jour automatiques sont suspendues (releases GitHub du fork)." />
 					<CheckBox Content="{l:Translate chkSingleInstance}" IsChecked="{Binding Config.SingleInstance}" />
 
 					<c:OptionSection Header="{l:Translate lblPauseBackgroundSettings}">

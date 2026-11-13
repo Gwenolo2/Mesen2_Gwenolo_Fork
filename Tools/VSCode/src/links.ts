@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { parseLine, resolveRef } from './packParser';
+import { packRoot } from './resolver';
 
 /**
  * Rend cliquables : les fichiers référencés qui existent, et les <include>.
@@ -10,7 +11,7 @@ import { parseLine, resolveRef } from './packParser';
 export class PackLinkProvider implements vscode.DocumentLinkProvider {
     provideDocumentLinks(doc: vscode.TextDocument): vscode.DocumentLink[] {
         const links: vscode.DocumentLink[] = [];
-        const root = path.dirname(doc.uri.fsPath);
+        const root = packRoot(doc.uri.fsPath);
         for (let i = 0; i < doc.lineCount; i++) {
             const text = doc.lineAt(i).text;
             if (text.includes('@')) continue;
@@ -33,7 +34,7 @@ export class PackLinkProvider implements vscode.DocumentLinkProvider {
             const parsed = parseLine(text);
             for (const ref of parsed?.refs ?? []) {
                 if (ref.kind !== 'file') continue;
-                const target = resolveRef(doc.uri.fsPath, ref);
+                const target = resolveRef(root, ref);
                 if (!fs.existsSync(target)) continue;
                 const link = new vscode.DocumentLink(
                     new vscode.Range(i, ref.start, i, ref.end),

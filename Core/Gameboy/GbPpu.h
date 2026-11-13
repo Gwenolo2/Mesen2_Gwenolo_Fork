@@ -8,6 +8,17 @@ class Gameboy;
 class GbMemoryManager;
 class GbDmaController;
 
+// Tile d origine de chaque pixel affiche (packs HD). Layer : 0 = aucun, 1 = fond, 2 = objet
+struct GbHdPixelInfo
+{
+	uint64_t Hash = 0;
+	uint32_t Palette = 0;
+	uint8_t Flags = 0; // 2 = hflip, 4 = vflip
+	uint8_t Row = 0;   // ligne dans la tile (0-7)
+	uint8_t Col = 0;   // colonne dans la tile (0-7)
+	uint8_t Layer = 0;
+};
+
 class GbPpu : public ISerializable
 {
 private:
@@ -69,9 +80,15 @@ private:
 
 	GbPixelType _lastPixelType = {};
 	uint8_t _lastBgColor = 0;
+	std::vector<GbHdPixelInfo> _hdInfo[2];
+	GbHdPixelInfo* _hdCur = nullptr;
+	int _hdIndex = 0;
+	bool _hdEnabled = false;
+	uint32_t _hdLogCounter = 0;
 
 	__forceinline void WriteBgPixel(uint8_t colorIndex);
 	__forceinline void WriteObjPixel(uint8_t colorIndex);
+	__forceinline void RecordHdPixel(const GbFifoEntry& e, uint8_t layer);
 
 	__forceinline void ProcessPpuCycle();
 

@@ -5589,10 +5589,12 @@ if(video->IsPlaying && video->VideoPlayer != nullptr) {
 		snprintf(buf3, sizeof(buf3), "[HD-PASS] autres : GPU envoi %.2f, GPU recuperation %.2f, fin %.2f, preparation avant m7 %.2f, tiles/sprites apres m7 %.2f, non mesure %.2f ms/frame",
 			gs, gf, tl, pb, pa, reste);
 		MessageManager::Log(buf3);
+		// Journal [HD-PASS] tiles/sprites : desactive (mettre a true pour le reactiver)
+		constexpr bool kLogHdPassTiles = false;
 		char buf4[260];
 		snprintf(buf4, sizeof(buf4), "[HD-PASS] tiles/sprites : boucle pixels %.2f, additions+sprites %.2f, effets (preparation) %.2f, taches et tri %.2f ms/frame",
 			_prepLoopMs / _passFrames, _prepAddMs / _passFrames, _prepEffectsMs / _passFrames - gf, _prepSortMs / _passFrames);
-		MessageManager::Log(buf4);
+		if(kLogHdPassTiles) MessageManager::Log(buf4);
 		_prepLoopMs = 0;
 		_prepAddMs = 0;
 		_prepSortMs = 0;

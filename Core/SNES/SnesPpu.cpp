@@ -779,6 +779,24 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t &hClock) {
         SnesHdPackBuilder::ProcessMode7(_vram, _cgram);
       }
 
+      // AJOUT HD PACK OBJETS : releve de l'OAM en fin de frame (regroupement a l'arret)
+      // AJOUT HD PACK ECRANS : releve des calques BG visibles en fin de frame
+      if (SnesHdPackBuilder::IsActive()) {
+        SnesHdPackBuilder::ProcessObjects(_oamRam, _vram, _cgram, _state.OamMode,
+                                          _state.OamBaseAddress, _state.OamAddressOffset);
+        SnesHdPackBuilder::SnesHdBgLayerInfo bgLayers[4];
+        for (int L = 0; L < 4; L++) {
+          bgLayers[L].Tilemap = _state.Layers[L].TilemapAddress;
+          bgLayers[L].Chr = _state.Layers[L].ChrAddress;
+          bgLayers[L].HScroll = _state.Layers[L].HScroll;
+          bgLayers[L].VScroll = _state.Layers[L].VScroll;
+          bgLayers[L].DoubleWidth = _state.Layers[L].DoubleWidth;
+          bgLayers[L].DoubleHeight = _state.Layers[L].DoubleHeight;
+          bgLayers[L].LargeTiles = _state.Layers[L].LargeTiles;
+        }
+        SnesHdPackBuilder::ProcessScreens(_vram, _cgram, _state.BgMode, _state.MainScreenLayers, bgLayers);
+      }
+
       _mode7UsedThisFrame = false;
       //              ====================================================
 

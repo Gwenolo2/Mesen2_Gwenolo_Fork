@@ -2842,7 +2842,7 @@
           "pos": 1,
           "name": "map_or_hash",
           "type": "hex32|wildcard",
-          "required": true,
+          "required": false,
           "src": "code"
         },
         {
@@ -2965,7 +2965,7 @@
           "pos": 1,
           "name": "map_or_hash",
           "type": "hex32|wildcard|list",
-          "required": true,
+          "required": false,
           "src": "code"
         },
         {
@@ -3738,6 +3738,30 @@
       "params": [],
       "src": "code",
       "notes": "Conditions intégrées (SnesHdPackLoader.cpp ligne ~343), vraies si la tile évaluée est retournée horizontalement (h) ou verticalement (v). Fonctionnent pour BG et sprites."
+    },
+    {
+      "name": "gpu3d",
+      "variants": [
+        "gpu3d",
+        "!gpu3d"
+      ],
+      "notes": "Vraie si <gpu3d>off n'est pas utilisé (vraie par défaut). Sensible à la casse dans le loader."
+    },
+    {
+      "name": "widescreen",
+      "variants": [
+        "widescreen",
+        "!widescreen"
+      ],
+      "notes": "Vraie si <widescreen> vaut mode7 ou all."
+    },
+    {
+      "name": "widescreenMode7",
+      "variants": [
+        "widescreenMode7",
+        "!widescreenMode7"
+      ],
+      "notes": "Vraie si <widescreen>mode7 ou all (même évaluation que [widescreen] dans le code)."
     }
   ],
   "operators": {

@@ -134,6 +134,11 @@ struct GbFifoEntry
 	uint8_t Color;
 	uint8_t Attributes;
 	uint8_t Index;
+	uint64_t HdHash = 0;
+	uint32_t HdPalette = 0;
+	uint8_t HdFlags = 0;
+	uint8_t HdRow = 0;
+	uint8_t HdCol = 0;
 };
 
 struct GbPpuFifo
@@ -164,6 +169,10 @@ struct GbPpuFetcher
 	uint8_t Step = 0;
 	uint8_t LowByte = 0;
 	uint8_t HighByte = 0;
+	uint64_t HdHash = 0;
+	uint32_t HdPalette = 0;
+	uint8_t HdFlags = 0;
+	uint8_t HdRow = 0;
 };
 
 struct GbPpuState : public BaseState

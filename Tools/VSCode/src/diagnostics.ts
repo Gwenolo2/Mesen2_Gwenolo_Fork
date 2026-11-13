@@ -1,11 +1,14 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { readPngSize } from './png';
+import { openPackTexts } from './openDocs';
 import { parseLine, resolveRef } from './packParser';
 import { ResolvedLine, declaredConditions, resolvePack } from './resolver';
 import { Schema } from './schema';
 
 /** Conditions intégrées (SnesHdPackLoader.cpp, ligne ~343). */
-const BUILTIN = new Set(['hmirror', 'vmirror']);
+const BUILTIN = new Set(['hmirror', 'vmirror', 'gpu3d', 'widescreen', 'widescreenMode7']);
 const TILE_TAGS = new Set(['tile', 'tile_hflip', 'tile_vflip', 'tile_hvflip']);
 const SOURCE = 'Mesen HD';
 
@@ -28,6 +31,13 @@ function prefixLength(text: string): number {
     return m ? m[0].length : 0;
 }
 
+/** Clé des conditions d'un préfixe [..] : triée, sans espaces, ! inclus (deux tiles identiques si mêmes conditions). */
+function conditionKey(text: string): string {
+    const m = /^\s*\[([^\]]*)\]/.exec(text);
+    if (!m) return '';
+    return m[1].split('&').map(s => s.replace(/\s+/g, '')).filter(Boolean).sort().join('&');
+}
+
 /** Ligne entière (sans les espaces de tête), pour que le soulignement soit visible. */
 function lineRange(doc: vscode.TextDocument, index: number): vscode.Range {
     const text = doc.lineAt(index).text;
@@ -40,12 +50,13 @@ function lineRange(doc: vscode.TextDocument, index: number): vscode.Range {
  * Le texte de l'éditeur est utilisé pour le fichier ouvert (modifications non sauvegardées incluses).
  */
 export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vscode.Diagnostic[] {
-    const docPath = doc.uri.fsPath;
-    const pack = resolvePack(docPath, doc.getText());
+    const docPath = path.resolve(doc.uri.fsPath);
+    const pack = resolvePack(docPath, openPackTexts());
     const declared = new Set<string>();
     const pngCache = new Map<string, { width: number; height: number } | undefined>();
     const diags: vscode.Diagnostic[] = [];
     let catalog = 0;
+    const seenTiles = new Map<string, ResolvedLine>();
     let scale: number | undefined;
     let scaleSeen = false;
 
@@ -119,6 +130,18 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
             positional.push(a.trim());
         }
 
+        // Tile définie plusieurs fois avec les mêmes conditions : doublon probable.
+        if (TILE_TAGS.has(tag.key) && positional[0] && /^[0-9A-Fa-f]+$/.test(positional[0])) {
+            const tileKey = `${positional[0].toUpperCase()}|${conditionKey(text)}`;
+            const first = seenTiles.get(tileKey);
+            if (!first) {
+                seenTiles.set(tileKey, r);
+            } else {
+                report(r, { severity: vscode.DiagnosticSeverity.Warning, code: 'tile-duplicate',
+                    message: `Tile ${positional[0].toUpperCase()} déjà définie avec les mêmes conditions (${path.basename(first.file)}:${first.line}) : doublon probable.` });
+            }
+        }
+
         // Nombre de paramètres.
         let need = tag.params.filter(p => !p.kv && p.required).length;
         if (TILE_TAGS.has(tag.key) && positional[2] !== undefined && /^(disable|blank)$/i.test(positional[2])) {
@@ -155,8 +178,8 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
         }
         for (const ref of parseLine(text)?.refs ?? []) {
             if (ref.kind !== 'file') continue;
-            const target = resolveRef(docPath, ref);
-            if (!require('fs').existsSync(target)) {
+            const target = resolveRef(pack.rootFolder, ref);
+            if (!fs.existsSync(target)) {
                 report(r, { severity: vscode.DiagnosticSeverity.Error, code: 'file-missing',
                     message: `Fichier introuvable : ${ref.path}` });
                 continue;
@@ -193,6 +216,18 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
         } else if (tag.key === 'img') {
             catalog++;
         }
+    }
+
+    // Conditions déclarées mais jamais utilisées dans le pack, fichier principal et includes (information seulement).
+    const used = new Set<string>();
+    for (const l of pack.lines) for (const c of conditionNames(l.text)) used.add(c);
+    for (const c of declaredConditions(pack)) {
+        if (c.file !== docPath || used.has(c.name)) continue;
+        const d = new vscode.Diagnostic(lineRange(doc, c.line - 1),
+            `Condition « ${c.name} » déclarée mais jamais utilisée dans le pack.`, vscode.DiagnosticSeverity.Information);
+        d.source = SOURCE;
+        d.code = 'cond-unused';
+        diags.push(d);
     }
     return diags;
 }

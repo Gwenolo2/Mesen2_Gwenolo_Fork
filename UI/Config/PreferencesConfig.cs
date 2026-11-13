@@ -22,7 +22,7 @@ namespace Mesen.Config
 	public class PreferencesConfig : BaseConfig<PreferencesConfig>
 	{
 		[Reactive] public MesenTheme Theme { get; set; } = MesenTheme.Light;
-		[Reactive] public bool AutomaticallyCheckForUpdates { get; set; } = true;
+		[Reactive] public bool AutomaticallyCheckForUpdates { get; set; } = false;
 		[Reactive] public bool SingleInstance { get; set; } = true;
 		[Reactive] public bool AutoLoadPatches { get; set; } = true;
 

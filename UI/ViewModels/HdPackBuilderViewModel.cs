@@ -147,6 +147,17 @@ namespace Mesen.ViewModels
 			});
 		}
 
+		public void GrabFrame()
+		{
+			if(!IsRecording || !Config.FrameGrabbing) {
+				return;
+			}
+
+			Task.Run(() => {
+				EmuApi.ExecuteShortcut(new ExecuteShortcutParams() { Shortcut = EmulatorShortcut.GrabFrameHdPack });
+			});
+		}
+
 		public void OpenFolder()
 		{
 			if(Directory.Exists(SaveFolder)) {

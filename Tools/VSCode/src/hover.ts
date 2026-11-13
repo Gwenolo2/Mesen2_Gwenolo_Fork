@@ -7,6 +7,9 @@ import { Schema, SchemaParam, SchemaTag, tagBefore, tagCovering } from './schema
 const BUILTIN_CONDITIONS: Record<string, string> = {
     hmirror: 'Vraie si la tile évaluée est retournée horizontalement.',
     vmirror: 'Vraie si la tile évaluée est retournée verticalement.',
+    gpu3d: 'Vraie sauf si <gpu3d>off est utilisé (moteur 3D actif par défaut).',
+    widescreen: 'Vraie si <widescreen> vaut mode7 ou all.',
+    widescreenMode7: 'Vraie si <widescreen>mode7 ou all.',
 };
 
 /** Nom de condition sous le curseur dans un préfixe [ ], sans le ! ni les espaces. */

@@ -91,7 +91,7 @@ export function parseLine(line: string): PackLine | undefined {
     return { tag, refs: [] };
 }
 
-/** Chemin absolu d'une référence : relatif au dossier qui contient le fichier du pack. */
-export function resolveRef(docPath: string, ref: PackRef): string {
-    return path.resolve(path.dirname(docPath), ref.path.replace(/\\/g, '/'));
+/** Chemin absolu d'une référence : relatif à la racine du pack (dossier de snes_hires.txt), comme le loader. */
+export function resolveRef(rootFolder: string, ref: PackRef): string {
+    return path.resolve(rootFolder, ref.path.replace(/\\/g, '/'));
 }

@@ -21,6 +21,9 @@ namespace Mesen.Config
 		public bool GenerateSpritesPerFrame { get; set; } = true;
 		public bool PreventHMirroredSpritesGrabbing { get; set; } = true;
 		public bool GenerateHdPackMetadata { get; set; } = true;
+		[Reactive] public bool FrameGrabbing { get; set; } = false;
+		public bool GenerateGbObjects { get; set; } = true;
+		public bool GenerateSnesObjects { get; set; } = true;
 
 		// ====================================================================
 		// LOGIQUE D'EXCLUSION MUTUELLE (UpdateIfExists vs BuildFromPngFolder)
@@ -95,7 +98,10 @@ namespace Mesen.Config
 				BuildFromPngFolder = BuildFromPngFolder,
 				// Transmission des dimensions de planches au Core C++
 				SheetWidth = SheetWidth,
-				SheetHeight = SheetHeight
+				SheetHeight = SheetHeight,
+				FrameGrabbing = FrameGrabbing,
+				GenerateGbObjects = GenerateGbObjects,
+				GenerateSnesObjects = GenerateSnesObjects
 			};
 		}
 	}
@@ -141,6 +147,9 @@ namespace Mesen.Config
 
 		public uint SheetWidth;
 		public uint SheetHeight;
+		[MarshalAs(UnmanagedType.I1)] public bool FrameGrabbing;
+		[MarshalAs(UnmanagedType.I1)] public bool GenerateGbObjects;
+		[MarshalAs(UnmanagedType.I1)] public bool GenerateSnesObjects;
 
 	}
 }

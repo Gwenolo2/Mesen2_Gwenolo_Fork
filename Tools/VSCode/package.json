@@ -40,7 +40,16 @@
         "command": "mesenHd.listConditions",
         "title": "Mesen HD : lister les conditions et includes du pack"
       }
-    ]
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "editor.action.commentLine",
+          "when": "editorLangId == mesen-snes-hd",
+          "group": "1_modification"
+        }
+      ]
+    }
   },
   "scripts": {
     "generate:grammar": "python3 scripts/generate-grammar.py",

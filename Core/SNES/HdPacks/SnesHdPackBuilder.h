@@ -7,6 +7,7 @@
 #include <map>
 #include <unordered_set>
 #include <unordered_map>
+#include <tuple>
 #include <filesystem>
 
 
@@ -90,6 +91,12 @@ public:
   static bool IsActive();
   static void StartRecording(HdPackBuilderOptions options);
   static void StopRecording();
+  static void RequestFrameGrab();
+  static bool CanCapture(uint32_t frameCount);
+  static bool _grabRequested;
+  static bool _grabActive;
+  static uint32_t _grabFrame;
+  static uint32_t _lastFrame;
 
 
 
@@ -98,6 +105,74 @@ public:
 
   // Le "hook" statique appelé depuis SnesPpu.cpp
   static void ProcessMode7(uint16_t *vram, uint16_t *cgram);
+
+  // --- HD PACK SNES : objets composes (une entree OAM = un objet) ---
+  struct SnesObjMember {
+    int X = 0;                    // position d'affichage dans l'objet (pixels SNES)
+    int Y = 0;
+    uint64_t Hash = 0;            // hash 31 des 32 octets 4bpp (meme calcul que le loader)
+    uint32_t Palette = 8;         // palette D8 (8 a 15 pour les sprites)
+    bool HFlip = false;
+    bool VFlip = false;
+    uint16_t VramAddr = 0;        // adresse VRAM de la tile (source, sans flip)
+    std::vector<uint32_t> Pixels; // 8x8 ARGB, orientation source (sans flip)
+  };
+  struct SnesObjEntry {
+    int W = 0;
+    int H = 0;
+    int Count = 0;                // nombre d'images ou l'objet est apparu
+    std::vector<SnesObjMember> Members;
+  };
+  static constexpr int SnesMinObjectFrames = 3;
+  static constexpr size_t MaxSnesObjectsWritten = 300;
+  static constexpr size_t MaxSnesObjectKinds = 1500;
+  inline static std::unordered_map<std::string, SnesObjEntry> _snesObjects;
+  inline static std::map<std::string, int> _snesObjSizes;
+  inline static int _snesObjOffscreen = 0;
+  inline static int _snesObjCapped = 0;
+  inline static int _snesObjSnapshots = 0;
+  inline static int _snesObjMerged = 0;   // objets formes de plusieurs entrees OAM (vues)
+  inline static int _snesObjSplit = 0;    // groupes trop grands, decoupes en entrees
+  static constexpr int SnesMaxClusterPx = 256; // taille max d'un objet compose (px SNES)
+  static constexpr int SnesClusterGapPx = 8;   // ecart max entre deux entrees OAM pour les regrouper
+  static void ProcessObjects(const uint8_t *oam, const uint16_t *vram, const uint16_t *cgram,
+                             uint8_t oamMode, uint16_t oamBase, uint16_t oamGap);
+  static void WriteObjectFiles();
+
+  // --- HD PACK SNES : ecrans de fond (equivalent de GbHdPackBuilder::SnapshotBackground) ---
+  struct SnesHdBgLayerInfo {
+    uint16_t Tilemap = 0;
+    uint16_t Chr = 0;
+    uint16_t HScroll = 0;
+    uint16_t VScroll = 0;
+    bool DoubleWidth = false;
+    bool DoubleHeight = false;
+    bool LargeTiles = false;
+  };
+  struct SnesScreenCell {
+    int Col = 0;
+    int Row = 0;
+    uint64_t Hash = 0;
+    uint32_t Palette = 0;
+    uint8_t Bpp = 4;
+    bool HFlip = false;
+    bool VFlip = false;
+  };
+  struct SnesScreenInfo {
+    int Layer = 0;                  // calque BG (0 = BG1 ... 3 = BG4)
+    int Count = 0;
+    std::vector<SnesScreenCell> Cells; // 32x28 cases de 8 pixels
+  };
+  static constexpr int SnesMaxScreenKinds = 800;
+  static constexpr size_t SnesMaxBgTiles = 16384;
+  inline static std::map<uint64_t, SnesScreenInfo> _snesScreens;
+  inline static std::map<std::tuple<uint64_t, uint32_t, uint8_t>, std::vector<uint32_t>> _snesBgTiles;
+  inline static size_t _snesScreenFrames = 0;
+  inline static int _snesScreenCapped = 0;
+  inline static int _snesScreenSkipped = 0; // calques 16x16 ou mode 7 non releves
+  static void ProcessScreens(const uint16_t* vram, const uint16_t* cgram, uint8_t bgMode,
+                             uint8_t mainLayers, const SnesHdBgLayerInfo* layers);
+  static void WriteScreenFiles();
 
   // --- VARIABLES POUR LES INFOS ROM ---
   inline static std::string _romInfoTxt = "";

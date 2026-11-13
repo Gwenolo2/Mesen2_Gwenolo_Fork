@@ -10,10 +10,15 @@
 #include "Gameboy/GbMemoryManager.h"
 #include "Gameboy/GbCartFactory.h"
 #include "Gameboy/GameboyHeader.h"
+#include "Gameboy/HdPacks/GbHdPackBuilder.h"
+#include "Gameboy/HdPacks/GbHdPackLoader.h"
+#include "Utilities/FolderUtilities.h"
 #include "Gameboy/GbsHeader.h"
 #include "Gameboy/Carts/GbsCart.h"
 #include "Gameboy/GbBootRom.h"
 #include "Gameboy/GbDefaultVideoFilter.h"
+#include "Gameboy/GbHdVideoFilter.h"
+#include "Shared/Video/VideoDecoder.h"
 #include "Gameboy/GbxFooter.h"
 #include "Debugger/DebugTypes.h"
 #include "Shared/CheatManager.h"
@@ -455,6 +460,12 @@ LoadRomResult Gameboy::LoadRom(VirtualFile& romFile)
 			} else {
 				Init(cart, romData, header.GetCartRamSize(), header.HasBattery());
 			}
+			// Pack HD Game Boy (etape 1 : lecture seule, aucun rendu)
+			std::string romName = FolderUtilities::GetFilename(romFile.GetFileName(), false);
+			GbHdPackLoader::Load(FolderUtilities::CombinePath(FolderUtilities::GetHdPackFolder(), romName), _hdPackData);
+			if(_emu->GetVideoDecoder()) {
+				_emu->GetVideoDecoder()->ForceFilterUpdate();
+			}
 			return LoadRomResult::Success;
 		} else {
 			MessageManager::DisplayMessage("Error", "Unsupported cart type: " + (gbxFooter.IsValid() ? gbxFooter.GetMapperId() : std::to_string(header.CartType)));
@@ -619,10 +630,24 @@ uint32_t Gameboy::GetMasterClockRate()
 	return _memoryManager->IsHighSpeed() ? 4194304*2 : 4194304;
 }
 
+bool Gameboy::IsHdPackActive()
+{
+	return _hdPackData.IsLoaded && !GbHdPackBuilder::IsActive();
+}
+
+const GbHdPackData& Gameboy::GetHdPackData()
+{
+	return _hdPackData;
+}
+
 BaseVideoFilter* Gameboy::GetVideoFilter(bool getDefaultFilter)
 {
 	if(getDefaultFilter || GetRomFormat() == RomFormat::Gbs) {
 		return new GbDefaultVideoFilter(_emu, false);
+	}
+
+	if(IsHdPackActive()) {
+		return new GbHdVideoFilter(_emu, _hdPackData);
 	}
 
 	VideoFilterType filterType = _emu->GetSettings()->GetVideoConfig().VideoFilter;
@@ -687,4 +712,20 @@ void Gameboy::InitializeRam(void* data, uint32_t length)
 {
 	EmuSettings* settings = _emu->GetSettings();
 	settings->InitializeRam(settings->GetGameboyConfig().RamPowerOnState, data, length);
+}
+
+void Gameboy::ProcessNotification(ConsoleNotificationType type, void* parameter)
+{
+	if(type == ConsoleNotificationType::ExecuteShortcut) {
+		ExecuteShortcutParams* params = (ExecuteShortcutParams*)parameter;
+		switch(params->Shortcut) {
+			default: break;
+			case EmulatorShortcut::StartRecordHdPack:
+				if(params->ParamPtr != nullptr) {
+					GbHdPackBuilder::StartRecording(*(HdPackBuilderOptions*)params->ParamPtr);
+				}
+				break;
+			case EmulatorShortcut::StopRecordHdPack: GbHdPackBuilder::StopRecording(); break;
+		}
+	}
 }

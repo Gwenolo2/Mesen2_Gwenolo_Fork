@@ -449,6 +449,33 @@ public:
 //             'VALEUR&MASQUE' : seuls les bits du masque sont compares
 //             (ex. 0000&7FE0 = rouge quelconque, vert et bleu a 0 ; 001F = rouge, 03E0 = vert, 7C00 = bleu)
 // ---------------------------------------------------------
+// Conditions systeme en dur, derivees des tags du pack (et non de la position de la tile)
+enum class SnesHdSystemFlag { Gpu3D, Widescreen, WidescreenMode7 };
+struct SnesHdPackSystemCondition : public SnesHdPackCondition
+{
+	SnesHdSystemFlag Flag = SnesHdSystemFlag::Gpu3D;
+	string BaseName;
+
+	SnesHdPackConditionType GetConditionType() override { return SnesHdPackConditionType::SystemFlag; }
+	string GetConditionName() override { return BaseName; }
+	string ToString() override { return ""; }
+	bool IsExcludedFromFile() override { return true; }
+
+	// [gpu3d] : vrai si <gpu3d>off n'est pas utilise
+	// [widescreen] : vrai si <widescreen> vaut mode7 ou all
+	// [widescreenMode7] : vrai si <widescreen> vaut mode7 ou all
+	bool InternalCheckCondition(int x, int y, SnesHdPixelData* tile) override
+	{
+		if(_hdPack == nullptr) return false;
+		switch(Flag) {
+			case SnesHdSystemFlag::Gpu3D: return _hdPack->Gpu3D;
+			case SnesHdSystemFlag::Widescreen: return _hdPack->WidescreenMode != 0;
+			case SnesHdSystemFlag::WidescreenMode7: return _hdPack->WidescreenMode != 0;
+		}
+		return false;
+	}
+};
+
 struct SnesHdPackColorWindowCondition : public SnesHdPackCondition
 {
 	enum class MatchMode { Hash, Any, Full };

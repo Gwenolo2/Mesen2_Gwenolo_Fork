@@ -30,6 +30,9 @@ namespace Mesen.Windows
 {
 	public class MainWindow : MesenWindow
 	{
+		// Vérification automatique au démarrage désactivée (fork). Passer à true pour la réactiver.
+		private const bool AutoUpdateCheckEnabled = false;
+
 		private DispatcherTimer _timerBackgroundFlag = new DispatcherTimer();
 		private MainWindowViewModel _model = null!;
 
@@ -279,7 +282,8 @@ namespace Mesen.Windows
 					cmdLine.LoadFiles();
 					cmdLine.OnAfterInit(this);
 
-					if(ConfigManager.Config.Preferences.AutomaticallyCheckForUpdates) {
+					// Mises à jour automatiques désactivées (fork) : la case est grisée dans Preferences.
+					if(AutoUpdateCheckEnabled && ConfigManager.Config.Preferences.AutomaticallyCheckForUpdates) {
 						_model.MainMenu.CheckForUpdate(this, true);
 					}
 				});

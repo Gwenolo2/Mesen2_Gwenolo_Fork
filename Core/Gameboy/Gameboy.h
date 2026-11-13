@@ -2,6 +2,7 @@
 #include "pch.h"
 #include "Gameboy/GameboyHeader.h"
 #include "Gameboy/GbTypes.h"
+#include "Gameboy/HdPacks/GbHdPackLoader.h"
 #include "Debugger/DebugTypes.h"
 #include "Shared/SettingTypes.h"
 #include "Shared/Interfaces/IConsole.h"
@@ -29,6 +30,7 @@ private:
 	Emulator* _emu = nullptr;
 	SuperGameboy* _superGameboy = nullptr;
 	bool _allowSgb = false;
+	GbHdPackData _hdPackData; // Pack HD Game Boy (etape 1 : lecture seule)
 
 	unique_ptr<GbMemoryManager> _memoryManager;
 	unique_ptr<GbCpu> _cpu;
@@ -68,6 +70,8 @@ private:
 public:
 	static constexpr int HeaderOffset = 0x134;
 
+	void ProcessNotification(ConsoleNotificationType type, void* parameter) override;
+
 	Gameboy(Emulator* emu, bool allowSgb = false);
 	virtual ~Gameboy();
 	
@@ -100,6 +104,8 @@ public:
 	bool IsCpuStopped();
 	bool IsCgb();
 	bool IsSgb();
+	bool IsHdPackActive();
+	const GbHdPackData& GetHdPackData();
 	SuperGameboy* GetSgb();
 
 	uint64_t GetCycleCount();
