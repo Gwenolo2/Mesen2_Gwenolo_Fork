@@ -1,4 +1,8 @@
 #include "pch.h"
+#ifdef LIBRETRO
+#include <thread>
+#include "Shared/HdLoadingScreen.h"
+#endif
 
 #include "Utilities/CRC32.h"
 #include "Debugger/DebugTypes.h"
@@ -666,6 +670,18 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
 		string folder = FolderUtilities::GetFolderName(romPath);
 		string packFile = FolderUtilities::CombinePath(folder, "snes_hires.txt");
 
+#ifdef LIBRETRO
+		// Core libretro : si le pack n'est pas a cote de la ROM, on le cherche dans <system>/HdPacks/<nom de la ROM>/
+		// (meme convention que les packs NES)
+		if(!ifstream(packFile)) {
+			string romName = FolderUtilities::GetFilename(romPath, false);
+			string systemPack = FolderUtilities::CombinePath(FolderUtilities::CombinePath(FolderUtilities::GetHdPackFolder(), romName), "snes_hires.txt");
+			if(ifstream(systemPack)) {
+				packFile = systemPack;
+			}
+		}
+#endif
+
 		MessageManager::Log("[HD TRACE 0] Looking for File : " + packFile);
 
 		if(ifstream(packFile)) {
@@ -704,10 +720,14 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
 
 				// --- 3. CHARGEMENT SYNCHRONE ---
 				MessageManager::Log("[HD TRACE 0] Starting Synchronous loading...");
+#ifdef LIBRETRO
+				// [fork HD] libretro : chargement en arriere-plan, l'ecran de chargement est affiche par retro_run
+				HdLoadingScreen::Detail::Pending() = true;
+				std::thread([packData]() { packData->LoadAsync(); HdLoadingScreen::Detail::Pending() = false; }).detach();
+#else
 				packData->LoadAsync();
-
-				// --- 4. FIN DU CHARGEMENT, LE JEU DÉMARRE ---
 				MessageManager::DisplayMessage("HD Pack", "HD PACK LOADED !");
+#endif
 				MessageManager::Log("[HD TRACE 0] SUCCESS ! Synchronous loading finished.");
 			}
 		} else {

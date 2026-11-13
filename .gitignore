@@ -19,6 +19,7 @@ git_repo_structure.txt
 _push_to_Git.bat.txt
 docs/
 CLAUDE.md
+Bank0E.asm
 
 # Build results
 
@@ -215,3 +216,9 @@ _backup_claude/
 # --- Runtime PGO de MSVC (copie temporaire pendant PGO Profile) ---
 UI/Dependencies/pgort140.dll
 pgort140.dll
+
+# Core libretro
+mesen_hd_libretro.so
+mesen_hd_libretro.dll
+mesen_hd_libretro.dylib
+Libretro/obj/

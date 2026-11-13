@@ -1,0 +1,101 @@
+# Core libretro du fork Mesen HD (Gwenolo) : mesen_hd_libretro.{so,dll,dylib}
+# Adapte de Makefile.libretro de libretro/MesenCE (GPL v3).
+#
+#   make -f Makefile.libretro -j8            -> version optimisee (-O3 + LTO)
+#   make -f Makefile.libretro -j8 HAVE_LTO=0 -> plus rapide a compiler
+#   make -f Makefile.libretro DEBUG=1        -> -O0 -g
+#   make -f Makefile.libretro clean
+#
+# Windows : le projet Visual Studio Libretro\Libretro.vcxproj fait la meme chose avec MSVC.
+# MinGW (MSYS2 ou compilation croisee) fonctionne aussi avec ce Makefile.
+# Les objets vont dans Libretro/obj/ (rien n'est ecrit a cote des sources).
+
+CXX ?= g++
+CC ?= gcc
+
+USE_GCC ?= $(shell $(CXX) --version | head -1 | grep -qi clang && echo false || echo true)
+
+DEBUG ?= 0
+HAVE_LTO ?= 1
+OPT ?= -O3
+STATICLINK ?= true
+CORENAME := mesen_hd_libretro
+
+MESENFLAGS :=
+LINKCHECKUNRESOLVED := -Wl,-z,defs
+LINKOPTIONS :=
+LDFLAGS ?=
+LIBS :=
+
+UNAME_S := $(shell uname -s)
+MACHINE := $(shell $(CXX) -dumpmachine)
+
+ifneq ($(findstring mingw,$(MACHINE)),)
+	SHAREDLIB := $(CORENAME).dll
+	LINKCHECKUNRESOLVED := -Wl,--no-undefined
+	LINKOPTIONS += -static
+	LIBS += -lws2_32 -liphlpapi -lole32 -loleaut32 -luuid -lwinmm
+else ifeq ($(UNAME_S),Linux)
+	SHAREDLIB := $(CORENAME).so
+	LDFLAGS += -Wl,--version-script=Libretro/link.T
+else ifeq ($(UNAME_S),Darwin)
+	SHAREDLIB := $(CORENAME).dylib
+	HAVE_LTO := 0
+	STATICLINK := false
+	LINKCHECKUNRESOLVED :=
+else
+	SHAREDLIB := $(CORENAME).dll
+endif
+
+ifeq ($(DEBUG),0)
+	MESENFLAGS += $(OPT)
+	ifeq ($(HAVE_LTO),1)
+		MESENFLAGS += -DHAVE_LTO
+		ifneq ($(USE_GCC),true)
+			MESENFLAGS += -flto=thin
+		else
+			MESENFLAGS += -flto=auto
+		endif
+	endif
+else
+	MESENFLAGS += -O0 -g
+endif
+
+ifneq ($(STATICLINK),false)
+	LINKOPTIONS += -static-libgcc -static-libstdc++
+endif
+
+# LIBRETRO : active les variantes "core libretro" du Core (decodage video synchrone, pas de SDL2/OpenGL, etc.)
+CXXFLAGS = -fPIC -Wall --std=c++17 -D LIBRETRO $(MESENFLAGS) -I $(realpath ./) -I $(realpath ./Core) -I $(realpath ./Utilities)
+CFLAGS = -fPIC -Wall -D LIBRETRO $(MESENFLAGS)
+
+OBJDIR := Libretro/obj
+
+LIBRETROSRC := Libretro/libretro.cpp Libretro/VfsFile.cpp
+CORESRC := $(shell find Core -name '*.cpp' -not -path 'Core/_backup_claude/*')
+UTILSRC := $(shell find Utilities -name '*.cpp' -o -name '*.c')
+SEVENZIPSRC := $(shell find SevenZip -name '*.c')
+# unix.c/unixdgram.c/unixstream.c/serial.c : modules luasocket optionnels, jamais enregistres (et absents sous Windows)
+LUASRC := $(filter-out Lua/unix.c Lua/unixdgram.c Lua/unixstream.c Lua/serial.c,$(shell find Lua -name '*.c'))
+
+ALLSRC := $(LIBRETROSRC) $(CORESRC) $(UTILSRC) $(SEVENZIPSRC) $(LUASRC)
+ALLOBJ := $(addprefix $(OBJDIR)/,$(addsuffix .o,$(basename $(ALLSRC))))
+
+all: $(SHAREDLIB)
+
+$(SHAREDLIB): $(ALLOBJ)
+	$(CXX) $(CXXFLAGS) $(LINKOPTIONS) $(LINKCHECKUNRESOLVED) $(LDFLAGS) -shared -o $@ $(ALLOBJ) -pthread $(LIBS)
+
+$(OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+clean:
+	rm -rf $(OBJDIR)
+	rm -f $(CORENAME).so $(CORENAME).dll $(CORENAME).dylib
+
+.PHONY: all clean

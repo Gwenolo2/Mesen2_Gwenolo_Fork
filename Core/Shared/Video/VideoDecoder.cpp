@@ -197,6 +197,12 @@ void VideoDecoder::UpdateFrame(RenderedFrame frame, bool sync, bool forRewind)
 	_emu->OnBeforeSendFrame();
 
 	_frame = frame;
+#ifdef LIBRETRO
+	// Core libretro : l'image doit etre prete avant la fin de retro_run()
+	if(LibretroSyncDecode) {
+		sync = true;
+	}
+#endif
 	if(sync) {
 		DecodeFrame(forRewind);
 	} else {

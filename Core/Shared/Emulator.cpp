@@ -250,6 +250,11 @@ void Emulator::OnBeforeSendFrame()
 void Emulator::ProcessEndOfFrame()
 {
 	if(!_isRunAheadFrame) {
+#ifdef LIBRETRO
+		// Core libretro : les frames sont avancees par retro_run() et cadencees par le frontend.
+		// Run() n'est jamais lance, donc _frameLimiter n'existe pas : on saute l'attente.
+		if(_frameLimiter) {
+#endif
 		_frameLimiter->ProcessFrame();
 		while(_frameLimiter->WaitForNextFrame()) {
 			if(_stopFlag || _frameDelay != GetFrameDelay() || _paused || _pauseOnNextFrame || _lockCounter > 0) {
@@ -263,6 +268,9 @@ void Emulator::ProcessEndOfFrame()
 			_frameDelay = newFrameDelay;
 			_frameLimiter->SetDelay(_frameDelay);
 		}
+#ifdef LIBRETRO
+		}
+#endif
 
 		_console->GetControlManager()->ProcessEndOfFrame();
 	}

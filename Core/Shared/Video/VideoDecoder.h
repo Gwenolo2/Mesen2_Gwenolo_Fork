@@ -13,6 +13,10 @@ class Emulator;
 
 class VideoDecoder
 {
+public:
+	// [fork HD] libretro : true = decodage synchrone (ancien comportement), false = thread de decodage
+	static inline bool LibretroSyncDecode = true;
+
 private:
 	Emulator* _emu;
 

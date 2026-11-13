@@ -7,6 +7,19 @@
 #include "SNES/HdPacks/SnesHdData.h"
 #include "Shared/MessageManager.h"
 
+#ifdef LIBRETRO
+// Core libretro : pas de SDL2 ni de contexte OpenGL prive. Le moteur 3D processeur prend le relais
+// (meme comportement que <gpu3d>off).
+SnesHdGpu& SnesHdGpu::Get()
+{
+	static SnesHdGpu instance;
+	return instance;
+}
+bool SnesHdGpu::Available() { return false; }
+bool SnesHdGpu::SubmitModels(const std::vector<SnesHdGpuView>&, uint32_t, uint32_t, float, float, float, int, int, int, int) { return false; }
+bool SnesHdGpu::FetchModels(std::vector<uint32_t>&, std::vector<float>&) { return false; }
+#else
+
 #define SDL_MAIN_HANDLED
 #include "SDL.h"
 
@@ -586,3 +599,5 @@ bool SnesHdGpu::FetchModels(std::vector<uint32_t>& outColor, std::vector<float>&
 	}
 	return ok;
 }
+
+#endif // LIBRETRO

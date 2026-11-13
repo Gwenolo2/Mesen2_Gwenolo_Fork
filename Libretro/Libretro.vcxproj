@@ -1,0 +1,150 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Core libretro du fork Mesen HD (Gwenolo) : mesen_hd_libretro.dll pour RetroArch.
+
+  Ce projet recompile lui-meme Core, Utilities, SevenZip et Lua avec la definition LIBRETRO
+  (les .lib des autres projets ne sont pas reutilisables : ils sont compiles sans LIBRETRO).
+  Les sources sont prises par motif (**\*.cpp) : un nouveau fichier ajoute a Core est pris automatiquement.
+  Pas d'en-tete precompile : "pch.h" est lu comme un en-tete normal (compilation plus longue, mais un seul projet).
+
+  Sortie : bin\win-x64\<Configuration>\libretro\mesen_hd_libretro.dll
+  Equivalent Linux / MinGW : make -f Makefile.libretro
+-->
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>Libretro</RootNamespace>
+    <ProjectName>Libretro</ProjectName>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <TargetName>mesen_hd_libretro</TargetName>
+    <OutDir>$(SolutionDir)bin\win-$(PlatformTarget)\$(Configuration)\libretro\</OutDir>
+    <IntDir>obj\$(Platform)\$(Configuration)\</IntDir>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)Core;$(SolutionDir)Utilities;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>LIBRETRO;WIN32;_LIB;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>ws2_32.lib;winmm.lib;iphlpapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>Full</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <OmitFramePointers>true</OmitFramePointers>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <ControlFlowGuard>false</ControlFlowGuard>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <!-- Wrapper libretro -->
+  <ItemGroup>
+    <ClCompile Include="libretro.cpp">
+      <ObjectFileName>$(IntDir)Libretro\</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="VfsFile.cpp">
+      <ObjectFileName>$(IntDir)Libretro\</ObjectFileName>
+    </ClCompile>
+    <ClInclude Include="libretro.h" />
+    <ClInclude Include="VfsFile.h" />
+    <ClInclude Include="LibretroKeyManager.h" />
+    <ClInclude Include="LibretroMessageManager.h" />
+    <None Include="MesenDB.inc" />
+    <None Include="link.T" />
+    <None Include="..\Makefile.libretro" />
+    <None Include="README_libretro.md" />
+  </ItemGroup>
+  <!-- Core : memes reglages de langage que Core.vcxproj (mode conforme /Za), sans les sauvegardes _backup_claude -->
+  <ItemGroup>
+    <ClCompile Include="..\Core\**\*.cpp" Exclude="..\Core\_backup_claude\**;..\Core\SNES\HdPacks\SnesHdGltf.cpp">
+      <ObjectFileName>$(IntDir)Core\</ObjectFileName>
+      <DisableLanguageExtensions>true</DisableLanguageExtensions>
+    </ClCompile>
+    <ClCompile Include="..\Core\SNES\HdPacks\SnesHdGltf.cpp">
+      <ObjectFileName>$(IntDir)Core\</ObjectFileName>
+      <DisableLanguageExtensions>false</DisableLanguageExtensions>
+    </ClCompile>
+  </ItemGroup>
+  <!-- Utilities : "pch.h" doit etre celui de Utilities -->
+  <ItemGroup>
+    <ClCompile Include="..\Utilities\**\*.cpp;..\Utilities\**\*.c">
+      <ObjectFileName>$(IntDir)Utilities\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)Utilities;$(SolutionDir)Core;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemGroup>
+  <!-- SevenZip et Lua : C. Les 4 modules luasocket Unix ne sont pas compiles (comme dans Lua.vcxproj). -->
+  <ItemGroup>
+    <ClCompile Include="..\SevenZip\*.c">
+      <ObjectFileName>$(IntDir)SevenZip\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="..\Lua\*.c" Exclude="..\Lua\unix.c;..\Lua\unixdgram.c;..\Lua\unixstream.c;..\Lua\serial.c">
+      <ObjectFileName>$(IntDir)Lua\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!-- Les sous-dossiers d'objets doivent exister avant la compilation -->
+  <Target Name="LibretroMakeObjDirs" BeforeTargets="ClCompile">
+    <MakeDir Directories="$(IntDir)Libretro;$(IntDir)Core;$(IntDir)Utilities;$(IntDir)SevenZip;$(IntDir)Lua" />
+  </Target>
+</Project>

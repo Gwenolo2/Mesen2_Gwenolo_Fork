@@ -1,4 +1,7 @@
 #include "pch.h"
+#ifdef LIBRETRO
+#include <thread>
+#endif
 #include "NES/NesConsole.h"
 #include "NES/NesControlManager.h"
 #include "NES/MapperFactory.h"
@@ -232,8 +235,14 @@ void NesConsole::LoadHdPack(VirtualFile& romFile)
 			shared_ptr<HdPackData> data = _hdData.lock();
 			if(data) {
 				MessageManager::DisplayMessage("HD Pack", "LOADING HD PACK... PLEASE WAIT");
+#ifdef LIBRETRO
+				// [fork HD] libretro : chargement en arriere-plan, l'ecran de chargement est affiche par retro_run
+				HdLoadingScreen::Detail::Pending() = true;
+				std::thread([data]() { data->LoadAsync(); HdLoadingScreen::Detail::Pending() = false; }).detach();
+#else
 				data->LoadAsync();
 				MessageManager::DisplayMessage("HD Pack", "HD PACK LOADED !");
+#endif
 			}
 		}
 	}

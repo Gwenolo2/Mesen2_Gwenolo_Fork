@@ -45,6 +45,10 @@ void VideoRenderer::SetRendererSize(uint32_t width, uint32_t height)
 
 void VideoRenderer::StartThread()
 {
+#ifdef LIBRETRO
+	// Core libretro : pas de fil d'affichage ni de HUD, le frontend affiche l'image recue dans retro_run()
+	return;
+#endif
 	if(!_renderThread) {
 		auto lock = _stopStartLock.AcquireSafe();
 		if(!_renderThread) {

@@ -43,6 +43,16 @@ bool HdPackLoader::InitializeLoader(VirtualFile &romFile, HdPackData *data)
 		return true;
 	}
 
+#ifdef LIBRETRO
+	// [fork HD] libretro : le dossier systeme de RetroArch ne contient pas le pack, on regarde a cote de la ROM (comme les packs SNES)
+	string romFolder = romFile.GetFolderPath();
+	if(!romFolder.empty() && ifstream(FolderUtilities::CombinePath(romFolder, "hires.txt"))) {
+		_loadFromZip = false;
+		_hdPackFolder = romFolder;
+		return true;
+	}
+#endif
+
 	return false;
 }
 

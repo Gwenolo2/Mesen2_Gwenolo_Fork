@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 // Ecran de chargement des packs HD (balise <LoadingScreen>), commun NES et SNES.
 // Header-only : etat partage entre le thread de chargement (LoadAsync) et le thread de rendu (VideoRenderer).
 //
@@ -42,6 +43,8 @@ namespace HdLoadingScreen
 	{
 		inline std::mutex& Mutex() { static std::mutex m; return m; }
 		inline bool& Active() { static bool a = false; return a; }
+        // [fork HD] libretro : vrai tant que LoadAsync tourne en arriere-plan
+        inline std::atomic<bool>& Pending() { static std::atomic<bool> p(false); return p; }
 		inline HdLoadingScreenConfig& Config() { static HdLoadingScreenConfig c; return c; }
 		inline uint32_t& Total() { static uint32_t t = 0; return t; }
 		inline uint32_t& Done() { static uint32_t d = 0; return d; }

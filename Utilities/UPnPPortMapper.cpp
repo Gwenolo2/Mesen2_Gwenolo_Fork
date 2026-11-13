@@ -1,7 +1,8 @@
 #include "pch.h"
 #include "UPnPPortMapper.h"
 
-#ifdef _WIN32
+// Core libretro : pas de redirection de port (pas de COM / winsock dans le core)
+#if defined(_WIN32) && !defined(LIBRETRO)
 #include <winsock2.h>
 #include <natupnp.h>
 #include <ws2tcpip.h>
