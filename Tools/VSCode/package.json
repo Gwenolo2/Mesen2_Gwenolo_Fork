@@ -39,12 +39,16 @@
       {
         "command": "mesenHd.listConditions",
         "title": "Mesen HD : lister les conditions et includes du pack"
+      },
+      {
+        "command": "mesenHd.toggleComment",
+        "title": "Basculer le commentaire de ligne (#)"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "command": "editor.action.commentLine",
+          "command": "mesenHd.toggleComment",
           "when": "editorLangId == mesen-snes-hd",
           "group": "1_modification"
         }

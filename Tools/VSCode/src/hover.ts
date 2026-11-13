@@ -34,6 +34,17 @@ export class PackHoverProvider implements vscode.HoverProvider {
     provideHover(doc: vscode.TextDocument, pos: vscode.Position): vscode.Hover | undefined {
         const text = doc.lineAt(pos.line).text;
 
+        // Type de condition dans <condition>nom,type,… : paramètres du type (colorWindow, memoryCheck…).
+        const decl = /^(\s*)<condition>([^,]*),([^,]*)/.exec(text);
+        if (decl) {
+            const typeText = decl[3];
+            const typeStart = decl[0].length - typeText.length;
+            const typeName = typeText.trim();
+            if (typeName && pos.character >= typeStart && pos.character <= typeStart + typeText.length) {
+                return new vscode.Hover(this.conditionTypeMarkdown(typeName));
+            }
+        }
+
         const condName = conditionAt(text, pos.character);
         if (condName !== undefined) return new vscode.Hover(this.conditionMarkdown(doc, condName));
 
@@ -69,6 +80,31 @@ export class PackHoverProvider implements vscode.HoverProvider {
         }
         md.appendCodeblock(def.text, 'text');
         md.appendMarkdown(`Déclarée dans \`${path.relative(pack.rootFolder, def.file).replace(/\\/g, '/')}\` ligne ${def.line}`);
+        return md;
+    }
+
+    private conditionTypeMarkdown(name: string): vscode.MarkdownString {
+        const md = new vscode.MarkdownString();
+        md.appendMarkdown(`**${name}** — type de condition\n\n`);
+        const key = name.toLowerCase();
+        const ct = [...this.schema.conditionTypes.values()].find(c => c.name.toLowerCase() === key);
+        if (!ct) {
+            md.appendMarkdown('Type inconnu dans le schéma.');
+            return md;
+        }
+        if (ct.notes) md.appendMarkdown(`${ct.notes}\n\n`);
+        const params = [...ct.params].sort((a, b) => (a.pos ?? 0) - (b.pos ?? 0));
+        if (params.length) {
+            md.appendMarkdown('**Champs** (numéro = position dans la ligne `<condition>`)\n\n');
+            for (const p of params) {
+                const parts = [`${p.pos ?? '?'}. \`${p.name}\``];
+                if (p.type) parts.push(`(${p.type})`);
+                if (p.required) parts.push('— requis');
+                if (p.default !== undefined) parts.push(`— défaut ${String(p.default)}`);
+                if (p.desc) parts.push(`: ${p.desc}`);
+                md.appendMarkdown(`- ${parts.join(' ')}\n`);
+            }
+        }
         return md;
     }
 

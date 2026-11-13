@@ -25,6 +25,13 @@ export interface SchemaTag {
     params: SchemaParam[];
 }
 
+/** Type de condition déclaré dans le schéma (colorWindow, memoryCheck…) : champs après le nom du type. */
+export interface ConditionType {
+    name: string;
+    notes?: string;
+    params: SchemaParam[];
+}
+
 export interface Schema {
     tags: SchemaTag[];
     /** Recherche insensible à la casse. Les entrées ne gardent que les balises utilisables en priorité. */
@@ -34,6 +41,8 @@ export interface Schema {
     planned: Set<string>;
     /** Balises que le loader compare en minuscules. */
     caseInsensitive: Set<string>;
+    /** Types de condition, par nom exact. */
+    conditionTypes: Map<string, ConditionType>;
 }
 
 /** Statuts proposés en complétion (une balise planned ou notRecognized n'est jamais proposée). */
@@ -75,7 +84,16 @@ export function loadSchema(extensionRoot: string): Schema {
     const matching = (raw.matching ?? {}) as { caseInsensitive?: string[] };
     const caseInsensitive = new Set((matching.caseInsensitive ?? []).map(bareName));
 
-    return { tags, byKey, notRecognized, planned, caseInsensitive };
+    const conditionTypes = new Map<string, ConditionType>();
+    for (const c of (raw.conditionTypes ?? []) as Array<Record<string, unknown>>) {
+        const name = String(c.name);
+        conditionTypes.set(name, {
+            name,
+            notes: typeof c.notes === 'string' ? c.notes : undefined,
+            params: Array.isArray(c.params) ? (c.params as SchemaParam[]) : [],
+        });
+    }
+    return { tags, byKey, notRecognized, planned, caseInsensitive, conditionTypes };
 }
 
 export interface TagContext {

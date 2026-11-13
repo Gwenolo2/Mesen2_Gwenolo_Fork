@@ -23,7 +23,7 @@ export interface PackLine {
  * Clés en minuscules : le loader compare certaines balises en minuscules et d'autres exactement.
  * Source : schemas/29_schema_balises_snes.json et SnesHdPackLoader.cpp.
  */
-const FILE_FIELD: Record<string, number> = {
+export const FILE_FIELD: Record<string, number> = {
     'img': 0,
     'tile': 2,
     'tile_hflip': 2,

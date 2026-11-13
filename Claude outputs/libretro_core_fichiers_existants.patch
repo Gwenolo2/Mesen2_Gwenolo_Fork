@@ -1,0 +1,220 @@
+diff --git a/.gitignore b/.gitignore
+index 9d5aac1..92cc632 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -215,3 +215,9 @@ _backup_claude/
+ # --- Runtime PGO de MSVC (copie temporaire pendant PGO Profile) ---
+ UI/Dependencies/pgort140.dll
+ pgort140.dll
++
++# Core libretro
++mesen_hd_libretro.so
++mesen_hd_libretro.dll
++mesen_hd_libretro.dylib
++Libretro/obj/
+diff --git a/Core/SNES/HdPacks/SnesHdGpu.cpp b/Core/SNES/HdPacks/SnesHdGpu.cpp
+index 82e71a7..5a390be 100644
+--- a/Core/SNES/HdPacks/SnesHdGpu.cpp
++++ b/Core/SNES/HdPacks/SnesHdGpu.cpp
+@@ -7,6 +7,19 @@
+ #include "SNES/HdPacks/SnesHdData.h"
+ #include "Shared/MessageManager.h"
+ 
++#ifdef LIBRETRO
++// Core libretro : pas de SDL2 ni de contexte OpenGL prive. Le moteur 3D processeur prend le relais
++// (meme comportement que <gpu3d>off).
++SnesHdGpu& SnesHdGpu::Get()
++{
++	static SnesHdGpu instance;
++	return instance;
++}
++bool SnesHdGpu::Available() { return false; }
++bool SnesHdGpu::SubmitModels(const std::vector<SnesHdGpuView>&, uint32_t, uint32_t, float, float, float, int, int, int, int) { return false; }
++bool SnesHdGpu::FetchModels(std::vector<uint32_t>&, std::vector<float>&) { return false; }
++#else
++
+ #define SDL_MAIN_HANDLED
+ #include "SDL.h"
+ 
+@@ -586,3 +599,5 @@ bool SnesHdGpu::FetchModels(std::vector<uint32_t>& outColor, std::vector<float>&
+ 	}
+ 	return ok;
+ }
++
++#endif // LIBRETRO
+diff --git a/Core/SNES/SnesConsole.cpp b/Core/SNES/SnesConsole.cpp
+index b9e43ef..11a0fdd 100644
+--- a/Core/SNES/SnesConsole.cpp
++++ b/Core/SNES/SnesConsole.cpp
+@@ -663,6 +663,18 @@ void SnesConsole::LoadHdPack(VirtualFile& romFile)
+ 		string folder = FolderUtilities::GetFolderName(romPath);
+ 		string packFile = FolderUtilities::CombinePath(folder, "snes_hires.txt");
+ 
++#ifdef LIBRETRO
++		// Core libretro : si le pack n'est pas a cote de la ROM, on le cherche dans <system>/HdPacks/<nom de la ROM>/
++		// (meme convention que les packs NES)
++		if(!ifstream(packFile)) {
++			string romName = FolderUtilities::GetFilename(romPath, false);
++			string systemPack = FolderUtilities::CombinePath(FolderUtilities::CombinePath(FolderUtilities::GetHdPackFolder(), romName), "snes_hires.txt");
++			if(ifstream(systemPack)) {
++				packFile = systemPack;
++			}
++		}
++#endif
++
+ 		MessageManager::Log("[HD TRACE 0] Looking for File : " + packFile);
+ 
+ 		if(ifstream(packFile)) {
+diff --git a/Core/Shared/BatteryManager.cpp b/Core/Shared/BatteryManager.cpp
+index 958db2a..e844144 100644
+--- a/Core/Shared/BatteryManager.cpp
++++ b/Core/Shared/BatteryManager.cpp
+@@ -37,6 +37,11 @@ void BatteryManager::SaveBattery(string extension, uint8_t* data, uint32_t lengt
+ 	}
+ 
+ 	_hasBattery = true;
++#ifdef LIBRETRO
++	if(_libretroBatteryHandler && _libretroBatteryHandler(extension, data, length, true)) {
++		return;
++	}
++#endif
+ 	ofstream out(GetBasePath(extension), ios::binary);
+ 	if(out) {
+ 		out.write((char*)data, length);
+@@ -77,6 +82,12 @@ vector<uint8_t> BatteryManager::LoadBattery(string extension)
+ 
+ void BatteryManager::LoadBattery(string extension, uint8_t* data, uint32_t length)
+ {
++#ifdef LIBRETRO
++	if(!_romName.empty() && _libretroBatteryHandler && _libretroBatteryHandler(extension, data, length, false)) {
++		_hasBattery = true;
++		return;
++	}
++#endif
+ 	vector<uint8_t> batteryData = LoadBattery(extension);
+ 	memcpy(data, batteryData.data(), std::min((uint32_t)batteryData.size(), length));
+ }
+diff --git a/Core/Shared/BatteryManager.h b/Core/Shared/BatteryManager.h
+index 54cd868..130bf79 100644
+--- a/Core/Shared/BatteryManager.h
++++ b/Core/Shared/BatteryManager.h
+@@ -18,6 +18,11 @@ class BatteryManager
+ private:
+ 	string _romName;
+ 	bool _hasBattery = false;
++#ifdef LIBRETRO
++	// Core libretro : la RAM de sauvegarde principale est geree par le frontend (retro_get_memory_data)
++	using LibretroBatteryHandler = bool (*)(const string&, uint8_t*, uint32_t, bool);
++	LibretroBatteryHandler _libretroBatteryHandler = nullptr;
++#endif
+ 
+ 	std::weak_ptr<IBatteryProvider> _provider;
+ 	std::weak_ptr<IBatteryRecorder> _recorder;
+@@ -32,6 +37,9 @@ public:
+ 	void SetBatteryProvider(shared_ptr<IBatteryProvider> provider);
+ 	void SetBatteryRecorder(shared_ptr<IBatteryRecorder> recorder);
+ 	
++#ifdef LIBRETRO
++	void SetLibretroBatteryHandler(LibretroBatteryHandler handler) { _libretroBatteryHandler = handler; }
++#endif
+ 	void SaveBattery(string extension, uint8_t* data, uint32_t length);
+ 	
+ 	vector<uint8_t> LoadBattery(string extension);
+diff --git a/Core/Shared/Emulator.cpp b/Core/Shared/Emulator.cpp
+index 026258a..f4bf156 100644
+--- a/Core/Shared/Emulator.cpp
++++ b/Core/Shared/Emulator.cpp
+@@ -250,6 +250,11 @@ void Emulator::OnBeforeSendFrame()
+ void Emulator::ProcessEndOfFrame()
+ {
+ 	if(!_isRunAheadFrame) {
++#ifdef LIBRETRO
++		// Core libretro : les frames sont avancees par retro_run() et cadencees par le frontend.
++		// Run() n'est jamais lance, donc _frameLimiter n'existe pas : on saute l'attente.
++		if(_frameLimiter) {
++#endif
+ 		_frameLimiter->ProcessFrame();
+ 		while(_frameLimiter->WaitForNextFrame()) {
+ 			if(_stopFlag || _frameDelay != GetFrameDelay() || _paused || _pauseOnNextFrame || _lockCounter > 0) {
+@@ -263,6 +268,9 @@ void Emulator::ProcessEndOfFrame()
+ 			_frameDelay = newFrameDelay;
+ 			_frameLimiter->SetDelay(_frameDelay);
+ 		}
++#ifdef LIBRETRO
++		}
++#endif
+ 
+ 		_console->GetControlManager()->ProcessEndOfFrame();
+ 	}
+diff --git a/Core/Shared/Video/VideoDecoder.cpp b/Core/Shared/Video/VideoDecoder.cpp
+index f898e50..5730278 100644
+--- a/Core/Shared/Video/VideoDecoder.cpp
++++ b/Core/Shared/Video/VideoDecoder.cpp
+@@ -197,6 +197,10 @@ void VideoDecoder::UpdateFrame(RenderedFrame frame, bool sync, bool forRewind)
+ 	_emu->OnBeforeSendFrame();
+ 
+ 	_frame = frame;
++#ifdef LIBRETRO
++	// Core libretro : l'image doit etre prete avant la fin de retro_run()
++	sync = true;
++#endif
+ 	if(sync) {
+ 		DecodeFrame(forRewind);
+ 	} else {
+diff --git a/Core/Shared/Video/VideoRenderer.cpp b/Core/Shared/Video/VideoRenderer.cpp
+index de9a582..ff8d9c7 100644
+--- a/Core/Shared/Video/VideoRenderer.cpp
++++ b/Core/Shared/Video/VideoRenderer.cpp
+@@ -45,6 +45,10 @@ void VideoRenderer::SetRendererSize(uint32_t width, uint32_t height)
+ 
+ void VideoRenderer::StartThread()
+ {
++#ifdef LIBRETRO
++	// Core libretro : pas de fil d'affichage ni de HUD, le frontend affiche l'image recue dans retro_run()
++	return;
++#endif
+ 	if(!_renderThread) {
+ 		auto lock = _stopStartLock.AcquireSafe();
+ 		if(!_renderThread) {
+diff --git a/Mesen_Gwenolo_Fork.sln b/Mesen_Gwenolo_Fork.sln
+index 7f220de..4bcdf0a 100644
+--- a/Mesen_Gwenolo_Fork.sln
++++ b/Mesen_Gwenolo_Fork.sln
+@@ -41,6 +41,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SevenZip", "SevenZip\SevenZ
+ EndProject
+ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Lua", "Lua\Lua.vcxproj", "{B609E0A0-5050-4871-91D6-E760633BCDD1}"
+ EndProject
++Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Libretro", "Libretro\Libretro.vcxproj", "{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}"
++EndProject
+ Global
+ 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+ 		Debug|Any CPU = Debug|Any CPU
+@@ -152,6 +154,14 @@ Global
+ 		{B609E0A0-5050-4871-91D6-E760633BCDD1}.Release|Any CPU.ActiveCfg = Release|x64
+ 		{B609E0A0-5050-4871-91D6-E760633BCDD1}.Release|x64.ActiveCfg = Release|x64
+ 		{B609E0A0-5050-4871-91D6-E760633BCDD1}.Release|x64.Build.0 = Release|x64
++		{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}.Debug|Any CPU.ActiveCfg = Debug|x64
++		{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}.Debug|x64.ActiveCfg = Debug|x64
++		{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}.PGO Optimize|Any CPU.ActiveCfg = Release|x64
++		{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}.PGO Optimize|x64.ActiveCfg = Release|x64
++		{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}.PGO Profile|Any CPU.ActiveCfg = Release|x64
++		{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}.PGO Profile|x64.ActiveCfg = Release|x64
++		{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}.Release|Any CPU.ActiveCfg = Release|x64
++		{6B1F0D52-9C3E-4E7A-8A41-5D2E7C9B4F10}.Release|x64.ActiveCfg = Release|x64
+ 	EndGlobalSection
+ 	GlobalSection(SolutionProperties) = preSolution
+ 		HideSolutionNode = FALSE
+diff --git a/Utilities/UPnPPortMapper.cpp b/Utilities/UPnPPortMapper.cpp
+index 71d485d..4da4f8b 100644
+--- a/Utilities/UPnPPortMapper.cpp
++++ b/Utilities/UPnPPortMapper.cpp
+@@ -1,7 +1,8 @@
+ #include "pch.h"
+ #include "UPnPPortMapper.h"
+ 
+-#ifdef _WIN32
++// Core libretro : pas de redirection de port (pas de COM / winsock dans le core)
++#if defined(_WIN32) && !defined(LIBRETRO)
+ #include <winsock2.h>
+ #include <natupnp.h>
+ #include <ws2tcpip.h>

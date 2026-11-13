@@ -28,9 +28,10 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.languages.registerDocumentLinkProvider(selector, new PackLinkProvider()),
         vscode.languages.registerCodeLensProvider(selector, new PackCodeLensProvider()),
-        vscode.languages.registerCompletionItemProvider(selector, new PackCompletionProvider(schema), '<', '[', '&', ',', '='),
+        vscode.languages.registerCompletionItemProvider(selector, new PackCompletionProvider(schema), '<', '[', '&', ',', '=', '/', '\\'),
         vscode.languages.registerHoverProvider(selector, new PackHoverProvider(schema)),
         vscode.languages.registerSignatureHelpProvider(selector, new PackSignatureProvider(schema), ','),
+        vscode.commands.registerCommand('mesenHd.toggleComment', () => vscode.commands.executeCommand('editor.action.commentLine')),
         vscode.commands.registerCommand('mesenHd.listConditions', () => {
             const doc = vscode.window.activeTextEditor?.document;
             if (!doc || doc.uri.scheme !== 'file') {
