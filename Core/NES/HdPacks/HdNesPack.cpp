@@ -30,6 +30,8 @@ HdNesPack<scale>::HdNesPack(NesConsole* console, EmuSettings* settings, HdPackDa
 	_resolvedSprites.resize(NesConstants::ScreenPixelCount * 4, nullptr);
 	_zNes.assign(NesConstants::ScreenPixelCount, 0);
 	_ignNes.assign(NesConstants::ScreenPixelCount, 0);
+	_sprNes.assign(NesConstants::ScreenPixelCount, 0);
+	_reflFloor.assign(NesConstants::ScreenPixelCount, std::nanf(""));
 
 	InitializeFallbackTiles();
 	CleanupInvalidRules();
@@ -166,7 +168,7 @@ void HdNesPack<scale>::DrawColor(uint32_t color, uint32_t *outputBuffer, uint32_
 
 template<uint32_t scale>
 template<HdPackBlendMode blendMode>
-void HdNesPack<scale>::DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *outputBuffer, uint32_t x, uint32_t y, uint32_t screenWidth)
+void HdNesPack<scale>::DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *outputBuffer, uint32_t x, uint32_t y, uint32_t screenWidth, uint32_t screenX, uint32_t screenY, int32_t rawScrollX, int32_t rawScrollY, const vector<NesHdTextureInfo>* tex2d)
 {
 	uint32_t width = bgInfo.Data->Width;
 	// <background> : tileX / tileY repetent l'image (modulo de sa taille en pixels NES)
@@ -180,11 +182,26 @@ void HdNesPack<scale>::DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *
 		if(bgInfo.TileY && pngH > 0) py = posMod(py, pngH);
 	}
 	uint32_t *pngData = bgInfo.data() + ((uint32_t)py * scale * width) + ((uint32_t)px * scale);
+	// <2DLiquid> mask=1 : couverture du fond de meme priorite (alpha par pixel HD) pour le liquide
+	std::vector<uint8_t>* covBuf = nullptr;
+	if(bgInfo.Priority >= 0 && bgInfo.Priority < 50 && !_liqCover[bgInfo.Priority].empty() && x >= _liquidOffX && y >= _liquidOffY) {
+		covBuf = &_liqCover[bgInfo.Priority];
+	}
+	const size_t covBase = covBuf ? ((size_t)(y - _liquidOffY) * scale * screenWidth + (size_t)(x - _liquidOffX) * scale) : 0;
+	const int64_t covKey = covBuf ? _liqKey[bgInfo.Priority] : -1; // maskcolor : couleur cle (RGB)
+	auto markCover = [&](uint32_t i, uint32_t j, uint32_t px) {
+		const size_t idx = covBase + (size_t)i * screenWidth + j;
+		const bool keyed = covKey >= 0 && (int64_t)(px & 0xFFFFFFu) == covKey;
+		const uint32_t al = keyed ? 0u : (px >> 24);
+		if(idx < covBuf->size()) { uint8_t& c = (*covBuf)[idx]; if(al > c) c = (uint8_t)al; }
+	};
 
 	if(bgInfo.Brightness == 255) {
 		for(uint32_t i = 0; i < scale; i++) {
 			for(uint32_t j = 0; j < scale; j++) {
 				uint32_t pixelColor = pngData[j];
+				if(tex2d) pixelColor = ApplyTexture2D(*tex2d, pixelColor, (int32_t)(screenX * scale + j), (int32_t)(screenY * scale + i), rawScrollX, rawScrollY);
+				if(covBuf) markCover(i, j, pixelColor);
 				if constexpr(blendMode == HdPackBlendMode::Alpha) {
 					if(pixelColor >= 0xFF000000) {
 						outputBuffer[j] = pixelColor;
@@ -201,7 +218,10 @@ void HdNesPack<scale>::DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *
 	} else {
 		for(uint32_t i = 0; i < scale; i++) {
 			for(uint32_t j = 0; j < scale; j++) {
-				uint32_t pixelColor = AdjustBrightness((uint8_t*)(pngData + j), bgInfo.Brightness);
+				uint32_t raw = pngData[j];
+				if(tex2d) raw = ApplyTexture2D(*tex2d, raw, (int32_t)(screenX * scale + j), (int32_t)(screenY * scale + i), rawScrollX, rawScrollY);
+				uint32_t pixelColor = AdjustBrightness((uint8_t*)(&raw), bgInfo.Brightness);
+				if(covBuf) markCover(i, j, pixelColor);
 				if constexpr(blendMode == HdPackBlendMode::Alpha) {
 					if(pixelColor >= 0xFF000000) {
 						outputBuffer[j] = pixelColor;
@@ -214,6 +234,113 @@ void HdNesPack<scale>::DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *
 			}
 			outputBuffer += screenWidth;
 			pngData += width;
+		}
+	}
+}
+
+// <2DTexture> : si la couleur du pixel de fond correspond a une regle, le pixel est remplace par la texture
+// (repetee, etiree par scalex/scaley, defilante avec le scroll PPU x ratio). hdX / hdY : position ecran en pixels HD.
+template<uint32_t scale>
+uint32_t HdNesPack<scale>::ApplyTexture2D(const vector<NesHdTextureInfo>& rules, uint32_t raw, int32_t hdX, int32_t hdY, int32_t rawScrollX, int32_t rawScrollY)
+{
+	const uint32_t alpha = raw >> 24;
+	for(const NesHdTextureInfo& r : rules) {
+		const bool match = r.HasKey ? (alpha != 0 && (raw & 0xFFFFFFu) == r.Key) : (alpha == 0);
+		if(!match || r.Texture == nullptr || r.Texture->PixelData.empty() || r.Texture->Width == 0 || r.Texture->Height == 0) {
+			continue;
+		}
+		const int64_t tw = r.Texture->Width;
+		const int64_t th = r.Texture->Height;
+		const int64_t offX = (int64_t)std::floor((float)rawScrollX * r.RatioX * scale);
+		const int64_t offY = (int64_t)std::floor((float)rawScrollY * r.RatioY * scale);
+		int64_t tu = (int64_t)std::floor((float)(hdX + offX) * r.TexelPerPxX) % tw;
+		int64_t tv = (int64_t)std::floor((float)(hdY + offY) * r.TexelPerPxY) % th;
+		if(tu < 0) tu += tw;
+		if(tv < 0) tv += th;
+		return r.Texture->PixelData[(size_t)(tv * tw + tu)];
+	}
+	return raw;
+}
+
+// <2DReflect> : pour chaque colonne de la ligne, ordonnee ecran (NES) du bord superieur du PNG du calque sol.
+// NaN si le calque n'est pas actif ou si la colonne n'a pas de pixel opaque.
+template<uint32_t scale>
+void HdNesPack<scale>::ComputeReflectFloorLine(uint32_t nesY, const HdBgConfig* lineCfg, uint32_t xStart, uint32_t xEnd)
+{
+	const float nan = std::nanf("");
+	const size_t rowBase = (size_t)nesY << 8;
+	const int prio = _hdData->Reflects[0].Priority;
+	const HdBgConfig* cfg = nullptr;
+	for(int n = 0; n < 50; n++) {
+		if(lineCfg[n].BackgroundIndex >= 0 && lineCfg[n].BgPriority == prio) {
+			cfg = &lineCfg[n];
+			break;
+		}
+	}
+	HdBackgroundInfo* bgInfo = cfg ? &_hdData->BackgroundsByPriority[prio][cfg->BackgroundIndex] : nullptr;
+	const HdPackBitmapInfo* bmp = (bgInfo && bgInfo->Data) ? bgInfo->Data : nullptr;
+	if(!bmp || bmp->TopEdgeHd.empty()) {
+		for(uint32_t x = xStart; x < xEnd; x++) _reflFloor[rowBase + x] = nan;
+		return;
+	}
+	const int32_t pngW = (int32_t)(bmp->Width / scale);
+	for(uint32_t x = xStart; x < xEnd; x++) {
+		float floorY = nan;
+		int32_t px = (int32_t)x + cfg->BgScrollX + (int32_t)bgInfo->Left;
+		bool ok = true;
+		if(bgInfo->TileX && pngW > 0) {
+			px %= pngW;
+			if(px < 0) px += pngW;
+		} else if(px < 0 || px >= pngW) {
+			ok = false;
+		}
+		if(ok) {
+			const int32_t edge = bmp->TopEdgeHd[(size_t)px * scale];
+			if(edge >= 0) {
+				floorY = (float)edge / (float)scale - (float)(cfg->BgScrollY + (int32_t)bgInfo->Top);
+			}
+		}
+		_reflFloor[rowBase + x] = floorY;
+	}
+}
+
+// <2DReflect> : chaque pixel de sprite situe au-dessus du sol est recopie en miroir sous le sol.
+// Distance d = sol - pixel ; reflet a sol + d ; opacite = intensite x (1 - d / fade) si fade > 0.
+// Source et cible sont dans la meme colonne, la cible est toujours sous le sol : pas de recouvrement.
+template<uint32_t scale>
+void HdNesPack<scale>::ProcessReflections(uint32_t* out, uint32_t screenWidth, const OverscanDimensions& overscan)
+{
+	const NesHdReflectInfo& refl = _hdData->Reflects[0];
+	const uint32_t yStart = overscan.Top, yEnd = 240 - overscan.Bottom;
+	const uint32_t xStart = overscan.Left, xEnd = 256 - overscan.Right;
+	for(uint32_t y = yStart; y < yEnd; y++) {
+		for(uint32_t x = xStart; x < xEnd; x++) {
+			const size_t idx = ((size_t)y << 8) | x;
+			if(!_sprNes[idx]) continue;
+			const float fl = _reflFloor[idx];
+			if(std::isnan(fl)) continue;
+			const float cy = (float)y + 0.5f;
+			if(cy >= fl) continue;
+			const float d = fl - cy;
+			float a = refl.Intensity;
+			if(refl.Fade > 0.0f) a *= std::max(0.0f, 1.0f - d / refl.Fade);
+			if(a <= 0.0f) continue;
+			const uint32_t ty = (uint32_t)std::floor(fl + d);
+			if(ty < yStart || ty >= yEnd) continue;
+			const uint32_t* src = out + (size_t)(y - yStart) * scale * screenWidth + (size_t)(x - xStart) * scale;
+			uint32_t* dst = out + (size_t)(ty - yStart) * scale * screenWidth + (size_t)(x - xStart) * scale;
+			const uint32_t ia = (uint32_t)std::min(256.0f, a * 256.0f);
+			const uint32_t ib = 256 - ia;
+			for(uint32_t i = 0; i < scale; i++) {
+				for(uint32_t j = 0; j < scale; j++) {
+					const uint32_t s = src[i * screenWidth + j];
+					uint32_t& dd = dst[i * screenWidth + j];
+					const uint32_t r = (((s >> 0) & 0xFF) * ia + ((dd >> 0) & 0xFF) * ib) >> 8;
+					const uint32_t g = (((s >> 8) & 0xFF) * ia + ((dd >> 8) & 0xFF) * ib) >> 8;
+					const uint32_t b = (((s >> 16) & 0xFF) * ia + ((dd >> 16) & 0xFF) * ib) >> 8;
+					dd = r | (g << 8) | (b << 16) | 0xFF000000u;
+				}
+			}
 		}
 	}
 }
@@ -808,6 +935,13 @@ void HdNesPack<scale>::PrepareLiquids(uint32_t screenWidth)
 	const float twoPi = 2.0f * OverlayPi;
 	const float degToRad = OverlayPi / 180.0f;
 	const int hdRows = 240 * (int)scale;
+	// <2DLiquid> mask=1 : tampon de couverture par priorite de <background>, remis a zero chaque image
+	for(auto& c : _liqCover) c.clear();
+	for(auto& k : _liqKey) k = -1;
+	for(auto& liqPtr : _hdData->Liquids) {
+		if(liqPtr->Active && liqPtr->MaskBg) _liqCover[liqPtr->Priority].assign((size_t)screenWidth * hdRows, 0);
+		if(liqPtr->Active && liqPtr->MaskBg && liqPtr->HasMaskKey) _liqKey[liqPtr->Priority] = (int64_t)liqPtr->MaskKey;
+	}
 	auto liqHash = [](uint32_t v) -> uint32_t { v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; v ^= v >> 16; return v; };
 	for(auto& liqPtr : _hdData->Liquids) {
 		NesHdLiquidInfo& liq = *liqPtr;
@@ -879,7 +1013,7 @@ void HdNesPack<scale>::PrepareLiquids(uint32_t screenWidth)
 }
 
 // view=top : degrade par profondeur dans la zone + ondulations croisees (coordonnees NES)
-static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, uint32_t dst)
+static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, uint32_t dst, float maskK = 1.0f)
 {
 	auto chan = [](uint32_t c, int sh) -> float { return (float)((c >> sh) & 0xFF); };
 	const float zoneH = std::max(1.0f, liq.YMax - liq.YMin);
@@ -888,6 +1022,49 @@ static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, u
 	float gg = chan(liq.Color, 8) + (chan(liq.Deep, 8) - chan(liq.Color, 8)) * depth;
 	float bb = chan(liq.Color, 0) + (chan(liq.Deep, 0) - chan(liq.Color, 0)) * depth;
 	const float twoPi = 2.0f * OverlayPi;
+	if(liq.NormalMode) {
+		// [normal=1] vaguelettes : hauteur a 3 trains d'ondes, normale par pixel, refraction de la texture, eclairage et reflet
+		const float twoPiN = 2.0f * OverlayPi;
+		const float p1 = twoPiN * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * (OverlayPi / 180.0f);
+		const float p2 = twoPiN * (yN / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time);
+		const float p3 = twoPiN * ((xN + yN) / (liq.Wave * 1.7f) + 1.3f * liq.Speed * liq.Time);
+		const float k1 = twoPiN / liq.Wave, k2 = twoPiN / (liq.Wave * 0.6f), k3 = twoPiN / (liq.Wave * 1.7f);
+		const float slope = 1.25f * std::max(0.01f, liq.Amp);
+		const float hn = 0.5f * (std::sin(p1) + 0.6f * std::sin(p2) + 0.4f * std::sin(p3));
+		const float dhdx = slope * (k1 * std::cos(p1) + 0.4f * k3 * std::cos(p3));
+		const float dhdy = slope * (0.6f * k2 * std::cos(p2) + 0.4f * k3 * std::cos(p3));
+		float nx = -dhdx, ny = -dhdy, nz = 1.0f;
+		const float nlen = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+		nx *= nlen; ny *= nlen; nz *= nlen;
+		const bool hasTexN = liq.Texture != nullptr && liq.Texture->Width > 0 && liq.Texture->Height > 0 && liq.Texture->PixelData.size() >= (size_t)liq.Texture->Width * liq.Texture->Height;
+		if(hasTexN) {
+			const int tw = (int)liq.Texture->Width, th = (int)liq.Texture->Height;
+			const float u = (xN + dhdx * liq.Refract + liq.ScrollX * liq.Time) / liq.TexScale;
+			const float v = (yN - liq.YMin + dhdy * liq.Refract) / liq.TexScale;
+			int tx = (int)std::floor(u) % tw; if(tx < 0) tx += tw;
+			int ty = (int)std::floor(v) % th; if(ty < 0) ty += th;
+			const uint32_t c = liq.Texture->PixelData[(size_t)ty * tw + tx];
+			const float a = chan(c, 24) / 255.0f;
+			rr = chan(c, 16) + rr * (1.0f - a);
+			gg = chan(c, 8) + gg * (1.0f - a);
+			bb = chan(c, 0) + bb * (1.0f - a);
+		}
+		// eclairage : lumiere venant du haut-gauche
+		const float ll = 1.0f / std::sqrt(0.45f * 0.45f + 0.55f * 0.55f + 0.70f * 0.70f);
+		const float Lx = -0.45f * ll, Ly = -0.55f * ll, Lz = 0.70f * ll;
+		const float diff = std::max(0.0f, nx * Lx + ny * Ly + nz * Lz);
+		const float shade = 0.80f + 0.30f * diff;
+		rr = std::min(255.0f, rr * shade); gg = std::min(255.0f, gg * shade); bb = std::min(255.0f, bb * shade);
+		// reflet speculaire (Blinn)
+		const float hx = Lx, hy = Ly, hz = Lz + 1.0f;
+		const float hl = 1.0f / std::sqrt(hx * hx + hy * hy + hz * hz);
+		const float ndh = std::max(0.0f, (nx * hx + ny * hy + nz * hz) * hl);
+		const float spec = std::pow(ndh, 40.0f) * liq.Specular;
+		rr += (255.0f - rr) * spec; gg += (255.0f - gg) * spec; bb += (255.0f - bb) * spec;
+		// ecume sur les cretes
+		const float crest = std::clamp((hn - 0.55f) / 0.35f, 0.0f, 1.0f) * liq.Foam * 0.6f;
+		rr += (255.0f - rr) * crest; gg += (255.0f - gg) * crest; bb += (255.0f - bb) * crest;
+	} else {
 	const float w1 = std::sin(twoPi * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * (OverlayPi / 180.0f));
 	const float w2 = std::sin(twoPi * (yN / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time));
 	const float rip = 0.5f * (w1 + w2) * std::min(1.0f, liq.Amp / 6.0f);
@@ -912,7 +1089,8 @@ static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, u
 		gg = chan(c, 8) + gg * (1.0f - a);
 		bb = chan(c, 0) + bb * (1.0f - a);
 	}
-	const float A = liq.Alpha;
+	}
+	const float A = liq.Alpha * maskK;
 	const float dr = chan(dst, 16), dg = chan(dst, 8), db = chan(dst, 0);
 	const uint32_t R = (uint32_t)std::clamp(dr + (rr - dr) * A + 0.5f, 0.0f, 255.0f);
 	const uint32_t G = (uint32_t)std::clamp(dg + (gg - dg) * A + 0.5f, 0.0f, 255.0f);
@@ -979,7 +1157,14 @@ void HdNesPack<scale>::DrawLiquidBand(int band, uint32_t nesX, uint32_t nesY, ui
 				uint32_t px = dst;
 				if(liq.IsTop) {
 					if(yN >= liq.YMin && yN < liq.YMax) {
-						px = LiquidTopPixel(liq, xN, yN, dst);
+						float maskK = 1.0f;
+						bool covered = false;
+						if(liq.MaskBg && !_liqCover[liq.Priority].empty()) {
+							const size_t ci = (size_t)hdRow * screenWidth + (size_t)col;
+							const uint8_t cv = ci < _liqCover[liq.Priority].size() ? _liqCover[liq.Priority][ci] : 0;
+							if(cv == 255) covered = true; else maskK = (255.0f - (float)cv) / 255.0f;
+						}
+						if(!covered) px = LiquidTopPixel(liq, xN, yN, dst, maskK);
 					}
 				} else {
 					const float s = liq.Surface[col];
@@ -1578,6 +1763,8 @@ void HdNesPack<scale>::ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8
 		for(int i = 0; i < _activeBgCount[layer]; i++) {
 			int cfgIndex = layer * HdNesPack::PriorityLevelsPerLayer + i;
 			HdBgConfig cfg = _bgConfig[cfgIndex];
+			cfg.RawScrollX = scrollX;
+			cfg.RawScrollY = scrollY;
 			cfg.BgMinX = -1;
 			cfg.BgMaxX = -1;
 			if(cfg.BackgroundIndex >= 0) {
@@ -1866,10 +2053,11 @@ void HdNesPack<scale>::DrawBackgroundLayer(const HdBgConfig& bgConfig, uint32_t 
 		if(_hdData->HasIgnore2D && bgInfo.IsIgnored2D((int)x, (int)y, nullptr)) _ignNes[(y << 8) | x] = 1;
 		// Z-index : ce fond est le dernier element dessine sur ce pixel (si un <video> existe)
 		if(_zEnabled) _zNes[(y << 8) | x] = (uint8_t)bgConfig.BgPriority;
+		const vector<NesHdTextureInfo>* tex2d = _hdData->Textures2D[bgInfo.Priority].empty() ? nullptr : &_hdData->Textures2D[bgInfo.Priority];
 		switch(bgInfo.BlendMode) {
-			case HdPackBlendMode::Alpha: DrawCustomBackground<HdPackBlendMode::Alpha>(bgInfo, outputBuffer, x + bgConfig.BgScrollX, y + bgConfig.BgScrollY, screenWidth); break;
-			case HdPackBlendMode::Add: DrawCustomBackground<HdPackBlendMode::Add>(bgInfo, outputBuffer, x + bgConfig.BgScrollX, y + bgConfig.BgScrollY, screenWidth); break;
-			case HdPackBlendMode::Subtract: DrawCustomBackground<HdPackBlendMode::Subtract>(bgInfo, outputBuffer, x + bgConfig.BgScrollX, y + bgConfig.BgScrollY, screenWidth); break;
+			case HdPackBlendMode::Alpha: DrawCustomBackground<HdPackBlendMode::Alpha>(bgInfo, outputBuffer, x + bgConfig.BgScrollX, y + bgConfig.BgScrollY, screenWidth, x, y, bgConfig.RawScrollX, bgConfig.RawScrollY, tex2d); break;
+			case HdPackBlendMode::Add: DrawCustomBackground<HdPackBlendMode::Add>(bgInfo, outputBuffer, x + bgConfig.BgScrollX, y + bgConfig.BgScrollY, screenWidth, x, y, bgConfig.RawScrollX, bgConfig.RawScrollY, tex2d); break;
+			case HdPackBlendMode::Subtract: DrawCustomBackground<HdPackBlendMode::Subtract>(bgInfo, outputBuffer, x + bgConfig.BgScrollX, y + bgConfig.BgScrollY, screenWidth, x, y, bgConfig.RawScrollX, bgConfig.RawScrollY, tex2d); break;
 		}
 	}
 }
@@ -1932,6 +2120,14 @@ void HdNesPack<scale>::DrawPixel(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelIn
 	HdPackTileInfo* const* sprites = _resolvedSprites.data() + (pixelIndex << 2);
 
 	bool hasSprite = pixelInfo.SpriteCount > 0;
+	// <2DReflect> : marque les pixels ou un sprite opaque est affiche
+	if(_reflectEnabled) {
+		uint8_t opaqueSprite = 0;
+		for(int k = 0; k < pixelInfo.SpriteCount; k++) {
+			if(pixelInfo.Sprite[k].SpriteColorIndex != 0) { opaqueSprite = 1; break; }
+		}
+		_sprNes[pixelIndex] = opaqueSprite;
+	}
 	bool renderOriginalTiles = ((_hdData->OptionFlags & (int)HdPackOptions::DontRenderOriginalTiles) == 0);
 
 	//La tile de fond couvre-t-elle tout le bloc scale x scale de facon opaque ?
@@ -2070,6 +2266,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	SimulateOverlays(hdScreenInfo);
 	_liquidOffX = overscan.Left;
 	_liquidOffY = overscan.Top;
+	_reflectEnabled = !_hdData->Reflects.empty();
 	PrepareLiquids(screenWidth);
 	_zEnabled = !_hdData->Videos.empty() || !_hdData->Overlays.empty() || !_hdData->Perspectives.empty();
 	if(_zEnabled) {
@@ -2095,6 +2292,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	auto drawLine = [&](uint32_t i) {
 		HdBgConfig lineCfg[50];
 		ComputeLineBgConfig(hdScreenInfo->ScreenTiles[i << 8], (uint8_t)i, lineCfg);
+		if(_reflectEnabled) ComputeReflectFloorLine(i, lineCfg, xStart, xEnd);
 		uint32_t bufferIndex = (i - yStart) * screenWidth * hdScale;
 		uint32_t lineStartIndex = bufferIndex;
 		for(uint32_t j = xStart; j < xEnd; j++) {
@@ -2120,6 +2318,10 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	}
 
 	lap(2);
+	//<2DReflect> : reflet des sprites sous le sol, sur l'image composee (avant les overlays)
+	if(_reflectEnabled && !_wsMode) {
+		ProcessReflections(outputBuffer, screenWidth, overscan);
+	}
 	//Overlays puis videos : appliques apres grayscale/emphasis, sequentiellement
 	if(_zEnabled) {
 		if(!_wsMode) {

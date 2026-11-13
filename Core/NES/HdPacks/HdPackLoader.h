@@ -82,6 +82,8 @@ private:
 	void ProcessPerspectiveTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessSpriteLightTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessLiquidTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessTexture2DTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessReflectTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessSfxTag(vector<string> &tokens);
 
 	vector<HdPackCondition*> ParseConditionString(string conditionString);

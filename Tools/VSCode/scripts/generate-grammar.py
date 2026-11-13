@@ -14,7 +14,7 @@ OUT = ROOT / 'syntaxes' / 'mesen-snes-hd.tmLanguage.json'
 # Balises comparées en minuscules par SnesHdPackLoader.cpp ; les autres sont sensibles à la casse.
 CASE_INSENSITIVE = {
     'frontof3d', 'ignore2doverlays', 'spritelight', '2dspritelight', 'noliquidreflect',
-    'nolightfxonsprite', 'm7effect', 'm7liquidbackground', 'm7material',
+    'nolightfxonsprite', 'm7effect', 'm7liquidbackground', 'm7material', '2dreflect',
 }
 
 

@@ -33,7 +33,7 @@
         },
         {
           "name": "support.function.condition.mesen-snes-hd",
-          "match": "\\b(?:cgramMemoryCheckConstant|aramMemoryCheckConstant|vramMemoryCheckConstant|spcMemoryCheckConstant|ppuMemoryCheckConstant|oamMemoryCheckConstant|memoryCheckConstant|hmirror\\ /\\ vmirror|cgramMemoryCheck|spriteAtPosition|widescreenMode7|aramMemoryCheck|vramMemoryCheck|oamMemoryCheck|spcMemoryCheck|tileAtPosition|ppuMemoryCheck|spriteNearby|colorWindow|memoryCheck|tileNearby|frameRange|widescreen|vmirror|hmirror|gpu3d)\\b"
+          "match": "\\b(?:cgramMemoryCheckConstant|vramMemoryCheckConstant|aramMemoryCheckConstant|spcMemoryCheckConstant|oamMemoryCheckConstant|ppuMemoryCheckConstant|memoryCheckConstant|hmirror\\ /\\ vmirror|cgramMemoryCheck|spriteAtPosition|vramMemoryCheck|aramMemoryCheck|widescreenMode7|spcMemoryCheck|ppuMemoryCheck|tileAtPosition|oamMemoryCheck|spriteNearby|colorWindow|memoryCheck|tileNearby|widescreen|frameRange|hmirror|vmirror|gpu3d)\\b"
         },
         {
           "name": "constant.numeric.hash.mesen-snes-hd",
@@ -55,15 +55,15 @@
     },
     {
       "name": "keyword.control.tag.mesen-snes-hd",
-      "match": "<(?:disableAllColorMathWindow|disableOriginalSprites|disableColorMathWindow|disableOriginalTiles|disableColorMath|disablesublayer|setLayersOrder|LoadingScreen|2DPerspective|tile_hvflip|m7billboard|3DParticles|disableTile|tile_hflip|widescreen|tile_vflip|background|disableBg1|condition|2DOverlay|m7ambient|m7relief|fallback|overscan|addition|msuToOgg|2DLiquid|m7light|m7model|include|m7tiles|video|patch|alias|scale|m7img|gpu3d|tile|img)>"
+      "match": "<(?:disableAllColorMathWindow|disableColorMathWindow|disableOriginalSprites|disableOriginalTiles|disableColorMath|disablesublayer|setLayersOrder|2DPerspective|LoadingScreen|disableTile|tile_hvflip|m7billboard|3DParticles|background|tile_hflip|widescreen|disableBg1|tile_vflip|2DOverlay|condition|m7ambient|m7relief|addition|overscan|2DLiquid|msuToOgg|fallback|include|m7model|m7tiles|m7light|gpu3d|video|scale|m7img|patch|alias|tile|img)>"
     },
     {
       "name": "keyword.control.tag.mesen-snes-hd",
-      "match": "(?i:<(?:m7LiquidBackground|NoLightFXOnSprite|Ignore2DOverlays|NoLiquidReflect|2DSpriteLight|spritelight|m7material|FrontOf3D|m7effect)>)"
+      "match": "(?i:<(?:m7LiquidBackground|NoLightFXOnSprite|Ignore2DOverlays|NoLiquidReflect|2DSpriteLight|spritelight|m7material|2DReflect|FrontOf3D|m7effect)>)"
     },
     {
       "name": "invalid.deprecated.tag.mesen-snes-hd",
-      "match": "(?i:<(?:sfx|ver|bgm)>)"
+      "match": "(?i:<(?:ver|bgm|sfx)>)"
     },
     {
       "name": "invalid.illegal.tag.mesen-snes-hd",

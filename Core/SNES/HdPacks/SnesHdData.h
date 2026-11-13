@@ -9,6 +9,7 @@
 #include <vector>
 #include <array>
 #include <cstring>
+#include <cmath>
 #include "Shared/MessageManager.h"
 #include "Shared/HdLoadingScreen.h"
 #include <unordered_set>
@@ -233,6 +234,20 @@ public:
 	std::vector<uint32_t> PixelData;
 	uint32_t Width = 0;
 	uint32_t Height = 0;
+
+	std::vector<int32_t> TopEdgeHd; // <2DReflect> : rangee HD de la premiere pixel opaque par colonne (-1 = aucune)
+	void ComputeTopEdge()
+	{
+	    TopEdgeHd.assign(Width, -1);
+	    if(Width == 0 || Height == 0 || PixelData.size() < (size_t)Width * Height) return;
+	    uint32_t found = 0;
+	    for(uint32_t r = 0; r < Height && found < Width; r++) {
+	        const uint32_t* row = PixelData.data() + (size_t)r * Width;
+	        for(uint32_t c = 0; c < Width; c++) {
+	            if(TopEdgeHd[c] < 0 && (row[c] >> 24) >= 128) { TopEdgeHd[c] = (int32_t)r; found++; }
+	        }
+	    }
+	}
 
 	// Centralisation des Mipmaps partagés pour cette image PNG
 	std::vector<std::vector<uint32_t>> Mipmaps;
@@ -732,6 +747,49 @@ struct SnesHdLiquidBubble
 	bool Ring = false;                // phase d'eclatement (anneau)
 };
 
+// <2DReflect> (SNES) : reflet miroir des sprites HD sous le bord superieur du PNG du calque sol (vue de profil)
+struct SnesHdReflectInfo
+{
+	int ZIndex = 10;         // calque du sol (zindex du <background>)
+	float Intensity = 0.5f;  // opacite du reflet (0 a 1)
+	float Fade = 0.0f;       // distance (pixels SNES) au bout de laquelle le reflet disparait ; 0 = pas de fondu
+};
+
+// <2DTexture> (SNES) : texture repetee, etiree par scalex/scaley (%), defilante (scroll de la couche x ratio).
+// Remplace la couleur (ou TRANS = transparent) d'un <background> de meme zindex.
+struct SnesHdTextureInfo
+{
+	SnesHdPackBitmapInfo* Texture = nullptr;
+	bool HasKey = true;
+	uint32_t Key = 0;          // RRGGBB
+	float TexelPerPxX = 1.0f;  // texels par pixel HD = 100 / scalex
+	float TexelPerPxY = 1.0f;
+	float RatioX = 0.0f;       // defilement : scroll de la couche (px SNES) x ratio
+	float RatioY = 0.0f;
+};
+
+// Remplacement d'un pixel de fond par la texture <2DTexture> (premiere regle qui correspond)
+inline uint32_t SnesHdApplyTexture2D(const std::vector<SnesHdTextureInfo>& rules, uint32_t raw, int hdX, int hdY, int rawScrollX, int rawScrollY, int scale)
+{
+	const uint32_t alpha = raw >> 24;
+	for(const SnesHdTextureInfo& r : rules) {
+		const bool match = r.HasKey ? (alpha != 0 && (raw & 0xFFFFFFu) == r.Key) : (alpha == 0);
+		if(!match || !r.Texture || r.Texture->PixelData.empty() || r.Texture->Width == 0 || r.Texture->Height == 0) {
+			continue;
+		}
+		const int64_t tw = r.Texture->Width;
+		const int64_t th = r.Texture->Height;
+		const int64_t offX = (int64_t)std::floor((float)rawScrollX * r.RatioX * scale);
+		const int64_t offY = (int64_t)std::floor((float)rawScrollY * r.RatioY * scale);
+		int64_t tu = (int64_t)std::floor((float)(hdX + offX) * r.TexelPerPxX) % tw;
+		int64_t tv = (int64_t)std::floor((float)(hdY + offY) * r.TexelPerPxY) % th;
+		if(tu < 0) tu += tw;
+		if(tv < 0) tv += th;
+		return r.Texture->PixelData[(size_t)(tv * tw + tu)];
+	}
+	return raw;
+}
+
 struct SnesHdLiquidInfo
 {
 	std::vector<SnesHdPackCondition*> Conditions;
@@ -746,6 +804,12 @@ struct SnesHdLiquidInfo
 	float TexScale = 1.0f;                // taille d'un texel en pixels SNES
 	float Foam = 0.6f;                    // eclaircissement (ecume, crete des ondes) 0 a 1
 	float Alpha = 1.0f;                   // opacite du liquide
+	bool MaskBg = false;                  // mask=1 : le liquide ne recouvre pas les pixels opaques du <background> de meme Z (l'eau ne apparait que dans les zones transparentes)
+	bool HasMaskKey = false;              // maskcolor=RRGGBB : cette couleur de fond compte comme transparente
+	uint32_t MaskKey = 0;
+		bool NormalMode = false;              // normal=1 (view=top) : vaguelettes a normales, reflet specular, refraction de la texture
+		float Specular = 0.6f;                // normal=1 : intensite du reflet 0 a 1
+		float Refract = 4.0f;                 // normal=1 : decalage de la texture selon la pente (pixels SNES)
 	uint32_t Color = 0x1E6FB0, Deep = 0x0B2F5C;
 	SnesHdPackBitmapInfo* Texture = nullptr;
 	float Glow = 0.0f;                    // halo lumineux au-dessus de la surface (0 a 1)
@@ -1824,6 +1888,8 @@ public:
 
 	// Nappes <2DLiquid> (phase 2 SNES)
 	std::vector<std::unique_ptr<SnesHdLiquidInfo>> Liquids;
+	std::vector<SnesHdTextureInfo> Textures2D[256]; // <2DTexture> par zindex
+	std::vector<SnesHdReflectInfo> Reflects;        // <2DReflect> (un seul par pack)
 	std::vector<std::unique_ptr<SnesHdPerspectiveInfo>> Perspectives; // <2DPerspective> (SNES)
 
 	// Effets <3DParticles> (particules dans le monde Mode 7)
@@ -1920,6 +1986,12 @@ public:
 		});
 		if(_cancelLoad) return;
 		double pngMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pngStart).count();
+		// <2DReflect> : bord superieur des PNG du calque sol (une fois au chargement)
+		for(auto& rf : Reflects) {
+			for(auto& bg : Backgrounds) {
+				if(bg && bg->Bitmap && bg->ZIndex == rf.ZIndex && bg->Bitmap->TopEdgeHd.empty()) bg->Bitmap->ComputeTopEdge();
+			}
+		}
 
 		// Tuiles : liste dedupliquee (une tuile peut etre referencee sous plusieurs cles), apres la barriere des PNG
 		auto tileStart = std::chrono::steady_clock::now();
@@ -1987,6 +2059,24 @@ public:
 				MessageManager::Log("[HD-VIDEO] Precharge en memoire : " + video->Filename + " (" +
 					std::to_string(data->size() / 1024) + " Ko)");
 			}
+		}
+
+		// Estimation de la memoire decodee du pack (log [HD-MEM]) : hors audio MSU
+		{
+			uint64_t pngBytes = 0, mipBytes = 0, tileBytes = 0, m7Bytes = 0, videoBytes = 0;
+			for(auto& b : ImageFileData) {
+				pngBytes += (uint64_t)b->PixelData.size() * 4;
+				for(auto& lv : b->Mipmaps) mipBytes += (uint64_t)lv.size() * 4;
+			}
+			for(auto& t : Tiles) if(t) tileBytes += (uint64_t)t->HdTileData.size() * 4;
+			for(auto& pair : Mode7Maps) for(auto& img : pair.second) if(img) {
+				for(auto& lv : img->Mipmaps) m7Bytes += (uint64_t)lv.size() * 4;
+				for(auto& lv : img->TileMips) m7Bytes += (uint64_t)lv.size() * 4;
+			}
+			for(auto& v : Videos) if(v && v->FileData) videoBytes += v->FileData->size();
+			uint64_t total = pngBytes + mipBytes + tileBytes + m7Bytes + videoBytes;
+			auto mo = [](uint64_t b) { return std::to_string(b / (1024 * 1024)); };
+			MessageManager::Log("[HD-MEM] SNES (hors audio MSU) : PNG " + mo(pngBytes) + " Mo, mipmaps " + mo(mipBytes) + " Mo, tuiles HD " + mo(tileBytes) + " Mo, Mode 7 " + mo(m7Bytes) + " Mo, videos " + mo(videoBytes) + " Mo, total estime " + mo(total) + " Mo");
 		}
 
 		// Préchargement en mémoire des fichiers audio OGG (<msu2ogg>)

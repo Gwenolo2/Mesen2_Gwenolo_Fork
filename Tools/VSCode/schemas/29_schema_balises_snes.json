@@ -79,7 +79,8 @@
       "<nolightfxonsprite>",
       "<m7effect>",
       "<m7liquidbackground>",
-      "<m7material>"
+      "<m7material>",
+      "<2DReflect>"
     ],
     "note": "Une balise écrite avec une casse non prévue est ignorée sans message. Le plugin doit signaler la casse si la balise n'est reconnue qu'en minuscules ou en majuscules différentes."
   },
@@ -1083,10 +1084,10 @@
     },
     {
       "name": "<2DLiquid>",
-      "status": "partial",
+      "status": "implemented",
       "block": false,
       "conditions": true,
-      "syntax": "[cond]<2DLiquid>view=side|top,...",
+      "syntax": "[cond]<2DLiquid>[,view=side|top][,level=176][,depth=64][,xmin=0][,xmax=256][,ymin=0][,ymax=224][,amplitude=3][,wavelength=48][,speed=0.8][,phase=0][,scrollx=0][,texscale=1][,foam=0.6][,alpha=1][,color=1E6FB0][,deep=0B2F5C][,texture=fichier.png][,glow=0][,glowradius=24][,bubbles=0][,bubblesize=1.5][,bubblerise=0.4][,prio=95][,mask=0|1][,maskcolor=RRGGBB][,normal=0|1][,specular=0.6][,refract=4]",
       "params": [
         {
           "name": "view",
@@ -1273,9 +1274,83 @@
           "kv": true,
           "type": "path",
           "src": "code"
+        },
+        {
+          "name": "mask",
+          "kv": true,
+          "src": "code",
+          "type": "0|1",
+          "default": 0
+        },
+        {
+          "name": "maskcolor",
+          "kv": true,
+          "src": "code",
+          "type": "color",
+          "default": "FFFFFF"
+        },
+        {
+          "name": "normal",
+          "kv": true,
+          "src": "code",
+          "type": "0|1",
+          "default": 0
+        },
+        {
+          "name": "specular",
+          "kv": true,
+          "src": "code",
+          "type": "float",
+          "default": 0.6,
+          "range": "0-1"
+        },
+        {
+          "name": "refract",
+          "kv": true,
+          "src": "code",
+          "type": "float",
+          "default": 4,
+          "range": "min 0"
         }
       ],
-      "notes": "Lignes 2615-2698. Clés lues ci-dessus. Non lues par le code lu : waves, specular, reflect, style, layers, viscosity (à vérifier, voir discrepancies). view=top : xmin/xmax/ymin/ymax utilisés."
+      "notes": "Lignes 2738-2823 du loader. Format identique à NES, plus view=top, glow, bubbles, mask, normal, specular, refract. Clés non lues par le loader : waves, reflect, style, layers, viscosity."
+    },
+    {
+      "name": "<2DReflect>",
+      "status": "implemented",
+      "block": false,
+      "conditions": false,
+      "syntax": "<2DReflect>zindex=10,intensity=0.5,fade=0",
+      "params": [
+        {
+          "name": "zindex",
+          "kv": true,
+          "type": "int",
+          "src": "code",
+          "default": 10,
+          "range": "0-255",
+          "alias": [
+            "prio"
+          ]
+        },
+        {
+          "name": "intensity",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0.5,
+          "range": "0-1"
+        },
+        {
+          "name": "fade",
+          "kv": true,
+          "type": "float",
+          "src": "code",
+          "default": 0,
+          "range": "min 0"
+        }
+      ],
+      "notes": "Un seul <2DReflect> par pack, pas de conditions (ligne ignorée sinon). Lignes 2630-2660 du loader. Balise insensible à la casse."
     },
     {
       "name": "<2DPerspective>",

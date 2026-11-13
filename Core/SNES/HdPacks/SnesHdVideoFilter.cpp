@@ -2144,6 +2144,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 	// <2DLiquid> : etat par image (activite, temps, zone, surface par colonne, bulles). Dessin par bande (tache type 9).
 	auto liqHash = [](uint32_t v) -> uint32_t { v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; v ^= v >> 16; return v; };
+	// <2DLiquid> mask=1 : alpha du <background> de meme prio, par Z (rempli avant la composition, voir plus bas)
+	std::vector<std::vector<uint8_t>> bgCover(256);
+	std::vector<int64_t> bgKey(256, -1); // maskcolor par Z (-1 = pas de couleur cle)
 	for(auto& liqPtr : _framePack->Liquids) {
 		SnesHdLiquidInfo& liq = *liqPtr;
 		liq.Active = liq.MatchesCondition();
@@ -2389,7 +2392,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		const float gB = lerpF(chanF(liq.Color, 0), 255.0f, 0.5f);
 		const float rippleStrength = std::min(1.0f, liq.Amp / 6.0f);
 		const float zoneH = std::max(1.0f, liq.YMax - liq.YMin);
-
+		// mask=1 : couverture du background de meme Z (vide si pas de masque pour ce Z)
+		const std::vector<uint8_t>& cover = bgCover[z];
+		const bool useMask = liq.MaskBg && !cover.empty();
 		for(uint32_t r = r0; r < r1; r++) {
 			const float yN = (float)r / S;
 			uint32_t* row = out + (size_t)r * outWidth;
@@ -2397,6 +2402,13 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			for(uint32_t x = liq.Col0; x < liq.Col1; x++) {
 				if(ign && ign[x]) continue;
 				if(z < _zBuffer[(size_t)r * outWidth + x]) continue;
+				// Masque : le pixel de fond opaque (alpha a) reste visible, l'eau ne couvre que (255 - a)
+				float maskK = 1.0f;
+				if(useMask) {
+					const uint8_t a = cover[(size_t)r * outWidth + x];
+					if(a == 255) continue;
+					maskK = (255.0f - (float)a) / 255.0f;
+				}
 				const float xN = (float)x / S;
 				const uint32_t dst = row[x];
 				const float dr = chanF(dst, 16), dg = chanF(dst, 8), db = chanF(dst, 0);
@@ -2430,6 +2442,38 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					rr = lerpF(chanF(liq.Color, 16), chanF(liq.Deep, 16), depth);
 					gg = lerpF(chanF(liq.Color, 8), chanF(liq.Deep, 8), depth);
 					bb = lerpF(chanF(liq.Color, 0), chanF(liq.Deep, 0), depth);
+					if(liq.NormalMode) {
+						// [normal=1] vaguelettes : hauteur a 3 trains d'ondes, normale par pixel, refraction de la texture, eclairage et reflet
+						const float p1 = twoPi * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * degToRad;
+						const float p2 = twoPi * (yN / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time);
+						const float p3 = twoPi * ((xN + yN) / (liq.Wave * 1.7f) + 1.3f * liq.Speed * liq.Time);
+						const float k1 = twoPi / liq.Wave, k2 = twoPi / (liq.Wave * 0.6f), k3 = twoPi / (liq.Wave * 1.7f);
+						const float slope = 1.25f * std::max(0.01f, liq.Amp);
+						const float hn = 0.5f * (std::sin(p1) + 0.6f * std::sin(p2) + 0.4f * std::sin(p3)); // hauteur normalisee -1..1
+						const float dhdx = slope * (k1 * std::cos(p1) + 0.4f * k3 * std::cos(p3));
+						const float dhdy = slope * (0.6f * k2 * std::cos(p2) + 0.4f * k3 * std::cos(p3));
+						float nx = -dhdx, ny = -dhdy, nz = 1.0f;
+						const float nlen = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+						nx *= nlen; ny *= nlen; nz *= nlen;
+						if(tex) {
+							sampleTex((xN + dhdx * liq.Refract + liq.ScrollX * liq.Time) / liq.TexScale, (yN - liq.YMin + dhdy * liq.Refract) / liq.TexScale, rr, gg, bb);
+						}
+						// eclairage : lumiere venant du haut-gauche
+						const float ll = 1.0f / std::sqrt(0.45f * 0.45f + 0.55f * 0.55f + 0.70f * 0.70f);
+						const float Lx = -0.45f * ll, Ly = -0.55f * ll, Lz = 0.70f * ll;
+						const float diff = std::max(0.0f, nx * Lx + ny * Ly + nz * Lz);
+						const float shade = 0.80f + 0.30f * diff;
+						rr = std::min(255.0f, rr * shade); gg = std::min(255.0f, gg * shade); bb = std::min(255.0f, bb * shade);
+						// reflet speculaire (Blinn) : H = normalise(L + V), V = (0, 0, 1)
+						const float hx = Lx, hy = Ly, hz = Lz + 1.0f;
+						const float hl = 1.0f / std::sqrt(hx * hx + hy * hy + hz * hz);
+						const float ndh = std::max(0.0f, (nx * hx + ny * hy + nz * hz) * hl);
+						const float spec = std::pow(ndh, 40.0f) * liq.Specular;
+						rr = lerpF(rr, 255.0f, spec); gg = lerpF(gg, 255.0f, spec); bb = lerpF(bb, 255.0f, spec);
+						// ecume sur les cretes
+						const float crest = std::clamp((hn - 0.55f) / 0.35f, 0.0f, 1.0f) * liq.Foam * 0.6f;
+						rr = lerpF(rr, 255.0f, crest); gg = lerpF(gg, 255.0f, crest); bb = lerpF(bb, 255.0f, crest);
+					} else {
 					const float w1 = std::sin(twoPi * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * degToRad);
 					const float w2 = std::sin(twoPi * (yN / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time));
 					const float rip = 0.5f * (w1 + w2) * rippleStrength; // -k .. k
@@ -2442,8 +2486,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						rr *= dk; gg *= dk; bb *= dk;
 					}
 					if(tex) sampleTex((xN + liq.ScrollX * liq.Time) / liq.TexScale, (yN - liq.YMin) / liq.TexScale, rr, gg, bb);
+					}
 				}
-				row[x] = packF(lerpF(dr, rr, liq.Alpha), lerpF(dg, gg, liq.Alpha), lerpF(db, bb, liq.Alpha));
+				const float la = liq.Alpha * maskK;
+				row[x] = packF(lerpF(dr, rr, la), lerpF(dg, gg, la), lerpF(db, bb, la));
 			}
 		}
 
@@ -3837,6 +3883,22 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	// Composition d'une BANDE de lignes HD [bandY0, bandY1[ : toutes les taches dans l'ordre
 	// (backgrounds + tiles/sprites tries par Z). Les bandes sont disjointes -> resultat identique
 	// a un rendu sequentiel, mais reparti sur plusieurs coeurs.
+	// Couverture <2DLiquid> mask=1 : un tampon par Z utile, remis a zero chaque image
+	for(auto& liqPtr : _framePack->Liquids) {
+		if(liqPtr->Active && liqPtr->MaskBg) bgCover[liqPtr->ZIndex].assign((size_t)outWidth * hdHeight, 0);
+		if(liqPtr->Active && liqPtr->MaskBg && liqPtr->HasMaskKey) bgKey[liqPtr->ZIndex] = (int64_t)liqPtr->MaskKey;
+	}
+
+	// <2DReflect> : ordonnee HD du sol par pixel et masque des sprites, remis a zero chaque image
+	const bool reflOn = !_framePack->Reflects.empty();
+	const int reflZ = reflOn ? _framePack->Reflects[0].ZIndex : -1;
+	static std::vector<float> s_reflFloor;
+	static std::vector<uint8_t> s_reflSpr;
+	if(reflOn) {
+	    s_reflFloor.assign((size_t)outWidth * hdHeight, std::nanf(""));
+	    s_reflSpr.assign((size_t)outWidth * hdHeight, 0);
+	}
+
 	auto composeBand = [&](uint32_t bandY0, uint32_t bandY1) {
 	for(const auto& task : tasks) {
 		if(task.type == 9) {
@@ -3926,9 +3988,25 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 				uint32_t pngBaseRowIndex = pngY * bgWidth;
 				uint32_t outBaseRowIndex = hdY * hdWidth;
+				// <2DReflect> : ordonnee HD du bord superieur du PNG du sol, pour chaque colonne de cette ligne
+				if(reflOn && bg->ZIndex == reflZ && bg->Bitmap && !bg->Bitmap->TopEdgeHd.empty()) {
+				    for(uint32_t hX = 0; hX < hdWidth; hX++) {
+				        int pX = (int)hX - (int)wsBandPx + lineScrollX;
+				        bool okX = true;
+				        if(bg->TileX) { pX %= bgWidth; if(pX < 0) pX += bgWidth; }
+				        else if(pX < 0 || pX >= bgWidth) okX = false;
+				        if(!okX) continue;
+				        const int32_t edge = bg->Bitmap->TopEdgeHd[(size_t)pX];
+				        if(edge >= 0) s_reflFloor[outBaseRowIndex + hX] = (float)edge - (float)lineScrollY;
+				    }
+				}
 
 				auto blendPixel = [&](int localPngX, uint32_t localHdX) {
 					uint32_t pixelColor = bg->Bitmap->PixelData[pngBaseRowIndex + localPngX];
+	// <2DTexture> : couleur du fond remplacee par la texture (zindex du fond, defilement de la couche)
+	if(bg->ZIndex >= 0 && bg->ZIndex < 256 && !_framePack->Textures2D[bg->ZIndex].empty()) {
+		pixelColor = SnesHdApplyTexture2D(_framePack->Textures2D[bg->ZIndex], pixelColor, (int)localHdX, (int)hdY, masterScrollX, masterScrollY, (int)scale);
+	}
 					uint32_t alpha = (pixelColor >> 24);
 
 					if(bg->AlphaFactor < 1.0f) {
@@ -3937,6 +4015,14 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 
 					if(alpha > 0) {
 						uint32_t outIdx = outBaseRowIndex + localHdX;
+						// <2DLiquid> mask=1 : on note la couverture de ce fond (lignes de cette bande seulement)
+						if(bg->ZIndex >= 0 && bg->ZIndex < 256 && !bgCover[bg->ZIndex].empty()) {
+							// maskcolor : une couleur cle compte comme transparente (pas de couverture)
+							const bool keyed = bgKey[bg->ZIndex] >= 0 && (int64_t)(pixelColor & 0xFFFFFFu) == bgKey[bg->ZIndex];
+							const uint32_t cov = keyed ? 0u : alpha;
+							uint8_t& cv = bgCover[bg->ZIndex][outIdx];
+							if(cov > cv) cv = (uint8_t)cov;
+						}
 
 						if(bg->ZIndex >= _zBuffer[outIdx]) {
 							if(alpha == 255) {
@@ -4024,6 +4110,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								if(slSelfOn) s_slGroup[pixelIndex] = isSpr ? (uint16_t)(sid + 1) : 0;
 								if(noReflOn) s_noRefl[pixelIndex] = noReflTile(item.Tile) ? 1 : 0;
 							}
+							if(reflOn && alpha >= 128 && item.oamIndex < 128) s_reflSpr[pixelIndex] = 1;
 							if(maskOn && alpha >= 128) s_noLight[pixelIndex] = (item.oamIndex < 128 && (sprGroupRow[itemSprId(item)] < 0.0f || noLightTile(item.Tile))) ? 1 : 0;
 							if(ign2dOn) s_ign2D[pixelIndex] = (alpha >= 128 && ign2dTile(item.Tile)) ? 1 : 0;
 							uint32_t finalColor = hdColorFromPng;
@@ -4072,6 +4159,37 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 				if(b0 < b1) composeBand(b0, b1);
 			});
 		}
+	}
+
+	// ====================================================================
+	// <2DReflect> : sprites HD au-dessus du sol, refletes en miroir sous le sol (vue de profil, image composee)
+	if(reflOn) {
+	    const SnesHdReflectInfo& rfl = _framePack->Reflects[0];
+	    const float scF = (float)scale;
+	    for(uint32_t hy = 0; hy < hdHeight; hy++) {
+	        for(uint32_t hx = 0; hx < outWidth; hx++) {
+	            const size_t si = (size_t)hy * outWidth + hx;
+	            if(!s_reflSpr[si]) continue;
+	            const float fl = s_reflFloor[si];
+	            if(std::isnan(fl)) continue;
+	            const float cy = (float)hy + 0.5f;
+	            if(cy >= fl) continue;
+	            const float d = fl - cy;
+	            float a = rfl.Intensity;
+	            if(rfl.Fade > 0.0f) a *= std::max(0.0f, 1.0f - (d / scF) / rfl.Fade);
+	            if(a <= 0.0f) continue;
+	            const int ty = (int)std::floor(fl + d);
+	            if(ty < 0 || ty >= (int)hdHeight) continue;
+	            const uint32_t ia = (uint32_t)std::min(256.0f, a * 256.0f);
+	            const uint32_t ib = 256 - ia;
+	            const uint32_t s = out[si];
+	            uint32_t& dd = out[(size_t)ty * outWidth + hx];
+	            const uint32_t r = (((s >> 0) & 0xFF) * ia + ((dd >> 0) & 0xFF) * ib) >> 8;
+	            const uint32_t g = (((s >> 8) & 0xFF) * ia + ((dd >> 8) & 0xFF) * ib) >> 8;
+	            const uint32_t b = (((s >> 16) & 0xFF) * ia + ((dd >> 16) & 0xFF) * ib) >> 8;
+	            dd = r | (g << 8) | (b << 16) | 0xFF000000u;
+	        }
+	    }
 	}
 
 	// ====================================================================

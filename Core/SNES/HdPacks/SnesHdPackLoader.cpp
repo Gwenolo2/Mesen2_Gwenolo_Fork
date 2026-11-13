@@ -2627,8 +2627,116 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			}
 		}
 
+/// PARSING <2DReflect> (SNES) : [cond]<2DReflect>zindex=10,intensity=0.5,fade=0 (prio accepte en alias ; un seul par pack, pas de conditions)
+else if(StringUtilities::ToLower(lineContent.substr(0, 10)) == "<2dreflect>") {
+    if(!currentConditions.empty()) {
+        MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DReflect> : les conditions ne sont pas prises en charge (ligne ignoree).");
+    } else if(!outData->Reflects.empty()) {
+        MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DReflect> : un seul <2DReflect> par pack (ligne ignoree).");
+    } else {
+        std::unordered_map<std::string, std::string> cfg;
+        for(const std::string& raw : StringUtilities::Split(lineContent.substr(10), ',')) {
+            std::string tok = StringUtilities::Trim(raw);
+            size_t eq = tok.find('=');
+            if(eq == std::string::npos) {
+                if(!tok.empty()) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DReflect> : parametre sans valeur : " + tok);
+                continue;
+            }
+            cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+        }
+        auto str = [&](const char* k) -> std::string { auto it = cfg.find(k); return it == cfg.end() ? std::string() : it->second; };
+        auto num = [&](const char* k, float def) -> float {
+            std::string v = str(k);
+            if(v.empty()) return def;
+            try { return std::stof(v); } catch(...) { MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DReflect> : valeur invalide pour " + std::string(k) + " : " + v); return def; }
+        };
+        SnesHdReflectInfo info;
+        info.ZIndex = std::clamp((int)num("zindex", num("prio", 10.0f)), 0, 255);
+        info.Intensity = std::clamp(num("intensity", 0.5f), 0.0f, 1.0f);
+        info.Fade = std::max(0.0f, num("fade", 0.0f));
+        outData->Reflects.push_back(info);
+        MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DReflect> enregistre (zindex " + std::to_string(info.ZIndex) + ").");
+    }
+}
+/// PARSING <2DTexture> (SNES) : [cond]<2DTexture>texture=fichier.png,color=000000|TRANS,zindex=10,scalex=100,scaley=100,scrollx=0,scrolly=0
+// Pas de conditions pour l'instant (refusees avec une erreur).
+else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dtexture>") {
+	std::unordered_map<std::string, std::string> cfg;
+	for(const std::string& raw : StringUtilities::Split(lineContent.substr(11), ',')) {
+		std::string tok = StringUtilities::Trim(raw);
+		size_t eq = tok.find('=');
+		if(eq == std::string::npos) {
+			if(!tok.empty()) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DTexture> : parametre sans valeur : " + tok);
+			continue;
+		}
+		cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+	}
+	auto str = [&](const char* k) -> std::string { auto it = cfg.find(k); return it == cfg.end() ? std::string() : it->second; };
+	auto num = [&](const char* k, float def) -> float {
+		std::string v = str(k);
+		if(v.empty()) return def;
+		try { return std::stof(v); } catch(...) { MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DTexture> : valeur invalide pour " + std::string(k) + " : " + v); return def; }
+	};
+
+	std::string texName = StringUtilities::Trim(str("texture"));
+	std::string colorStr = StringUtilities::ToLower(StringUtilities::Trim(str("color")));
+	if(!currentConditions.empty()) {
+		MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DTexture> : les conditions ne sont pas prises en charge (ligne ignoree).");
+	} else if(texName.empty() || colorStr.empty()) {
+		MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DTexture> : texture= et color= sont obligatoires.");
+	} else {
+		SnesHdTextureInfo info;
+		bool ok = true;
+		if(colorStr == "trans") {
+			info.HasKey = false;
+		} else {
+			if(colorStr[0] == '#') colorStr = colorStr.substr(1);
+			try {
+				info.Key = (uint32_t)std::stoul(colorStr, nullptr, 16) & 0xFFFFFFu;
+				info.HasKey = true;
+			} catch(...) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DTexture> : couleur invalide : " + colorStr);
+				ok = false;
+			}
+		}
+		float sx = num("scalex", 100.0f);
+		float sy = num("scaley", 100.0f);
+		if(sx <= 0.0f || sy <= 0.0f) {
+			MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DTexture> : scalex et scaley doivent etre superieurs a 0.");
+			ok = false;
+		}
+		if(ok) {
+			int z = std::clamp((int)num("zindex", num("prio", 10.0f)), 0, 255);
+			info.TexelPerPxX = 100.0f / sx;
+			info.TexelPerPxY = 100.0f / sy;
+			info.RatioX = num("scrollx", 0.0f);
+			info.RatioY = num("scrolly", 0.0f);
+
+			std::string filename = NormalizePath(texName);
+			auto itBmp = loadedBitmaps.find(filename);
+			if(itBmp != loadedBitmaps.end()) {
+				info.Texture = itBmp->second;
+			} else {
+				auto bitmap = std::make_unique<SnesHdPackBitmapInfo>();
+				bitmap->PngName = filename;
+				VirtualFile pngFile(FolderUtilities::CombinePath(rootFolder, filename));
+				if(pngFile.IsValid()) {
+					pngFile.ReadFile(bitmap->FileData);
+				} else {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DTexture> : texture introuvable : " + filename);
+				}
+				info.Texture = bitmap.get();
+				loadedBitmaps[filename] = bitmap.get();
+				outData->ImageFileData.push_back(std::move(bitmap));
+			}
+			outData->Textures2D[z].push_back(info);
+			MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <2DTexture> enregistre (zindex " + std::to_string(z) + ").");
+		}
+	}
+}
+
 		/// PARSING <2DLiquid> (SNES) : nappe de liquide, meme format que NES, + view=top, glow, bubbles, prio (z SNES)
-		// [conditions]<2DLiquid>[,view=side|top][,level=176][,depth=64][,xmin=0][,xmax=256][,ymin=0][,ymax=224][,amplitude=3][,wavelength=48][,speed=0.8][,phase=0][,scrollx=0][,texscale=1][,foam=0.6][,alpha=1][,color=1E6FB0][,deep=0B2F5C][,texture=fichier.png][,glow=0][,glowradius=24][,bubbles=0][,bubblesize=1.5][,bubblerise=0.4][,prio=95]
+		// [conditions]<2DLiquid>[,view=side|top][,level=176][,depth=64][,xmin=0][,xmax=256][,ymin=0][,ymax=224][,amplitude=3][,wavelength=48][,speed=0.8][,phase=0][,scrollx=0][,texscale=1][,foam=0.6][,alpha=1][,color=1E6FB0][,deep=0B2F5C][,texture=fichier.png][,glow=0][,glowradius=24][,bubbles=0][,bubblesize=1.5][,bubblerise=0.4][,prio=95][,mask=0|1][,maskcolor=RRGGBB][,normal=0|1][,specular=0.6][,refract=4]
 		else if(lineContent.substr(0, 10) == "<2DLiquid>") {
 			std::unordered_map<std::string, std::string> cfg;
 			for(const std::string& raw : StringUtilities::Split(lineContent.substr(10), ',')) {
@@ -2675,6 +2783,13 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				liquid->TexScale = std::max(0.01f, num("texscale", 1.0f));
 				liquid->Foam = std::clamp(num("foam", 0.6f), 0.0f, 1.0f);
 				liquid->Alpha = std::clamp(num("alpha", 1.0f), 0.0f, 1.0f);
+				liquid->MaskBg = num("mask", 0.0f) >= 0.5f; // mask=1 : masque = alpha du <background> de meme prio
+				uint32_t mk = color("maskcolor", 0xFFFFFFFFu);
+				liquid->HasMaskKey = mk <= 0xFFFFFFu;
+				liquid->MaskKey = mk & 0xFFFFFFu;
+				liquid->NormalMode = num("normal", 0.0f) >= 0.5f; // normal=1 : vaguelettes a normales
+				liquid->Specular = std::clamp(num("specular", 0.6f), 0.0f, 1.0f);
+				liquid->Refract = std::max(0.0f, num("refract", 4.0f));
 				liquid->Color = color("color", 0x1E6FB0);
 				liquid->Deep = color("deep", 0x0B2F5C);
 				liquid->Glow = std::clamp(num("glow", 0.0f), 0.0f, 1.0f);

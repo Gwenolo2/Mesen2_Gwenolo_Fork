@@ -367,6 +367,12 @@ bool HdPackLoader::LoadPack()
 			} else if(lineContent.substr(0, 10) == "<2DLiquid>") {
 				tokens = StringUtilities::Split(lineContent.substr(10), ',');
 				ProcessLiquidTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dreflect>") {
+				tokens = StringUtilities::Split(lineContent.substr(11), ',');
+				ProcessReflectTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dtexture>") {
+				tokens = StringUtilities::Split(lineContent.substr(11), ',');
+				ProcessTexture2DTag(tokens, conditions);
 			} else if(lineContent.substr(0, 15) == "<2DPerspective>") {
 				tokens = StringUtilities::Split(lineContent.substr(15), ',');
 				ProcessPerspectiveTag(tokens, conditions);
@@ -1944,6 +1950,136 @@ void HdPackLoader::ProcessPerspectiveTag(vector<string>& tokens, vector<HdPackCo
 	_data->Perspectives.push_back(std::move(pp));
 }
 
+// <2DReflect> : reflet des sprites sous le bord superieur du PNG du calque sol (vue de profil).
+// Syntaxe : <2DReflect>prio=10,intensity=0.5,fade=0   (un seul <2DReflect> par pack, pas de conditions)
+void HdPackLoader::ProcessReflectTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(!conditions.empty()) {
+		logError("2DReflect : les conditions ne sont pas prises en charge (ligne ignoree)");
+		return;
+	}
+	if(!_data->Reflects.empty()) {
+		logError("2DReflect : un seul <2DReflect> par pack (ligne ignoree)");
+		return;
+	}
+	std::unordered_map<string, string> cfg;
+	for(const string& raw : tokens) {
+		string tok = StringUtilities::Trim(raw);
+		size_t eq = tok.find('=');
+		if(eq == string::npos) {
+			if(!tok.empty()) {
+				logError("2DReflect : parametre sans valeur : " + tok);
+			}
+			continue;
+		}
+		cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+	}
+	auto str = [&](const char* k) -> string {
+		auto it = cfg.find(k);
+		return it == cfg.end() ? string() : it->second;
+	};
+	auto num = [&](const char* k, float def) -> float {
+		string v = str(k);
+		if(v.empty()) return def;
+		try { return std::stof(v); } catch(...) { logError("2DReflect : valeur invalide pour " + string(k) + " : " + v); return def; }
+	};
+
+	NesHdReflectInfo info;
+	info.Priority = std::clamp((int)num("prio", 10.0f), 0, 49);
+	info.Intensity = std::clamp(num("intensity", 0.5f), 0.0f, 1.0f);
+	info.Fade = std::max(0.0f, num("fade", 0.0f));
+	_data->Reflects.push_back(info);
+}
+
+// <2DTexture> : texture repetee qui remplace les pixels d'une couleur (TRANS = transparents) d'un <background>
+// de meme priorite. Syntaxe : <2DTexture>texture=fichier.png,color=000000|TRANS,prio=10,scalex=100,scaley=100,scrollx=0,scrolly=0
+// Pas de conditions pour l'instant (refusees avec une erreur).
+void HdPackLoader::ProcessTexture2DTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(!conditions.empty()) {
+		logError("2DTexture : les conditions ne sont pas prises en charge (ligne ignoree)");
+		return;
+	}
+	std::unordered_map<string, string> cfg;
+	for(const string& raw : tokens) {
+		string tok = StringUtilities::Trim(raw);
+		size_t eq = tok.find('=');
+		if(eq == string::npos) {
+			if(!tok.empty()) {
+				logError("2DTexture : parametre sans valeur : " + tok);
+			}
+			continue;
+		}
+		cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+	}
+	auto str = [&](const char* k) -> string {
+		auto it = cfg.find(k);
+		return it == cfg.end() ? string() : it->second;
+	};
+	auto num = [&](const char* k, float def) -> float {
+		string v = str(k);
+		if(v.empty()) return def;
+		try { return std::stof(v); } catch(...) { logError("2DTexture : valeur invalide pour " + string(k) + " : " + v); return def; }
+	};
+
+	string tex = StringUtilities::Trim(str("texture"));
+	if(tex.empty()) {
+		logError("2DTexture : parametre texture=fichier.png manquant");
+		return;
+	}
+	string colorStr = StringUtilities::ToLower(StringUtilities::Trim(str("color")));
+	if(colorStr.empty()) {
+		logError("2DTexture : parametre color=RRGGBB ou TRANS manquant");
+		return;
+	}
+
+	NesHdTextureInfo info;
+	if(colorStr == "trans") {
+		info.HasKey = false;
+	} else {
+		if(colorStr[0] == '#') colorStr = colorStr.substr(1);
+		try {
+			info.Key = (uint32_t)std::stoul(colorStr, nullptr, 16) & 0xFFFFFFu;
+		} catch(...) {
+			logError("2DTexture : couleur invalide : " + colorStr);
+			return;
+		}
+		info.HasKey = true;
+	}
+
+	int prio = std::clamp((int)num("prio", 10.0f), 0, 49);
+	float sx = num("scalex", 100.0f);
+	float sy = num("scaley", 100.0f);
+	if(sx <= 0.0f || sy <= 0.0f) {
+		logError("2DTexture : scalex et scaley doivent etre superieurs a 0");
+		return;
+	}
+	info.TexelPerPxX = 100.0f / sx;
+	info.TexelPerPxY = 100.0f / sy;
+	info.RatioX = num("scrollx", 0.0f);
+	info.RatioY = num("scrolly", 0.0f);
+
+	// Texture chargee une seule fois, partagee par nom (comme <2DLiquid>)
+	HdPackBitmapInfo* found = nullptr;
+	for(auto& bitmap : _data->ImageFileData) {
+		if(bitmap->PngName == tex) {
+			found = bitmap.get();
+			break;
+		}
+	}
+	if(found == nullptr) {
+		_data->ImageFileData.push_back(unique_ptr<HdPackBitmapInfo>(new HdPackBitmapInfo()));
+		HdPackBitmapInfo* bitmapInfo = _data->ImageFileData.back().get();
+		bitmapInfo->PngName = tex;
+		if(!LoadFile(tex, bitmapInfo->FileData)) {
+			logError("2DTexture texture not found: " + tex);
+		}
+		found = bitmapInfo;
+	}
+	info.Texture = found;
+	_data->Textures2D[prio].push_back(info);
+}
+
 // <2DLiquid> : liquide 2D, vue de profil (phase 1). Syntaxe : [cond]<2DLiquid>cle=valeur,...
 // Cles : view (side seulement pour l'instant), prio (0-49, defaut 40), level, depth, xmin, xmax (px NES),
 // amplitude, wavelength, speed, phase, scrollx, texture, texscale, color, deep, foam, alpha.
@@ -2000,6 +2136,13 @@ void HdPackLoader::ProcessLiquidTag(vector<string>& tokens, vector<HdPackConditi
 	liquid->Foam = std::clamp(num("foam", 0.6f), 0.0f, 1.0f);
 	liquid->Alpha = std::clamp(num("alpha", 1.0f), 0.0f, 1.0f);
 	liquid->Priority = std::clamp((int)num("prio", 40.0f), 0, 49);
+	liquid->MaskBg = num("mask", 0.0f) >= 0.5f;
+	uint32_t mk = colorOf("maskcolor", 0xFFFFFFFFu);
+	liquid->HasMaskKey = mk <= 0xFFFFFFu;
+	liquid->MaskKey = mk & 0xFFFFFFu;
+	liquid->NormalMode = num("normal", 0.0f) >= 0.5f;
+	liquid->Specular = std::clamp(num("specular", 0.6f), 0.0f, 1.0f);
+	liquid->Refract = std::max(0.0f, num("refract", 4.0f));
 	liquid->IsTop = (view == "top");
 	liquid->YMin = std::clamp(num("ymin", 0.0f), 0.0f, 240.0f);
 	liquid->YMax = std::max(liquid->YMin + 1.0f, std::clamp(num("ymax", 240.0f), 0.0f, 240.0f));

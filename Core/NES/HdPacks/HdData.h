@@ -196,6 +196,12 @@ public:
 			return (bool)_resultCache;
 		}
 
+		// [fork HD] conditions pas encore rattachees a l'ecran (avant la premiere image decodee) :
+		// evite un plantage quand play_conditional_bgm les teste des la premiere frame
+		if(_screenInfo == nullptr) {
+			return false;
+		}
+
 		bool result = InternalCheckCondition(x, y, tile);
 		if(Name[0] == '!') {
 			result = !result;
@@ -225,6 +231,20 @@ public:
 	string PngName;
 	vector<uint8_t> FileData;
 	vector<uint32_t> PixelData;
+	vector<int32_t> TopEdgeHd; // <2DReflect> : rangee HD de la premiere pixel opaque par colonne (-1 = aucune)
+
+	void ComputeTopEdge()
+	{
+		TopEdgeHd.assign(Width, -1);
+		if(Width == 0 || Height == 0 || PixelData.size() < (size_t)Width * Height) return;
+		uint32_t found = 0;
+		for(uint32_t r = 0; r < Height && found < Width; r++) {
+			const uint32_t* row = PixelData.data() + (size_t)r * Width;
+			for(uint32_t c = 0; c < Width; c++) {
+				if(TopEdgeHd[c] < 0 && (row[c] >> 24) >= 128) { TopEdgeHd[c] = (int32_t)r; found++; }
+			}
+		}
+	}
 	uint32_t Width = 0;
 	uint32_t Height = 0;
 
@@ -718,6 +738,27 @@ struct HdIgnore2DRule
 	vector<HdPackCondition*> Conditions;
 };
 
+// <2DReflect> : reflet miroir des sprites sous le bord superieur du PNG du calque sol (vue de profil)
+struct NesHdReflectInfo
+{
+	int Priority = 10;       // calque du sol (priorite du <background>)
+	float Intensity = 0.5f;  // opacite du reflet (0 a 1)
+	float Fade = 0.0f;       // distance (pixels NES) au bout de laquelle le reflet disparait ; 0 = pas de fondu
+};
+
+// <2DTexture> : texture repetee, etiree par scalex/scaley (%), defilante (scrollx/scrolly x scroll PPU).
+// Remplace la couleur (ou TRANS = transparent) d'un <background> de meme priorite.
+struct NesHdTextureInfo
+{
+	HdPackBitmapInfo* Texture = nullptr;
+	bool HasKey = true;
+	uint32_t Key = 0;          // RRGGBB
+	float TexelPerPxX = 1.0f;  // texels par pixel HD = 100 / scalex
+	float TexelPerPxY = 1.0f;
+	float RatioX = 0.0f;       // defilement : scroll PPU (pixels NES) x ratio
+	float RatioY = 0.0f;
+};
+
 // <2DLiquid> (vue de profil, phase 1) : liquide sous une surface ondulee. Dimensions en pixels NES.
 // <2DSpriteLight> (NES) : halo 2D au centre d'une tile de sprite reconnue (meme principe que cote SNES).
 // Syntaxe : [cond]<2DSpriteLight>TILE[,palette|*][,radius=48][,color=FFA040][,intensity=1.4][,flicker=0][,speed=9][,mode=add|shadow][,dx=0][,dy=0]
@@ -793,6 +834,12 @@ struct NesHdLiquidInfo
 	float TexScale = 1.0f;                // taille d'un texel en pixels NES
 	float Foam = 0.6f;                    // eclaircissement de la ligne de surface (0 a 1)
 	float Alpha = 1.0f;                   // opacite du liquide (1 = remplace l'image)
+	bool MaskBg = false;                  // mask=1 : ne recouvre pas les pixels opaques du <background> de meme prio
+	bool HasMaskKey = false;              // maskcolor=RRGGBB : cette couleur de fond compte comme transparente
+	uint32_t MaskKey = 0;
+	bool NormalMode = false;              // normal=1 (view=top) : vaguelettes a normales, reflet, refraction
+	float Specular = 0.6f;                // normal=1 : intensite du reflet 0 a 1
+	float Refract = 4.0f;                 // normal=1 : decalage de la texture selon la pente (pixels NES)
 	uint32_t Color = 0x1E6FB0, Deep = 0x0B2F5C;
 	HdPackBitmapInfo* Texture = nullptr;  // PNG optionnel, repete et defilant
 	float Time = 0.0f;                    // temps d'activite (houle, defilement)
@@ -836,6 +883,8 @@ public:
 	vector<unique_ptr<NesHdVideoInfo>> Videos;
 	vector<unique_ptr<NesHdOverlayInfo>> Overlays;
 	vector<unique_ptr<NesHdLiquidInfo>> Liquids; // <2DLiquid>
+	vector<NesHdTextureInfo> Textures2D[50];     // <2DTexture>, par priorite (0-49)
+	vector<NesHdReflectInfo> Reflects;           // <2DReflect> (un seul par pack)
 	vector<unique_ptr<NesHdPerspectiveInfo>> Perspectives; // <2DPerspective>
 	vector<unique_ptr<NesHdSpriteLightInfo>> Sprite2DLights; // <2DSpriteLight>
 
@@ -939,6 +988,13 @@ public:
 		}
 		const double pngMs = pngTimer.GetElapsedMS();
 
+		// <2DReflect> : bord superieur des PNG de fond du calque sol (une fois au chargement)
+		for(const NesHdReflectInfo& rf : Reflects) {
+			for(auto& bg : BackgroundsByPriority[rf.Priority]) {
+				if(bg.Data && bg.Data->TopEdgeHd.empty()) bg.Data->ComputeTopEdge();
+			}
+		}
+
 		// 2. Tiles HD (sinon decoupees a leur premiere apparition a l'ecran) : apres la barriere des PNG
 		Timer tileTimer;
 		std::atomic<size_t> tileInits{0};
@@ -1008,6 +1064,18 @@ public:
 					video->FileData = data;
 				}
 			}
+		}
+
+		// Estimation de la memoire decodee du pack (log [HD-MEM])
+		{
+			uint64_t pngBytes = 0, tileBytes = 0, videoBytes = 0;
+			for(auto& b : BackgroundFileData) pngBytes += (uint64_t)b->PixelData.size() * 4;
+			for(auto& b : ImageFileData) pngBytes += (uint64_t)b->PixelData.size() * 4;
+			for(auto& t : Tiles) if(t) tileBytes += (uint64_t)t->HdTileData.size() * 4;
+			for(auto& v : Videos) if(v && v->FileData) videoBytes += v->FileData->size();
+			uint64_t total = pngBytes + tileBytes + videoBytes + (uint64_t)oggBytes;
+			auto mo = [](uint64_t b) { return std::to_string(b / (1024 * 1024)); };
+			MessageManager::Log("[HD-MEM] NES : PNG " + mo(pngBytes) + " Mo, tuiles HD " + mo(tileBytes) + " Mo, OGG precharges " + mo(oggBytes) + " Mo, videos " + mo(videoBytes) + " Mo, total estime " + mo(total) + " Mo");
 		}
 
 		MessageManager::Log("[HDPack] Preload done: " +

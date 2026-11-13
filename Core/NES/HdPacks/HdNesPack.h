@@ -58,6 +58,8 @@ private:
 		int32_t BgScrollY = 0;
 		int16_t BgMinX = -1;
 		int16_t BgMaxX = -1;
+		int32_t RawScrollX = 0; // scroll PPU brut de la ligne (pour <2DTexture>)
+		int32_t RawScrollY = 0;
 	};
 
 	static constexpr uint8_t PriorityLevelsPerLayer = 10;
@@ -93,6 +95,9 @@ private:
 	// preparation, resolution des tiles, dessin, particules, calques, distorsion, videos
 	double _passMs[7] = {};
 	int _passFrames = 0;
+	vector<uint8_t> _sprNes;   // <2DReflect> : 1 par pixel NES si un sprite opaque y est affiche
+	vector<float> _reflFloor;  // <2DReflect> : ordonnee ecran (NES) du sol par pixel, NaN = pas de sol
+	bool _reflectEnabled = false;
 	vector<uint8_t> _ignNes;                  // 1 par pixel NES : pixel net pendant la distorsion (<Ignore2DOverlays>)
 	bool _zEnabled = false;
 	
@@ -111,7 +116,10 @@ private:
 	__forceinline void DrawBackgroundLayer(const HdBgConfig& bgConfig, uint32_t x, uint32_t y, uint32_t* outputBuffer, uint32_t screenWidth);
 
 	template<HdPackBlendMode blendMode>
-	__forceinline void DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *outputBuffer, uint32_t x, uint32_t y, uint32_t screenWidth);
+	__forceinline void DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *outputBuffer, uint32_t x, uint32_t y, uint32_t screenWidth, uint32_t screenX, uint32_t screenY, int32_t rawScrollX, int32_t rawScrollY, const vector<NesHdTextureInfo>* tex2d);
+	void ComputeReflectFloorLine(uint32_t nesY, const HdBgConfig* lineCfg, uint32_t xStart, uint32_t xEnd);
+	void ProcessReflections(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
+	uint32_t ApplyTexture2D(const vector<NesHdTextureInfo>& rules, uint32_t raw, int32_t hdX, int32_t hdY, int32_t rawScrollX, int32_t rawScrollY);
 
 	void OnLineStart(HdPpuPixelInfo &lineFirstPixel);
 	void ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8_t y, HdBgConfig* lineCfg);
@@ -143,6 +151,9 @@ private:
 	void DrawLiquidBand(int band, uint32_t nesX, uint32_t nesY, uint32_t* block, uint32_t screenWidth);
 	uint32_t BlendLiquidPixel(const NesHdLiquidInfo& liq, float xN, float yN, float surf, uint32_t dst);
 	uint32_t _liquidOffX = 0, _liquidOffY = 0;
+	// <2DLiquid> mask=1 : couverture des <background> par priorite (alpha HD), remise a zero chaque image
+	std::vector<uint8_t> _liqCover[50];
+	int64_t _liqKey[50];                 // maskcolor par priorite (-1 = aucune)
 	int32_t GetLayerIndex(uint8_t priority);
 	void OnBeforeApplyFilter();
 
