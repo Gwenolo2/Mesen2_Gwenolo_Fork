@@ -29,6 +29,7 @@ canvas { width: 100%; height: auto; image-rendering: pixelated; display: block; 
 .row { display: grid; grid-template-columns: 1fr 64px; gap: 6px 10px; align-items: center; margin-bottom: 8px }
 .row label { font-size: 13px; color: var(--muted) }
 .row output { font-family: var(--f-mono); font-size: 12px; text-align: right }
+.row input[type=checkbox] { justify-self: end }
 input[type=range] { width: 100%; grid-column: 1 / -1 }
 select, input[type=color] { font: inherit; background: var(--field); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px }
 input[type=color] { width: 100%; height: 30px; padding: 2px }
@@ -41,7 +42,7 @@ button.ghost { background: var(--accent-soft); color: var(--accent) }
 </head>
 <body>
 <h1>Atelier MESEN 2D Liquid</h1>
-<p class="sub">Aperçu approximatif de <code>&lt;2DLiquid&gt;</code> (SNES et NES). Le moteur reste la référence : pas de textures ni de réfraction ici.</p>
+<p class="sub">Aperçu approximatif de <code>&lt;2DLiquid&gt;</code> (SNES et NES). Le moteur reste la référence : pas de textures ici. Le trou transparent et l'aplat sombre de l'aperçu servent à voir <code>mask=1</code> et <code>maskcolor</code>.</p>
 
 <div class="layout">
   <div class="card preview">
@@ -63,6 +64,7 @@ button.ghost { background: var(--accent-soft); color: var(--accent) }
 
 <script>
 // Réglages : clé, libellé, bornes, défaut. Les défauts correspondent au moteur (voir doc 20 et 19).
+// opt : case à cocher qui active la valeur (maskcolor). top : vue top seulement. side : vue side seulement.
 const FIELDS = [
   { k: "level",      l: "Niveau (lignes, profil)",   min: 0,  max: 240, step: 1,    d: 176, side: true },
   { k: "depth",      l: "Profondeur (lignes)",       min: 1,  max: 120, step: 1,    d: 64,  side: true },
@@ -77,6 +79,11 @@ const FIELDS = [
   { k: "alpha",      l: "Opacité",                   min: 0,  max: 1,   step: 0.05, d: 1 },
   { k: "color",      l: "Couleur de surface",        col: true,          d: "#1E6FB0" },
   { k: "deep",       l: "Couleur profonde",          col: true,          d: "#0B2F5C" },
+  { k: "mask",       l: "Masque (mask=1, vue top)",  min: 0,  max: 1,   step: 1,    d: 0,   top: true },
+  { k: "maskcolor",  l: "maskcolor (RRGGBB)",        col: true, opt: true, d: "#2A2A2A", top: true },
+  { k: "normal",     l: "Normales (normal=1, top)",  min: 0,  max: 1,   step: 1,    d: 0,   top: true },
+  { k: "specular",   l: "Reflet (specular)",         min: 0,  max: 1,   step: 0.05, d: 0.6, top: true },
+  { k: "refract",    l: "Réfraction (px)",           min: 0,  max: 12,  step: 0.5,  d: 4,   top: true },
   { k: "glow",       l: "Halo (glow)",               min: 0,  max: 1,   step: 0.05, d: 0,   side: true },
   { k: "glowradius", l: "Rayon du halo (lignes)",    min: 1,  max: 64,  step: 1,    d: 24,  side: true },
   { k: "bubbles",    l: "Bulles",                    min: 0,  max: 64,  step: 1,    d: 0,   side: true },
@@ -87,7 +94,7 @@ const FIELDS = [
 const PLAT = { snes: { w: 256, h: 224, pmax: 255, pdef: 95 }, nes: { w: 256, h: 240, pmax: 49, pdef: 40 } };
 const $ = (id) => document.getElementById(id);
 const cv = $("cv"), ctx = cv.getContext("2d");
-let W = 256, H = 224, bgData = null, img = null, bubbleMap = null, frameNo = 0;
+let W = 256, H = 224, bgRGB = null, bgRaw = null, bgA = null, img = null, bubbleMap = null, frameNo = 0;
 
 // --- Construction des réglages ---
 function buildControls() {
@@ -98,13 +105,17 @@ function buildControls() {
     row.className = "row"; row.id = "row-" + f.k;
     const lab = document.createElement("label"); lab.htmlFor = f.k; lab.textContent = f.l;
     const val = document.createElement("output"); val.id = "o-" + f.k;
+    let slot = val;
+    if (f.opt) {
+      slot = document.createElement("input"); slot.type = "checkbox"; slot.id = f.k + "-on";
+      slot.addEventListener("change", refresh);
+    }
     const inp = document.createElement("input");
     inp.id = f.k;
     if (f.col) { inp.type = "color"; inp.value = f.d; inp.style.gridColumn = "2"; }
     else { inp.type = "range"; inp.min = f.min; inp.max = f.max; inp.step = f.step; inp.value = f.d; }
     inp.addEventListener("input", () => { if (!f.col) val.textContent = inp.value; });
-    row.append(lab, val, inp);
-    if (f.col) { row.append(); row.style.gridTemplateColumns = "1fr 64px"; }
+    row.append(lab, slot, inp);
     box.append(row);
     val.textContent = f.col ? "" : f.d;
   }
@@ -130,6 +141,7 @@ function vals() {
   const v = { plat: $("plat").value, view: $("view").value };
   for (const f of FIELDS) {
     const el = $(f.k);
+    if (f.opt) { v[f.k] = $(f.k + "-on").checked ? el.value : ""; continue; }
     v[f.k] = f.col ? el.value : parseFloat(el.value);
     if (!f.col) { const o = $("o-" + f.k); if (o) o.textContent = el.value; }
   }
@@ -149,6 +161,8 @@ function tagOf(v) {
     if (f.k === "prio") { parts.push("prio=" + v.prio); continue; }
     if (f.side && v.view !== "side") continue;
     if (f.top && v.view !== "top") continue;
+    if (f.k === "maskcolor") { if (v.mask === 1 && v.maskcolor) parts.push("maskcolor=" + v.maskcolor.slice(1).toUpperCase()); continue; }
+    if ((f.k === "specular" || f.k === "refract") && v.normal !== 1) continue;
     const cur = v[f.k];
     if (f.col) {
       if (cur.toLowerCase() !== f.d.toLowerCase()) parts.push(f.k + "=" + cur.slice(1).toUpperCase());
@@ -159,7 +173,7 @@ function tagOf(v) {
   return "[cond]<2DLiquid>" + parts.join(",");
 }
 
-// --- Fond de scène (décor + sprites) ---
+// --- Fond de scène (décor + trou transparent + aplat maskcolor) ---
 function setup() {
   const p = PLAT[$("plat").value];
   W = p.w; H = p.h;
@@ -172,9 +186,24 @@ function setup() {
   g.fillStyle = "#3d2b3d";
   for (let x = 0; x < W; x += 32) g.fillRect(x, 40 + ((x * 7) % 30), 30, 6);
   g.fillStyle = "#e6e0ff"; g.fillRect(40, 70, 16, 24); g.fillRect(190, 96, 16, 24);
-  bgData = g.getImageData(0, 0, W, H).data;
+  // Trou transparent (alpha 0) : ce que le masque laisse à l'eau. Aplat sombre : couleur maskcolor.
+  g.clearRect(150, 120, 70, 44);
+  g.fillStyle = "#2A2A2A"; g.fillRect(20, 150, 50, 30);
+  const raw = g.getImageData(0, 0, W, H).data;
+  const n = W * H;
+  bgRGB = new Float32Array(n * 3); bgRaw = new Uint8Array(n * 3); bgA = new Uint8Array(n);
+  for (let k = 0; k < n; k++) {
+    const x = k % W, y = (k / W) | 0;
+    const a = raw[k * 4 + 3]; bgA[k] = a;
+    const chk = (((x >> 3) + (y >> 3)) & 1) ? 150 : 210; // damier derrière les zones transparentes
+    const kk = a / 255;
+    for (let c3 = 0; c3 < 3; c3++) {
+      bgRaw[k * 3 + c3] = raw[k * 4 + c3];
+      bgRGB[k * 3 + c3] = raw[k * 4 + c3] * kk + chk * (1 - kk);
+    }
+  }
   img = ctx.createImageData(W, H);
-  bubbleMap = new Float32Array(W * H);
+  bubbleMap = new Float32Array(n);
 }
 
 // --- Rendu d'une image (mêmes formules que le moteur, sans texture) ---
@@ -184,13 +213,16 @@ const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 const lerp = (a, b, f) => a + (b - a) * f;
 
 function render(v, t) {
-  const out = img.data, bg = bgData;
+  const out = img.data, bg = bgRGB;
   const [cr, cg, cb] = hexRGB(v.color), [dr_, dg_, db_] = hexRGB(v.deep);
+  const mcRGB = v.maskcolor ? hexRGB(v.maskcolor) : null;
   const twoPi = 2 * Math.PI;
   const x0 = clamp(Math.floor(v.xmin), 0, W), x1 = clamp(Math.floor(v.xmax), 0, W);
   const surf = new Float32Array(W);
   let top = 1e9;
   const isTop = v.view === "top";
+  const useNormal = isTop && v.normal === 1;
+  const useMask = isTop && v.mask === 1;
   if (!isTop) {
     for (let x = x0; x < x1; x++) {
       const s = v.level + v.amplitude * Math.sin(twoPi * (x / v.wavelength + v.speed * t));
@@ -224,20 +256,61 @@ function render(v, t) {
   const zoneH = Math.max(1, v.ymax - v.ymin);
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      const br = bg[i], bgg = bg[i + 1], bbl = bg[i + 2];
+      const k = y * W + x, i3 = k * 3, i4 = k * 4;
+      const br = bg[i3], bgg = bg[i3 + 1], bbl = bg[i3 + 2];
       let R = br, G = bgg, B = bbl;
       if (x >= x0 && x < x1) {
         if (isTop) {
           if (y >= v.ymin && y < v.ymax) {
             const depth = clamp((y - v.ymin) / zoneH, 0, 1);
-            let rr = lerp(cr, dr_, depth), gg = lerp(cg, dg_, depth), bb = lerp(cb, db_, depth);
-            const w1 = Math.sin(twoPi * (x / v.wavelength + v.speed * t));
-            const w2 = Math.sin(twoPi * (y / (v.wavelength * 0.6) - 0.7 * v.speed * t));
-            const rip = 0.5 * (w1 + w2) * Math.min(1, v.amplitude / 6);
-            if (rip >= 0) { rr = lerp(rr, 255, rip * v.foam); gg = lerp(gg, 255, rip * v.foam); bb = lerp(bb, 255, rip * v.foam); }
-            else { const dk = 1 + rip * 0.3; rr *= dk; gg *= dk; bb *= dk; }
-            R = lerp(br, rr, v.alpha); G = lerp(bgg, gg, v.alpha); B = lerp(bbl, bb, v.alpha);
+            const baseR = lerp(cr, dr_, depth), baseG = lerp(cg, dg_, depth), baseB = lerp(cb, db_, depth);
+            let rr, gg, bb;
+            if (useNormal) {
+              // Trois trains d'ondes donnent une hauteur h ; sa pente donne la normale.
+              const ph1 = twoPi * (x / v.wavelength + v.speed * t);
+              const ph2 = twoPi * (y / (v.wavelength * 0.6) - 0.7 * v.speed * t);
+              const ph3 = twoPi * ((x + y) / (v.wavelength * 1.7) + 1.3 * v.speed * t);
+              const a = v.amplitude / 3;
+              const h = a * (Math.sin(ph1) + Math.sin(ph2) + Math.sin(ph3));
+              const dhx = a * twoPi * ((1 / v.wavelength) * Math.cos(ph1) + (1 / (v.wavelength * 1.7)) * Math.cos(ph3));
+              const dhy = a * twoPi * ((1 / (v.wavelength * 0.6)) * Math.cos(ph2) + (1 / (v.wavelength * 1.7)) * Math.cos(ph3));
+              const K = 4;
+              const nxv = -dhx * K, nyv = -dhy * K;
+              const nl = Math.hypot(nxv, nyv, 1);
+              const nx = nxv / nl, ny = nyv / nl, nz = 1 / nl;
+              // Réfraction : on lit le fond décalé selon la pente, puis on le teinte
+              const sx = clamp(Math.round(x + nx * v.refract), 0, W - 1), sy = clamp(Math.round(y + ny * v.refract), 0, H - 1);
+              const si = (sy * W + sx) * 3;
+              let wr = lerp(bg[si], baseR, 0.6), wg = lerp(bg[si + 1], baseG, 0.6), wb = lerp(bg[si + 2], baseB, 0.6);
+              // Diffus (lumière venant du haut-gauche)
+              const Lx = -0.4, Ly = -0.6, Lz = 0.7, Ll = Math.hypot(Lx, Ly, Lz);
+              const diff = Math.max(0, (nx * Lx + ny * Ly + nz * Lz) / Ll);
+              const dk = 0.75 + 0.35 * diff;
+              wr *= dk; wg *= dk; wb *= dk;
+              // Reflet spéculaire (Blinn)
+              const Hx = Lx / Ll, Hy = Ly / Ll, Hz = Lz / Ll + 1, Hl = Math.hypot(Hx, Hy, Hz);
+              const spec = Math.pow(Math.max(0, (nx * Hx + ny * Hy + nz * Hz) / Hl), 40) * v.specular;
+              wr = lerp(wr, 255, spec); wg = lerp(wg, 255, spec); wb = lerp(wb, 255, spec);
+              // Écume sur les crêtes
+              const crest = clamp((h / a - 1) * 2, 0, 1) * v.foam;
+              wr = lerp(wr, 255, crest); wg = lerp(wg, 255, crest); wb = lerp(wb, 255, crest);
+              rr = wr; gg = wg; bb = wb;
+            } else {
+              const w1 = Math.sin(twoPi * (x / v.wavelength + v.speed * t));
+              const w2 = Math.sin(twoPi * (y / (v.wavelength * 0.6) - 0.7 * v.speed * t));
+              const rip = 0.5 * (w1 + w2) * Math.min(1, v.amplitude / 6);
+              rr = baseR; gg = baseG; bb = baseB;
+              if (rip >= 0) { rr = lerp(rr, 255, rip * v.foam); gg = lerp(gg, 255, rip * v.foam); bb = lerp(bb, 255, rip * v.foam); }
+              else { const dk = 1 + rip * 0.3; rr *= dk; gg *= dk; bb *= dk; }
+            }
+            // Couverture : mask=1 ne laisse l'eau que sur les pixels transparents (ou de couleur maskcolor)
+            let cov = 1;
+            if (useMask) {
+              const isMc = mcRGB && bgRaw[i3] === mcRGB[0] && bgRaw[i3 + 1] === mcRGB[1] && bgRaw[i3 + 2] === mcRGB[2];
+              cov = isMc ? 1 : 1 - bgA[k] / 255;
+            }
+            const f = v.alpha * cov;
+            R = lerp(br, rr, f); G = lerp(bgg, gg, f); B = lerp(bbl, bb, f);
           }
         } else {
           const s = surf[x];
@@ -255,11 +328,11 @@ function render(v, t) {
             if (y - s < 1) { rr = lerp(rr, 255, v.foam); gg = lerp(gg, 255, v.foam); bb = lerp(bb, 255, v.foam); }
             R = lerp(br, rr, v.alpha); G = lerp(bgg, gg, v.alpha); B = lerp(bbl, bb, v.alpha);
           }
-          const q = bubbleMap[y * W + x];
+          const q = bubbleMap[k];
           if (q > 0) { R = lerp(R, 255, q); G = lerp(G, 255, q); B = lerp(B, 255, q); }
         }
       }
-      out[i] = clamp(Math.round(R), 0, 255); out[i + 1] = clamp(Math.round(G), 0, 255); out[i + 2] = clamp(Math.round(B), 0, 255); out[i + 3] = 255;
+      out[i4] = clamp(Math.round(R), 0, 255); out[i4 + 1] = clamp(Math.round(G), 0, 255); out[i4 + 2] = clamp(Math.round(B), 0, 255); out[i4 + 3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -269,7 +342,8 @@ function refresh() {
   const v = vals();
   $("out").value = tagOf(v);
   $("info").textContent = v.plat.toUpperCase() + " " + W + "×" + H + " — " + (v.view === "top" ? "zone ondulée" : "profil") +
-    (v.plat === "nes" ? " — prio NES : bande " + Math.floor(v.prio / 10) : " — prio SNES : z " + v.prio);
+    (v.plat === "nes" ? " — prio NES : bande " + Math.floor(v.prio / 10) : " — prio SNES : z " + v.prio) +
+    (v.mask === 1 ? " — mask=1 : le prio doit être celui du <background> visé" : "");
 }
 
 // Animation : 60 images par seconde logiques, comme le moteur (temps = images / 60)

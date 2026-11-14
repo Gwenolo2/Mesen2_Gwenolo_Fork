@@ -617,6 +617,19 @@ void GbHdPackBuilder::WriteOutput()
 				continue;
 			}
 
+			// Tri AVANT le canevas : le PNG et les lignes <tile> doivent suivre le meme ordre
+			if(wantSprites) {
+				// Tiles des objets d'abord, dans l'ordre des objets ; les autres gardent l'ordre de capture
+				auto orderOf = [](const Tile& t) -> uint64_t {
+					uint8_t flags = 1 | (t.HFlip ? 2 : 0) | (t.VFlip ? 4 : 0);
+					auto it = _spriteOrder.find(std::make_tuple(t.Hash, t.Palette, flags));
+					return it == _spriteOrder.end() ? (1ULL << 40) : it->second;
+				};
+				std::stable_sort(tiles.begin(), tiles.end(), [&](const Tile& a, const Tile& b) {
+					return orderOf(a) < orderOf(b);
+				});
+			}
+
 			int rows = ((int)tiles.size() + cols - 1) / cols;
 			int canvasW = cols * tileSize;
 			int canvasH = rows * tileSize;
@@ -640,18 +653,6 @@ void GbHdPackBuilder::WriteOutput()
 			std::string relPath = std::string(wantSprites ? "Tiles/Sprites/" : "Tiles/Backgrounds/") + pngName;
 			if(!PNGHelper::WritePNG(FolderUtilities::CombinePath(dir, pngName), canvas.data(), canvasW, canvasH, 32)) {
 				MessageManager::Log("[HD-GB] Échec d'écriture : " + FolderUtilities::CombinePath(dir, pngName));
-			}
-
-			if(wantSprites) {
-				// Tiles des objets d'abord, dans l'ordre des objets ; les autres gardent l'ordre de capture
-				auto orderOf = [](const Tile& t) -> uint64_t {
-					uint8_t flags = 1 | (t.HFlip ? 2 : 0) | (t.VFlip ? 4 : 0);
-					auto it = _spriteOrder.find(std::make_tuple(t.Hash, t.Palette, flags));
-					return it == _spriteOrder.end() ? (1ULL << 40) : it->second;
-				};
-				std::stable_sort(tiles.begin(), tiles.end(), [&](const Tile& a, const Tile& b) {
-					return orderOf(a) < orderOf(b);
-				});
 			}
 
 			hires << "<img>" << relPath << "\n";

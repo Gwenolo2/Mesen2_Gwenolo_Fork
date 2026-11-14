@@ -517,6 +517,7 @@ void GbPpu::RecordHdPixel(const GbFifoEntry& e, uint8_t layer)
 	p.Row = e.HdRow;
 	p.Col = e.HdCol;
 	p.Layer = layer;
+	p.BgColor = (layer == 1) ? e.Color : 0;
 }
 
 void GbPpu::WriteBgPixel(uint8_t colorIndex)
@@ -925,7 +926,36 @@ void GbPpu::SendFrame()
 	_isFirstFrame = false;
 
 	RenderedFrame frame(_currentBuffer, GbConstants::ScreenWidth, GbConstants::ScreenHeight, 1.0, _state.FrameCount, _gameboy->GetControlManager()->GetPortStates());
-	frame.Data = _hdEnabled ? (void*)_hdInfo[_hdIndex].data() : nullptr;
+	if(_hdEnabled) {
+		// Sprites visibles de l'image (40 entrees OAM), avec le hash de leurs tiles
+		std::vector<GbHdSpriteInfo>& list = _hdSprites[_hdIndex];
+		list.clear();
+		const int spriteH = _state.LargeSprites ? 16 : 8;
+		for(int i = 0; i < 40; i++) {
+			int sy = (int)_oam[i * 4] - 16;
+			int sx = (int)_oam[i * 4 + 1] - 8;
+			if(sy <= -spriteH || sy >= (int)GbConstants::ScreenHeight || sx <= -8 || sx >= (int)GbConstants::ScreenWidth) {
+				continue;
+			}
+			uint8_t tile = _oam[i * 4 + 2];
+			uint8_t attr = _oam[i * 4 + 3];
+			uint16_t bank = (_state.CgbEnabled && (attr & 0x08)) ? 0x2000 : 0;
+			uint8_t base = _state.LargeSprites ? (uint8_t)(tile & 0xFE) : tile;
+			GbHdSpriteInfo s;
+			s.X = (int32_t)sx;
+			s.Y = (int32_t)sy;
+			s.Height = (uint8_t)spriteH;
+			s.Flags = (uint8_t)(((attr & 0x20) ? 2 : 0) | ((attr & 0x40) ? 4 : 0));
+			s.BgPriority = (attr & 0x80) != 0;
+			s.Palette = _state.CgbEnabled ? (uint32_t)(8 + (attr & 0x07)) : (uint32_t)(256 + ((attr & 0x10) ? _state.ObjPalette1 : _state.ObjPalette0));
+			s.Hash[0] = HashHdTile(&_vram[(uint16_t)((base * 16) | bank)]);
+			s.Hash[1] = _state.LargeSprites ? HashHdTile(&_vram[(uint16_t)(((base | 1) * 16) | bank)]) : 0;
+			list.push_back(s);
+		}
+	}
+	_hdFrame[_hdIndex].Pixels = _hdInfo[_hdIndex].data();
+	_hdFrame[_hdIndex].Sprites = &_hdSprites[_hdIndex];
+	frame.Data = _hdEnabled ? (void*)&_hdFrame[_hdIndex] : nullptr;
 	bool rewinding = _emu->GetRewindManager()->IsRewinding();
 	_emu->GetVideoDecoder()->UpdateFrame(frame, rewinding, rewinding);
 

@@ -8,10 +8,11 @@
 
 class Emulator;
 
-// Filtre video HD Game Boy (etapes 3 et 4 : fonds et sprites tile par tile).
-// Chaque pixel de fond ou d'objet dont la tile est dans le pack est remplace par le carre scale x scale
-// correspondant dans l'atlas. Le PPU a deja tranche la priorite fond/objet et les pixels couleur 0 des objets
-// (jamais enregistres comme gagnants). Les autres pixels (tiles absentes) gardent le rendu par defaut.
+// Filtre video HD Game Boy (etapes 3 et 4).
+// Fonds : chaque pixel de fond dont la tile est dans le pack est remplace par le bloc scale x scale de l'atlas.
+// Sprites : dessines par empreinte (8x8 ou 8x16) a partir de la liste OAM de l'image. Un pixel n'est
+// remplace que s'il appartient a ce sprite (ou au fond, si le PPU ne l'a pas attribue a un autre objet)
+// et si le pixel de l'atlas est opaque.
 class GbHdVideoFilter : public GbDefaultVideoFilter
 {
 private:
@@ -23,11 +24,10 @@ private:
 	uint64_t _hdPixels = 0;
 	uint64_t _hdSpritePixels = 0;
 	uint64_t _fallbackPixels = 0;
-	uint64_t _transparentPixels = 0;
-	uint32_t _samplesLogged = 0;
 	uint32_t _frameCounter = 0;
 
 	void LoadImages();
+	bool SamplePixel(const GbHdTileRef& ref, uint32_t col, uint32_t row, uint32_t dx, uint32_t dy, uint32_t& pixel);
 
 protected:
 	void OnBeforeApplyFilter() override;

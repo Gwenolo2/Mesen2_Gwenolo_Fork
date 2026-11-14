@@ -1,6 +1,5 @@
 #include "pch.h"
 #include <cstdio>
-#include <cstring>
 #include <tuple>
 #include "Gameboy/GbHdVideoFilter.h"
 #include "Gameboy/GbConstants.h"
@@ -31,6 +30,7 @@ void GbHdVideoFilter::LoadImages()
 		VirtualFile file(FolderUtilities::CombinePath(_pack.FolderPath, img));
 		if(file.IsValid() && file.ReadFile(raw) && PNGHelper::ReadPNG(raw, pixels, w, h)) {
 			loaded++;
+			MessageManager::Log("[HD-GB-FLT] image " + img + " : " + std::to_string(w) + "x" + std::to_string(h) + ", pixels " + std::to_string(pixels.size()));
 		} else {
 			MessageManager::Log("[HD-GB-FLT] Image illisible : " + img);
 			pixels.clear();
@@ -59,62 +59,109 @@ FrameInfo GbHdVideoFilter::GetFrameInfo()
 	return frameInfo;
 }
 
+// Pixel (dx,dy) du bloc scale x scale de la tile (col,row) dans l'atlas. False si hors image.
+bool GbHdVideoFilter::SamplePixel(const GbHdTileRef& ref, uint32_t col, uint32_t row, uint32_t dx, uint32_t dy, uint32_t& pixel)
+{
+	if(ref.ImageIndex >= _images.size()) {
+		return false;
+	}
+	const std::vector<uint32_t>& img = _images[ref.ImageIndex];
+	uint32_t imgW = _imageWidths[ref.ImageIndex];
+	uint32_t imgH = _imageHeights[ref.ImageIndex];
+	uint32_t sx = ref.X + col * _scale + dx;
+	uint32_t sy = ref.Y + row * _scale + dy;
+	if(img.empty() || sx >= imgW || sy >= imgH) {
+		return false;
+	}
+	pixel = img[sy * imgW + sx];
+	return true;
+}
+
 void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 {
 	uint32_t* out = GetOutputBuffer();
-	const GbHdPixelInfo* info = static_cast<const GbHdPixelInfo*>(_frameData);
+	const GbHdFrameData* frameData = static_cast<const GbHdFrameData*>(_frameData);
+	const GbHdPixelInfo* info = frameData ? frameData->Pixels : nullptr;
+	const std::vector<GbHdSpriteInfo>* sprites = frameData ? frameData->Sprites : nullptr;
 	const uint32_t outWidth = GbConstants::ScreenWidth * _scale;
 
+	// Passe 1 : fonds HD ; le reste (sprites compris) en rendu par defaut agrandi
 	for(uint32_t y = 0; y < GbConstants::ScreenHeight; y++) {
 		for(uint32_t x = 0; x < GbConstants::ScreenWidth; x++) {
 			uint32_t offset = y * GbConstants::ScreenWidth + x;
-			bool drawn = false;
-
-			if(info && (info[offset].Layer == 1 || info[offset].Layer == 2)) {
-				auto it = _pack.Tiles.find(std::make_tuple(info[offset].Hash, info[offset].Palette, info[offset].Flags));
+			uint32_t fallback = GetPixel(ppuOutputBuffer, offset);
+			const GbHdPixelInfo* p = info ? &info[offset] : nullptr;
+			const GbHdTileRef* ref = nullptr;
+			if(p && p->Layer == 1) {
+				auto it = _pack.Tiles.find(std::make_tuple(p->Hash, p->Palette, p->Flags));
 				if(it != _pack.Tiles.end()) {
-					const GbHdTileRef& ref = it->second;
-					const std::vector<uint32_t>& img = _images[ref.ImageIndex];
-					uint32_t imgW = _imageWidths[ref.ImageIndex];
-					uint32_t imgH = _imageHeights[ref.ImageIndex];
-					uint32_t srcX = ref.X + info[offset].Col * _scale;
-					uint32_t srcY = ref.Y + info[offset].Row * _scale;
-					if(!img.empty() && srcX + _scale <= imgW && srcY + _scale <= imgH) {
-						for(uint32_t dy = 0; dy < _scale; dy++) {
-							const uint32_t* srcRow = &img[(srcY + dy) * imgW + srcX];
-							uint32_t* dstRow = out + (y * _scale + dy) * outWidth + x * _scale;
-							memcpy(dstRow, srcRow, _scale * sizeof(uint32_t));
-							for(uint32_t dx = 0; dx < _scale; dx++) {
-								if((srcRow[dx] >> 24) == 0) {
-									_transparentPixels++;
-									if(_samplesLogged < 5) {
-										_samplesLogged++;
-										char hashStr[32];
-										snprintf(hashStr, sizeof(hashStr), "%016llX", (unsigned long long)info[offset].Hash);
-										MessageManager::Log("[HD-GB-FLT] pixel transparent : hash " + std::string(hashStr) + ", palette " + std::to_string(info[offset].Palette) + ", flags " + std::to_string(info[offset].Flags) + ", image " + std::to_string(ref.ImageIndex) + ", tuile (" + std::to_string(ref.X) + "," + std::to_string(ref.Y) + "), case (" + std::to_string(info[offset].Col) + "," + std::to_string(info[offset].Row) + "), valeur 0x" + std::to_string(srcRow[dx]));
-									}
-								}
-							}
-						}
-						drawn = true;
-						_hdPixels++;
-						if(info[offset].Layer == 2) {
-							_hdSpritePixels++;
-						}
-					}
+					ref = &it->second;
 				}
 			}
+			if(ref) {
+				_hdPixels++;
+			} else {
+				_fallbackPixels++;
+			}
+			for(uint32_t dy = 0; dy < _scale; dy++) {
+				uint32_t* dstRow = out + (y * _scale + dy) * outWidth + x * _scale;
+				for(uint32_t dx = 0; dx < _scale; dx++) {
+					uint32_t px = 0;
+					dstRow[dx] = (ref && SamplePixel(*ref, p->Col, p->Row, dx, dy, px) && (px >> 24)) ? px : fallback;
+				}
+			}
+		}
+	}
 
-			if(!drawn) {
-				// Repli : rendu par defaut, pixel agrandi
-				uint32_t color = GetPixel(ppuOutputBuffer, offset);
-				for(uint32_t dy = 0; dy < _scale; dy++) {
-					uint32_t* dstRow = out + (y * _scale + dy) * outWidth + x * _scale;
-					for(uint32_t dx = 0; dx < _scale; dx++) {
-						dstRow[dx] = color;
+	// Passe 2 : sprites HD par empreinte, sur la grille OAM de l'image
+	if(info && sprites) {
+		const int32_t screenW = (int32_t)GbConstants::ScreenWidth;
+		const int32_t screenH = (int32_t)GbConstants::ScreenHeight;
+		for(const GbHdSpriteInfo& s : *sprites) {
+			for(int32_t r = 0; r < s.Height; r++) {
+				int32_t sy = s.Y + r;
+				if(sy < 0 || sy >= screenH) {
+					continue;
+				}
+				// Ligne a l'ecran r ; tile lue selon le flip vertical, ligne d'atlas = r & 7 (affichage)
+				int32_t vr = (s.Flags & 4) ? (s.Height - 1 - r) : r;
+				uint64_t hash = s.Hash[vr >> 3];
+				uint32_t row = (uint32_t)(r & 7);
+				for(int32_t c = 0; c < 8; c++) {
+					int32_t sx = s.X + c;
+					if(sx < 0 || sx >= screenW) {
+						continue;
+					}
+					const GbHdPixelInfo& p = info[(uint32_t)sy * GbConstants::ScreenWidth + (uint32_t)sx];
+					bool allowed = true;
+					if(p.Layer == 2) {
+						// Le PPU attribue ce pixel a un objet : seulement si c'est ce sprite
+						allowed = p.Hash == hash && p.Palette == s.Palette && p.Flags == s.Flags;
+					} else if(p.Layer == 1) {
+						// Fond visible : le sprite passe derriere si priorite fond et couleur de fond non nulle
+						allowed = !s.BgPriority || p.BgColor == 0;
+					}
+					if(!allowed) {
+						continue;
+					}
+					auto it = _pack.Tiles.find(std::make_tuple(hash, s.Palette, s.Flags));
+					if(it == _pack.Tiles.end()) {
+						continue;
+					}
+					bool any = false;
+					for(uint32_t dy = 0; dy < _scale; dy++) {
+						for(uint32_t dx = 0; dx < _scale; dx++) {
+							uint32_t px = 0;
+							if(SamplePixel(it->second, (uint32_t)c, row, dx, dy, px) && (px >> 24)) {
+								out[((uint32_t)sy * _scale + dy) * outWidth + (uint32_t)sx * _scale + dx] = px;
+								any = true;
+							}
+						}
+					}
+					if(any) {
+						_hdSpritePixels++;
 					}
 				}
-				_fallbackPixels++;
 			}
 		}
 	}
@@ -122,9 +169,7 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	if(++_frameCounter >= 300) {
 		uint64_t total = _hdPixels + _fallbackPixels;
 		uint64_t percent = total ? (_hdPixels * 100) / total : 0;
-		MessageManager::Log("[HD-GB-FLT] 300 images : pixels HD " + std::to_string(_hdPixels) + " (objets " + std::to_string(_hdSpritePixels) + "), replis " + std::to_string(_fallbackPixels) + " (" + std::to_string(percent) + "% HD), transparents " + std::to_string(_transparentPixels));
-		_transparentPixels = 0;
-		_samplesLogged = 0;
+		MessageManager::Log("[HD-GB-FLT] 300 images : fond HD " + std::to_string(_hdPixels) + " (" + std::to_string(percent) + "%), objets HD " + std::to_string(_hdSpritePixels) + ", replis " + std::to_string(_fallbackPixels));
 		_hdPixels = 0;
 		_hdSpritePixels = 0;
 		_fallbackPixels = 0;

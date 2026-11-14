@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atelier MESEN 2D Reflect</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Silkscreen&display=swap">
+<style>
+:root {
+  --bg: #F1F2F6; --panel: #FFFFFF; --line: #DADCE5; --fg: #1B1E2B; --muted: #5C6273;
+  --accent: #4F43AE; --accent-soft: #E7E5F7; --field: #F7F8FB; --warn: #9A4A00;
+  --f-display: "Silkscreen", "Courier New", monospace;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #14151C; --panel: #1D1F29; --line: #2E3140; --fg: #E6E7EE; --muted: #9A9FB2;
+  --accent: #A59CFF; --accent-soft: #2A2750; --field: #171922; --warn: #E0B070; color-scheme: dark } }
+* { box-sizing: border-box }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 14px; line-height: 1.45; padding: 16px }
+h1 { font-family: var(--f-display); font-weight: 400; font-size: 18px; margin: 0 0 4px }
+.sub { color: var(--muted); margin: 0 0 14px; font-size: 13px }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start }
+@media (max-width: 880px) { .layout { grid-template-columns: 1fr } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px }
+.preview { position: sticky; top: 12px }
+canvas { width: 100%; height: auto; image-rendering: pixelated; display: block; border-radius: 6px; background: #000 }
+.row { display: grid; grid-template-columns: 1fr 64px; gap: 6px 10px; align-items: center; margin-bottom: 8px }
+.row label { font-size: 13px; color: var(--muted) }
+.row output { font-family: var(--f-mono); font-size: 12px; text-align: right }
+.row input[type=checkbox] { justify-self: end }
+input[type=range] { width: 100%; grid-column: 1 / -1 }
+select, input[type=file] { font: inherit; background: var(--field); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100% }
+h2 { font-family: var(--f-display); font-weight: 400; font-size: 13px; margin: 14px 0 8px; color: var(--accent) }
+textarea { width: 100%; min-height: 70px; font-family: var(--f-mono); font-size: 12px; background: var(--field); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; resize: vertical }
+button { font: inherit; background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 12px; cursor: pointer; margin-top: 8px }
+button.ghost { background: var(--accent-soft); color: var(--accent) }
+.note { color: var(--muted); font-size: 12px; margin-top: 10px }
+.warn { color: var(--warn); font-size: 12px; margin: 6px 0 0; padding-left: 0 }
+.field { display: grid; gap: 4px; margin-bottom: 8px; font-size: 13px; color: var(--muted) }
+</style>
+</head>
+<body>
+<h1>Atelier MESEN 2D Reflect</h1>
+<p class="sub">Aperçu de <code>&lt;2DReflect&gt;</code> (NES et SNES) : reflet miroir des sprites sous la ligne du sol, en vue de profil. Le moteur reste la référence.</p>
+
+<div class="layout">
+  <div class="card preview">
+    <canvas id="cv"></canvas>
+    <p class="note" id="info"></p>
+  </div>
+
+  <div class="card">
+    <h2>Plateforme</h2>
+    <div class="row"><label for="plat">Console</label><select id="plat"><option value="nes">NES (prio, défaut 10)</option><option value="snes">SNES (zindex, défaut 10)</option></select></div>
+
+    <h2>Images (facultatif)</h2>
+    <div class="field"><label for="floorFile">PNG du sol (bord supérieur opaque = ligne de reflet)</label><input type="file" id="floorFile" accept="image/png"></div>
+    <div class="field"><label for="spriteFile">PNG du sprite (sinon un sprite de démo)</label><input type="file" id="spriteFile" accept="image/png"></div>
+    <p class="note">Sans PNG, la scène de démo a un sol irrégulier et un sprite de test. Un PNG est ramené à la taille de la scène pour l'aperçu.</p>
+
+    <h2>Réglages</h2>
+    <div class="row"><label for="prio" id="prioLab">Calque du sol (prio)</label><output id="o-prio"></output><input type="range" id="prio" min="0" max="49" step="1" value="10"></div>
+    <div class="row"><label for="intensity">Intensité (intensity)</label><output id="o-intensity"></output><input type="range" id="intensity" min="0" max="1" step="0.05" value="0.5"></div>
+    <div class="row"><label for="fade">Fondu (fade, px)</label><output id="o-fade"></output><input type="range" id="fade" min="0" max="200" step="1" value="0"></div>
+    <div class="row"><label for="pos">Position X du sprite</label><output id="o-pos"></output><input type="range" id="pos" min="0" max="240" step="1" value="100"></div>
+    <div class="row"><label for="jump">Saut : hauteur au-dessus du sol (px)</label><output id="o-jump"></output><input type="range" id="jump" min="0" max="120" step="1" value="0"></div>
+    <div class="row"><label for="showline">Montrer la ligne du sol</label><input type="checkbox" id="showline" checked></div>
+
+    <h2>Balise</h2>
+    <textarea id="out" readonly></textarea>
+    <button id="copy">Copier la balise</button>
+    <button id="reset" class="ghost">Réinitialiser</button>
+
+    <h2>Limites</h2>
+    <ul class="warn">
+      <li>Pas de conditions : une ligne préfixée est refusée.</li>
+      <li>Un seul <code>&lt;2DReflect&gt;</code> par pack.</li>
+      <li>SNES : seuls les sprites HD se reflètent.</li>
+      <li>NES : le widescreen n'est pas reflété.</li>
+      <li>Un fond opaque derrière le sprite est reflété tel quel.</li>
+      <li>Le mode top-down (slide) n'est pas traité.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+const PLAT = { nes: { w: 256, h: 240, zmax: 49, key: "prio", def: 10 }, snes: { w: 256, h: 224, zmax: 255, key: "zindex", def: 10 } };
+const $ = (id) => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d");
+let W = 256, H = 240, sprW = 16, sprH = 24;
+let skyC = null, floorC = null, sprC = null, sprPix = null, edge = [];
+let floorImg = null, spriteImg = null;
+
+function mk(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; }
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+
+// Ciel de démo : dégradé sombre
+function makeSky() {
+  const c = mk(W, H), g = c.getContext("2d");
+  const gr = g.createLinearGradient(0, 0, 0, H);
+  gr.addColorStop(0, "#1b1f3b"); gr.addColorStop(1, "#3c4f78");
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  return c;
+}
+
+// Sol de démo : bord supérieur irrégulier, glace sous la ligne
+function makeFloor() {
+  const c = mk(W, H), g = c.getContext("2d");
+  const im = g.createImageData(W, H), d = im.data;
+  for (let x = 0; x < W; x++) {
+    const e = Math.round(150 + 8 * Math.sin(x / 23) + 4 * Math.sin(x / 7));
+    for (let y = e; y < H; y++) {
+      const f = (y - e) / Math.max(1, H - e), i = (y * W + x) * 4;
+      d[i] = 159 + (44 - 159) * f; d[i + 1] = 211 + (95 - 211) * f; d[i + 2] = 232 + (122 - 232) * f; d[i + 3] = 255;
+    }
+  }
+  g.putImageData(im, 0, 0);
+  return c;
+}
+
+// Sprite de démo (16 x 24)
+function makeSprite() {
+  const c = mk(16, 24), g = c.getContext("2d");
+  g.fillStyle = "#ff6b3d"; g.fillRect(3, 8, 10, 12);
+  g.fillStyle = "#ffd3a8"; g.beginPath(); g.arc(8, 5, 4.5, 0, 2 * Math.PI); g.fill();
+  g.fillStyle = "#2b2236"; g.fillRect(4, 20, 3, 4); g.fillRect(9, 20, 3, 4);
+  return c;
+}
+
+function resizeTo(img) { const c = mk(W, H); c.getContext("2d").drawImage(img, 0, 0, W, H); return c; }
+function cloneImg(img) { const c = mk(img.width, img.height); c.getContext("2d").drawImage(img, 0, 0); return c; }
+
+// Ligne du sol : premier pixel opaque (alpha >= 128) de chaque colonne, -1 si aucun
+function computeEdge() {
+  const d = floorC.getContext("2d").getImageData(0, 0, W, H).data;
+  edge = new Array(W).fill(-1);
+  for (let x = 0; x < W; x++) {
+    for (let y = 0; y < H; y++) { if (d[(y * W + x) * 4 + 3] >= 128) { edge[x] = y; break; } }
+  }
+}
+
+function setup() {
+  const p = PLAT[$("plat").value];
+  W = p.w; H = p.h;
+  cv.width = W; cv.height = H;
+  skyC = makeSky();
+  floorC = floorImg ? resizeTo(floorImg) : makeFloor();
+  sprC = spriteImg ? cloneImg(spriteImg) : makeSprite();
+  sprW = sprC.width; sprH = sprC.height;
+  sprPix = sprC.getContext("2d").getImageData(0, 0, sprW, sprH).data;
+  $("pos").max = Math.max(0, W - sprW);
+  $("pos").value = Math.min(+$("pos").value, W - sprW);
+  computeEdge();
+}
+
+function vals() {
+  const v = {
+    plat: $("plat").value, prio: +$("prio").value, intensity: +$("intensity").value,
+    fade: +$("fade").value, pos: +$("pos").value, jump: +$("jump").value, showLine: $("showline").checked
+  };
+  $("o-prio").textContent = v.prio;
+  $("o-intensity").textContent = v.intensity.toFixed(2);
+  $("o-fade").textContent = v.fade;
+  $("o-pos").textContent = v.pos;
+  $("o-jump").textContent = v.jump;
+  $("prioLab").textContent = v.plat === "nes" ? "Calque du sol (prio)" : "Calque du sol (zindex)";
+  return v;
+}
+
+function tagOf(v) {
+  const key = PLAT[v.plat].key;
+  return "<2DReflect>" + key + "=" + v.prio + ",intensity=" + v.intensity.toFixed(2) + ",fade=" + v.fade;
+}
+
+function render() {
+  const v = vals();
+  ctx.drawImage(skyC, 0, 0);
+  ctx.drawImage(floorC, 0, 0);
+
+  // Le sprite pose ses pieds sur le sol, sous son centre, moins le saut
+  const cx = clamp(v.pos + Math.floor(sprW / 2), 0, W - 1);
+  const fl = edge[cx] >= 0 ? edge[cx] : H - 1;
+  const sx = v.pos, sy = Math.round(fl - v.jump - sprH);
+  ctx.drawImage(sprC, sx, sy);
+
+  if (v.showLine) {
+    ctx.fillStyle = "#ff3b3b";
+    for (let x = 0; x < W; x++) if (edge[x] >= 0) ctx.fillRect(x, edge[x], 1, 1);
+  }
+
+  // Reflet : pixels opaques du sprite au-dessus de la ligne du sol, reportés en miroir sous la ligne
+  const img = ctx.getImageData(0, 0, W, H), o = img.data;
+  for (let py = 0; py < sprH; py++) {
+    for (let px = 0; px < sprW; px++) {
+      const ai = (py * sprW + px) * 4;
+      if (sprPix[ai + 3] < 128) continue;
+      const wx = sx + px, wy = sy + py;
+      if (wx < 0 || wx >= W || wy < 0 || wy >= H) continue;
+      const f = edge[wx];
+      if (f < 0 || wy >= f) continue;
+      const d = f - wy;
+      const a = v.intensity * (v.fade > 0 ? Math.max(0, 1 - d / v.fade) : 1);
+      if (a <= 0) continue;
+      const ty = Math.floor(f + d);
+      if (ty < 0 || ty >= H) continue;
+      const oi = (ty * W + wx) * 4;
+      o[oi]     = sprPix[ai]     * a + o[oi]     * (1 - a);
+      o[oi + 1] = sprPix[ai + 1] * a + o[oi + 1] * (1 - a);
+      o[oi + 2] = sprPix[ai + 2] * a + o[oi + 2] * (1 - a);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  $("out").value = tagOf(v);
+  $("info").textContent = v.plat.toUpperCase() + " " + W + "×" + H + " — sol : " + (floorImg ? "PNG" : "démo") +
+    " — sprite : " + (spriteImg ? "PNG" : "démo") + " — " + edge.filter(e => e >= 0).length + " colonnes avec sol";
+}
+
+function readFile(input, set) {
+  const f = input.files && input.files[0];
+  if (!f) { set(null); return; }
+  const url = URL.createObjectURL(f);
+  const im = new Image();
+  im.onload = () => { set(im); URL.revokeObjectURL(url); setup(); render(); };
+  im.src = url;
+}
+
+function onPlatform() {
+  const p = PLAT[$("plat").value];
+  $("prio").max = p.zmax;
+  $("prio").value = p.def;
+  setup(); render();
+}
+
+document.querySelectorAll("input[type=range], #showline").forEach(el => el.addEventListener("input", render));
+$("plat").addEventListener("change", onPlatform);
+$("floorFile").addEventListener("change", () => readFile($("floorFile"), im => floorImg = im));
+$("spriteFile").addEventListener("change", () => readFile($("spriteFile"), im => spriteImg = im));
+$("copy").addEventListener("click", () => navigator.clipboard && navigator.clipboard.writeText($("out").value));
+$("reset").addEventListener("click", () => {
+  $("plat").value = "nes"; $("floorFile").value = ""; $("spriteFile").value = "";
+  floorImg = null; spriteImg = null;
+  $("intensity").value = 0.5; $("fade").value = 0; $("pos").value = 100; $("jump").value = 0; $("showline").checked = true;
+  onPlatform();
+});
+
+onPlatform();
+</script>
+</body>
+</html>

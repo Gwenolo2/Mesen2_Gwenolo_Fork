@@ -8,6 +8,18 @@ class Gameboy;
 class GbMemoryManager;
 class GbDmaController;
 
+// Sprite visible de l'ecran, pour le dessin HD par empreinte
+struct GbHdSpriteInfo
+{
+	int32_t X = 0;
+	int32_t Y = 0;
+	uint8_t Height = 8;
+	uint8_t Flags = 0; // 2 = hflip, 4 = vflip
+	bool BgPriority = false;
+	uint32_t Palette = 0;
+	uint64_t Hash[2] = {0, 0}; // tile de base et tile suivante (8x16)
+};
+
 // Tile d origine de chaque pixel affiche (packs HD). Layer : 0 = aucun, 1 = fond, 2 = objet
 struct GbHdPixelInfo
 {
@@ -17,6 +29,14 @@ struct GbHdPixelInfo
 	uint8_t Row = 0;   // ligne dans la tile (0-7)
 	uint8_t Col = 0;   // colonne dans la tile (0-7)
 	uint8_t Layer = 0;
+	uint8_t BgColor = 0; // couleur du fond (0-3) quand Layer = 1
+};
+
+// Donnees HD transmises avec chaque image : tampon des pixels et liste des sprites
+struct GbHdFrameData
+{
+	const GbHdPixelInfo* Pixels = nullptr;
+	const std::vector<GbHdSpriteInfo>* Sprites = nullptr;
 };
 
 class GbPpu : public ISerializable
@@ -81,6 +101,8 @@ private:
 	GbPixelType _lastPixelType = {};
 	uint8_t _lastBgColor = 0;
 	std::vector<GbHdPixelInfo> _hdInfo[2];
+	std::vector<GbHdSpriteInfo> _hdSprites[2];
+	GbHdFrameData _hdFrame[2];
 	GbHdPixelInfo* _hdCur = nullptr;
 	int _hdIndex = 0;
 	bool _hdEnabled = false;
