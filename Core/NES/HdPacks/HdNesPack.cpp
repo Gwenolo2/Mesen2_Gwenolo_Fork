@@ -4,12 +4,15 @@
 #include <cmath>
 #include <cstdlib>
 #include <chrono>
+#include <filesystem>
 #include "NES/HdPacks/HdNesPack.h"
 #include "NES/HdPacks/HdPackLoader.h"
 #include "NES/NesConsole.h"
 #include "NES/BaseMapper.h"
 #include "NES/NesDefaultVideoFilter.h"
 #include "Shared/MessageManager.h"
+#include "Shared/HdGpuCore.h"
+#include "Shared/HdCamera.h"
 #include "Shared/EmuSettings.h"
 #include "Shared/Audio/SoundMixer.h"
 #include "Utilities/FolderUtilities.h"
@@ -2348,6 +2351,8 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 		ProcessVideos(outputBuffer, screenWidth, overscan);
 	}
 	lap(6);
+	LogDioramaDiag(hdScreenInfo, yStart, yEnd);
+	if(!_wsMode) GpuTestG0(outputBuffer, screenWidth, (yEnd - yStart) * hdScale, yStart, yEnd);
 
 	// Moyenne sur 300 frames, meme principe que le filtre SNES
 	if(++_passFrames >= 300) {
@@ -2360,6 +2365,176 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 		MessageManager::Log(buf);
 		for(double& ms : _passMs) ms = 0;
 		_passFrames = 0;
+	}
+}
+
+// Journal de diagnostic du diorama (doc 32, E0). Lecture seule, aucun effet sur le rendu.
+// Declenche par un fichier hd_debug_dump.flag dans le dossier du pack (supprime apres detection), puis 3600 images (60 s).
+// Une ligne n'est ecrite que pour les images utiles : la premiere, une sur 60, et les 4 images (dont celle du saut) qui
+// suivent un saut brusque : une valeur surveillee qui change de plus de 3 (ex. page, wrap 255 -> 0) ou le scroll X
+// maximal qui change de plus de 3 (franchissement de page, changement de salle).
+// Ne fait rien si le pack ne declare aucun <watchMemoryAddress>.
+template<uint32_t scale>
+void HdNesPack<scale>::LogDioramaDiag(HdScreenInfo* hdScreenInfo, uint32_t yStart, uint32_t yEnd)
+{
+	if(_hdData->WatchedValues.empty() || _hdData->PackFolder.empty()) return;
+	if(_dioramaBurst == 0) {
+		if(++_dioramaCheck < 30) return;
+		_dioramaCheck = 0;
+		std::error_code ec;
+		std::filesystem::path flag = std::filesystem::path(_hdData->PackFolder) / "hd_debug_dump.flag";
+		if(!std::filesystem::exists(flag, ec)) return;
+		std::filesystem::remove(flag, ec);
+		_dioramaBurst = 3600;
+		_dioramaFrame = 0;
+		_dioramaTail = 0;
+		_dioramaPrevVals.clear();
+		MessageManager::Log("[HD-DIORAMA] mesure demarree : 3600 images (flag detecte et supprime). Lignes ecrites : premiere image, une sur 60, et 4 images a chaque saut de valeur ou de scroll (>3)");
+	}
+	_dioramaBurst--;
+
+	int32_t minX = INT32_MAX, maxX = INT32_MIN, minY = INT32_MAX, maxY = INT32_MIN;
+	int changesX = 0, changesY = 0;
+	for(uint32_t y = yStart; y < yEnd && y < 240; y++) {
+		minX = std::min(minX, _lineScrollX[y]); maxX = std::max(maxX, _lineScrollX[y]);
+		minY = std::min(minY, _lineScrollY[y]); maxY = std::max(maxY, _lineScrollY[y]);
+		if(y > yStart) {
+			if(_lineScrollX[y] != _lineScrollX[y - 1]) changesX++;
+			if(_lineScrollY[y] != _lineScrollY[y - 1]) changesY++;
+		}
+	}
+
+	// Valeurs surveillees de cette image (INT32_MIN = adresse non lue)
+	vector<int32_t> vals;
+	for(const HdWatchedValue& w : _hdData->WatchedValues) {
+		uint32_t raw = 0;
+		bool ok = true;
+		for(uint32_t i = 0; i < w.Size; i++) {
+			auto it = hdScreenInfo->WatchedAddressValues.find(w.Address + i);
+			if(it == hdScreenInfo->WatchedAddressValues.end()) { ok = false; break; }
+			raw |= (uint32_t)it->second << (8 * i);
+		}
+		int32_t v = INT32_MIN;
+		if(ok) v = w.Signed ? (w.Size == 1 ? (int32_t)(int8_t)raw : (int32_t)(int16_t)raw) : (int32_t)raw;
+		vals.push_back(v);
+	}
+
+	bool jump = false;
+	if(_dioramaPrevVals.size() == vals.size()) {
+		for(size_t i = 0; i < vals.size(); i++) {
+			if(vals[i] != INT32_MIN && _dioramaPrevVals[i] != INT32_MIN && std::abs(vals[i] - _dioramaPrevVals[i]) > 3) jump = true;
+		}
+		if(std::abs(maxX - _dioramaPrevMaxX) > 3) jump = true;
+	}
+	_dioramaPrevVals = vals;
+	_dioramaPrevMaxX = maxX;
+	if(jump) _dioramaTail = 4;
+	const bool emit = (_dioramaFrame++ % 60) == 0 || _dioramaTail > 0;
+	const bool tagJump = jump;
+	if(_dioramaTail > 0) _dioramaTail--;
+
+	if(emit) {
+		const uint32_t yMid = std::min<uint32_t>((yStart + yEnd) / 2, 239);
+		std::string line = "[HD-DIORAMA] f=" + std::to_string(hdScreenInfo->FrameNumber) + (tagJump ? " SAUT" : "")
+			+ " scrollX min/max/chg=" + std::to_string(minX) + "/" + std::to_string(maxX) + "/" + std::to_string(changesX)
+			+ " scrollY min/max/chg=" + std::to_string(minY) + "/" + std::to_string(maxY) + "/" + std::to_string(changesY)
+			+ " ligneMilieu=(" + std::to_string(_lineScrollX[yMid]) + "," + std::to_string(_lineScrollY[yMid]) + ")";
+		for(size_t i = 0; i < vals.size(); i++) {
+			line += " " + _hdData->WatchedValues[i].Name + "=";
+			line += vals[i] == INT32_MIN ? std::string("?") : std::to_string(vals[i]);
+		}
+		MessageManager::Log(line);
+	}
+	if(_dioramaBurst == 0) {
+		MessageManager::Log("[HD-DIORAMA] mesure terminee");
+	}
+}
+
+// G0 (doc 34) : test du contexte GPU commun HdGpuCore. Declenche par un fichier hd_gpu_test.flag dans le dossier du
+// pack (supprime apres detection), puis 600 images (10 s) : un triangle colore tournant et un carre jaune translucide,
+// dessines par le GPU, sont composes PAR-DESSUS l'image du jeu. Aucun lien avec le rendu du pack ; sans flag, ne fait rien.
+// Mesure : cout moyen (envoi + relecture + composition) et thread utilise, journal toutes les 120 images.
+template<uint32_t scale>
+void HdNesPack<scale>::GpuTestG0(uint32_t* outputBuffer, uint32_t screenWidth, uint32_t outHeight, uint32_t yStart, uint32_t yEnd)
+{
+	if(_hdData->PackFolder.empty()) return;
+	HdGpuCore& gpu = HdGpuCore::Get();
+	if(_gpuTestBurst == 0) {
+		if(++_gpuTestCheck < 30) return;
+		_gpuTestCheck = 0;
+		std::error_code ec;
+		std::filesystem::path flag = std::filesystem::path(_hdData->PackFolder) / "hd_gpu_test.flag";
+		if(!std::filesystem::exists(flag, ec)) return;
+		std::filesystem::remove(flag, ec);
+		MessageManager::Log("[HD-GPU-G0] test demarre : 600 images (flag detecte et supprime)");
+		{
+			std::string camReport;
+			const bool camOk = HdLayerCameraSelfTest(camReport);
+			MessageManager::Log(std::string("[HD-CAM] auto-test camera couche : ") + (camOk ? "OK" : "ECHEC") + " (" + camReport + ")");
+		}
+		if(!gpu.Available()) {
+			MessageManager::Log("[HD-GPU-G0] GPU indisponible : " + gpu.Info());
+			return;
+		}
+		_gpuTestBurst = 600;
+		_gpuTestFrame = 0;
+		_gpuTestFrames = 0;
+		_gpuTestMs = 0;
+		_gpuTestThread = 0;
+		_gpuTestCamBad = 0;
+	}
+	_gpuTestBurst--;
+
+	// Camera couche construite avec le scroll PPU de CETTE image : aller-retour Unproject / Project du centre de
+	// l'ecran a trois profondeurs (Z = -40, 0, 40). Tout ecart au-dela de 1e-6 px est compte comme echec.
+	{
+		HdLayerCamera cam;
+		cam.Begin((int)yStart, (int)yEnd - 1, 128.0, 120.0, 256.0, 256.0);
+		for(uint32_t y = yStart; y < yEnd && y < 240; y++) cam.SetLine((int)y, (double)_lineScrollX[y], (double)_lineScrollY[y]);
+		const double testZ[3] = { -40.0, 0.0, 40.0 };
+		for(double z : testZ) {
+			double wx = 0, wy = 0, wz = 0;
+			HdScreenPt p;
+			const bool ok = cam.Unproject(128.0, 120.0, z, wx, wy, wz) && cam.Project(wx, wy, z, p) && std::abs(p.x - 128.0) < 1e-6 && std::abs(p.y - 120.0) < 1e-6;
+			if(!ok) _gpuTestCamBad++;
+		}
+	}
+
+	const auto t0 = std::chrono::steady_clock::now();
+	const bool ok = gpu.SubmitTest(screenWidth, outHeight, _gpuTestFrame++) && gpu.Fetch(_gpuTestImg);
+	if(ok && _gpuTestImg.size() >= (size_t)screenWidth * outHeight) {
+		// composition premultipliee : sortie = GPU + jeu x (1 - alpha GPU)
+		const size_t n = (size_t)screenWidth * outHeight;
+		for(size_t i = 0; i < n; i++) {
+			const uint32_t s = _gpuTestImg[i];
+			const uint32_t a = s >> 24;
+			if(a == 0) continue;
+			if(a == 255) { outputBuffer[i] = s; continue; }
+			const uint32_t d = outputBuffer[i], inv = 255 - a;
+			uint32_t r = (s & 0xFF) + (((d & 0xFF) * inv) / 255);
+			uint32_t g = ((s >> 8) & 0xFF) + ((((d >> 8) & 0xFF) * inv) / 255);
+			uint32_t b = ((s >> 16) & 0xFF) + ((((d >> 16) & 0xFF) * inv) / 255);
+			outputBuffer[i] = 0xFF000000u | (std::min(b, 255u) << 16) | (std::min(g, 255u) << 8) | std::min(r, 255u);
+		}
+	}
+	_gpuTestMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	_gpuTestFrames++;
+
+	const size_t thr = std::hash<std::thread::id>{}(std::this_thread::get_id());
+	if(thr != _gpuTestThread) {
+		MessageManager::Log("[HD-GPU-G0] thread du filtre : " + std::to_string(thr) + (_gpuTestThread ? " (CHANGEMENT)" : ""));
+		_gpuTestThread = thr;
+	}
+	if(!ok && _gpuTestFrames == 1) {
+		MessageManager::Log("[HD-GPU-G0] envoi ou relecture en echec");
+	}
+	if(_gpuTestFrames >= 120 || _gpuTestBurst == 0) {
+		char buf[260];
+		snprintf(buf, sizeof(buf), "[HD-GPU-G0] image %ux%u : %.2f ms / image en moyenne (%u images), camera couche : %u echecs cumules%s",
+			screenWidth, outHeight, _gpuTestMs / std::max(1u, _gpuTestFrames), _gpuTestFrames, _gpuTestCamBad, _gpuTestBurst == 0 ? " - test termine" : "");
+		MessageManager::Log(buf);
+		_gpuTestMs = 0;
+		_gpuTestFrames = 0;
 	}
 }
 

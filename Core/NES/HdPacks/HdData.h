@@ -867,6 +867,15 @@ struct NesHdLiquidInfo
 	}
 };
 
+// <watchMemoryAddress> : valeur RAM CPU nommee, lue une fois par image (diorama, doc 32 s0.1). Lecture seule.
+struct HdWatchedValue
+{
+	string Name;
+	uint32_t Address = 0;
+	uint8_t Size = 1;      // 1 ou 2 octets (petit-boutiste)
+	bool Signed = false;
+};
+
 struct HdPackData
 {
 private:
@@ -901,6 +910,8 @@ public:
 	vector<HdPackAdditionalSpriteInfo> AdditionalSprites;
 	vector<FallbackTileInfo> FallbackTiles;
 	unordered_set<uint32_t> WatchedMemoryAddresses;
+	vector<HdWatchedValue> WatchedValues; // <watchMemoryAddress>
+	string PackFolder;                    // dossier du pack (declencheur du journal [HD-DIORAMA])
 	unordered_map<HdTileKey, vector<HdPackTileInfo*>> TileByKey;
 	unordered_map<string, string> PatchesByHash;
 	unordered_map<int, BgmTrackInfo> BgmFilesById;

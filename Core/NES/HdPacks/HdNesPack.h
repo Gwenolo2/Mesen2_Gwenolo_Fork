@@ -95,6 +95,12 @@ private:
 	// preparation, resolution des tiles, dessin, particules, calques, distorsion, videos
 	double _passMs[7] = {};
 	int _passFrames = 0;
+	uint32_t _dioramaBurst = 0; // images restantes du journal [HD-DIORAMA] (declenche par hd_debug_dump.flag)
+	uint32_t _dioramaCheck = 0;
+	uint32_t _dioramaFrame = 0;
+	uint32_t _dioramaTail = 0;
+	vector<int32_t> _dioramaPrevVals;
+	int32_t _dioramaPrevMaxX = 0;
 	vector<uint8_t> _sprNes;   // <2DReflect> : 1 par pixel NES si un sprite opaque y est affiche
 	vector<float> _reflFloor;  // <2DReflect> : ordonnee ecran (NES) du sol par pixel, NaN = pas de sol
 	bool _reflectEnabled = false;
@@ -122,6 +128,15 @@ private:
 	uint32_t ApplyTexture2D(const vector<NesHdTextureInfo>& rules, uint32_t raw, int32_t hdX, int32_t hdY, int32_t rawScrollX, int32_t rawScrollY);
 
 	void OnLineStart(HdPpuPixelInfo &lineFirstPixel);
+	void LogDioramaDiag(HdScreenInfo* hdScreenInfo, uint32_t yStart, uint32_t yEnd);
+
+	// G0 : test du contexte GPU commun (doc 34). Declenche par un fichier hd_gpu_test.flag dans le dossier du pack.
+	uint32_t _gpuTestBurst = 0, _gpuTestCheck = 0, _gpuTestFrame = 0, _gpuTestFrames = 0;
+	double _gpuTestMs = 0;
+	size_t _gpuTestThread = 0;
+	vector<uint32_t> _gpuTestImg;
+	uint32_t _gpuTestCamBad = 0;
+	void GpuTestG0(uint32_t* outputBuffer, uint32_t screenWidth, uint32_t outHeight, uint32_t yStart, uint32_t yEnd);
 	void ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8_t y, HdBgConfig* lineCfg);
 	void ProcessVideos(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
 	void SimulateOverlays(HdScreenInfo* hdScreenInfo);

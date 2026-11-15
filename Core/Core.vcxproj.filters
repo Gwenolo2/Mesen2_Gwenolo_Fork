@@ -2985,6 +2985,15 @@
     <ClInclude Include="SNES\HdPacks\SnesHdGpu.h">
       <Filter>SNES\HdPacks</Filter>
     </ClInclude>
+    <ClInclude Include="Shared\HdGpuCore.h">
+      <Filter>Shared</Filter>
+    </ClInclude>
+    <ClInclude Include="Shared\HdCamera.h">
+      <Filter>Shared</Filter>
+    </ClInclude>
+    <ClInclude Include="SNES\HdPacks\SnesHdM7CameraAdapter.h">
+      <Filter>SNES\HdPacks</Filter>
+    </ClInclude>
     <ClInclude Include="SNES\HdPacks\SnesHdGl.h">
       <Filter>SNES\HdPacks</Filter>
     </ClInclude>
@@ -3379,6 +3388,9 @@
     </ClCompile>
     <ClCompile Include="SNES\HdPacks\SnesHdGpu.cpp">
       <Filter>SNES\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="Shared\HdGpuCore.cpp">
+      <Filter>Shared</Filter>
     </ClCompile>
     <ClCompile Include="SNES\HdPacks\SnesHdGltf.cpp">
       <Filter>SNES\HdPacks</Filter>

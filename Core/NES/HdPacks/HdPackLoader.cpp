@@ -219,6 +219,7 @@ bool HdPackLoader::LoadPack()
 {
 	string lineContent;
 	_currentLine = 0;
+	_data->PackFolder = _hdPackFolder; // dossier du pack, connu de tous les outils de diagnostic (flags)
 
 	try {
 		vector<uint8_t> hdDefinition;
@@ -373,6 +374,9 @@ bool HdPackLoader::LoadPack()
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dtexture>") {
 				tokens = StringUtilities::Split(lineContent.substr(11), ',');
 				ProcessTexture2DTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 20)) == "<watchmemoryaddress>") {
+				tokens = StringUtilities::Split(lineContent.substr(20), ',');
+				ProcessWatchMemoryAddressTag(tokens, conditions);
 			} else if(lineContent.substr(0, 15) == "<2DPerspective>") {
 				tokens = StringUtilities::Split(lineContent.substr(15), ',');
 				ProcessPerspectiveTag(tokens, conditions);
@@ -1858,6 +1862,73 @@ void HdPackLoader::ProcessSpriteLightTag(vector<string>& tokens, vector<HdPackCo
 	}
 	MessageManager::Log("[HDPack] <2DSpriteLight> tile " + tileData + ", rayon " + std::to_string((int)L->Radius));
 	_data->Sprite2DLights.push_back(std::move(L));
+}
+
+// <watchMemoryAddress>nom,adresse[,taille][,signed] : valeur RAM CPU nommee, lue une fois par image (diorama, doc 32 s0.1).
+// Adresse en hexadecimal (0x ou $ facultatifs), taille 1 ou 2 octets (petit-boutiste). Lecture seule, sans condition.
+void HdPackLoader::ProcessWatchMemoryAddressTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(!conditions.empty()) {
+		logError("watchMemoryAddress : les conditions ne sont pas prises en charge, ligne ignoree.");
+		return;
+	}
+	if(tokens.size() < 2 || tokens.size() > 4) {
+		logError("watchMemoryAddress : syntaxe nom,adresse[,taille][,signed], ligne ignoree.");
+		return;
+	}
+	HdWatchedValue w;
+	w.Name = StringUtilities::Trim(tokens[0]);
+	if(w.Name.empty()) {
+		logError("watchMemoryAddress : nom vide, ligne ignoree.");
+		return;
+	}
+	for(char c : w.Name) {
+		if(!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_')) {
+			logError("watchMemoryAddress : nom invalide (lettres, chiffres et _ seulement) : " + w.Name);
+			return;
+		}
+	}
+	string addr = StringUtilities::Trim(tokens[1]);
+	if(!addr.empty() && addr[0] == '$') {
+		addr = addr.substr(1);
+	} else if(addr.size() > 2 && addr[0] == '0' && (addr[1] == 'x' || addr[1] == 'X')) {
+		addr = addr.substr(2);
+	}
+	if(addr.empty() || addr.size() > 4 || addr.find_first_not_of("0123456789abcdefABCDEF") != string::npos) {
+		logError("watchMemoryAddress : adresse hexadecimale invalide (0000 a FFFF) : " + tokens[1]);
+		return;
+	}
+	w.Address = HexUtilities::FromHex(addr);
+	for(size_t i = 2; i < tokens.size(); i++) {
+		string t = StringUtilities::ToLower(StringUtilities::Trim(tokens[i]));
+		if(t == "signed") {
+			w.Signed = true;
+		} else if(t == "unsigned") {
+			w.Signed = false;
+		} else if(t == "1") {
+			w.Size = 1;
+		} else if(t == "2") {
+			w.Size = 2;
+		} else {
+			logError("watchMemoryAddress : parametre inconnu (taille 1 ou 2, signed) : " + t);
+			return;
+		}
+	}
+	if(w.Address + w.Size - 1 > 0xFFFF) {
+		logError("watchMemoryAddress : adresse + taille depasse FFFF : " + w.Name);
+		return;
+	}
+	for(const HdWatchedValue& other : _data->WatchedValues) {
+		if(other.Name == w.Name) {
+			logError("watchMemoryAddress : nom deja declare, ligne ignoree : " + w.Name);
+			return;
+		}
+	}
+	for(uint32_t i = 0; i < w.Size; i++) {
+		_data->WatchedMemoryAddresses.emplace(w.Address + i);
+	}
+	_data->WatchedValues.push_back(w);
+	_data->PackFolder = _hdPackFolder;
 }
 
 // <2DPerspective> (NES) : sol incline. Syntaxe : [cond]<2DPerspective>fichier.png,Z,tileX,tileY,alpha,speedX,speedY,horizon=..,depth=..,repeat=..,limit=+N,fog=RRGGBB,fogrange=N
