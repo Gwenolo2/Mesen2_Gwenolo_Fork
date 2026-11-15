@@ -413,6 +413,7 @@ struct GameboyConfig
 	bool DisableBackground = false;
 	bool DisableSprites = false;
 	bool HideSgbBorders = false;
+	bool EnableHdPacks = true;
 
 	RamState RamPowerOnState = RamState::Random;
 	bool AllowInvalidInput = false;

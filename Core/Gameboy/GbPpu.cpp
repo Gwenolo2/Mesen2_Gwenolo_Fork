@@ -464,7 +464,7 @@ void GbPpu::RunDrawCycle()
 					WriteObjPixel(((sprite.Attributes & 0x10) ? 4 : 0) | colorIndex);
 				}
 				_lastPixelType = GbPixelType::Object;
-				RecordHdPixel(sprite, 2);
+				RecordHdPixel(sprite, 2, BgRawColor(entry), BgZeroColor(entry));
 			} else {
 				if(!cfg.DisableBackground) {
 					if(_state.CgbEnabled) {
@@ -477,7 +477,7 @@ void GbPpu::RunDrawCycle()
 				}
 				_lastPixelType = GbPixelType::Background;
 				_lastBgColor = entry.Color;
-				RecordHdPixel(entry, (cfg.DisableBackground || (!_state.CgbEnabled && !_state.BgEnabled) || _insertGlitchBgPixel) ? 0 : 1);
+				RecordHdPixel(entry, (cfg.DisableBackground || (!_state.CgbEnabled && !_state.BgEnabled) || _insertGlitchBgPixel) ? 0 : 1, BgZeroColor(entry), BgZeroColor(entry));
 			}
 		}
 
@@ -505,7 +505,32 @@ static uint64_t HashHdTile(const uint8_t* data)
 	return hash;
 }
 
-void GbPpu::RecordHdPixel(const GbFifoEntry& e, uint8_t layer)
+uint16_t GbPpu::BgZeroColor(const GbFifoEntry& e)
+{
+	// Couleur 0 de la palette de fond : ce qu'affiche la Game Boy sans tile
+	if(_state.CgbEnabled) {
+		return LcdReadBgPalette((e.Attributes & 0x07) << 2) & 0x7FFF;
+	}
+	return LcdReadBgPalette(_state.BgPalette & 0x03) & 0x7FFF;
+}
+
+uint16_t GbPpu::BgRawColor(const GbFifoEntry& e)
+{
+	// Couleur que le fond aurait affichee sous ce pixel (meme logique que la passe de fond)
+	GameboyConfig& cfg = _emu->GetSettings()->GetGameboyConfig();
+	if(cfg.DisableBackground) {
+		return LcdReadBgPalette(_state.BgPalette & 0x03) & 0x7FFF;
+	}
+	if(_state.CgbEnabled) {
+		return LcdReadBgPalette(e.Color | ((e.Attributes & 0x07) << 2)) & 0x7FFF;
+	}
+	if(_state.BgEnabled) {
+		return LcdReadBgPalette((_state.BgPalette >> (e.Color * 2)) & 0x03) & 0x7FFF;
+	}
+	return LcdReadBgPalette(_state.BgPalette & 0x03) & 0x7FFF;
+}
+
+void GbPpu::RecordHdPixel(const GbFifoEntry& e, uint8_t layer, uint16_t fallback, uint16_t bgZero)
 {
 	if(_hdCur == nullptr) {
 		return;
@@ -518,6 +543,9 @@ void GbPpu::RecordHdPixel(const GbFifoEntry& e, uint8_t layer)
 	p.Col = e.HdCol;
 	p.Layer = layer;
 	p.BgColor = (layer == 1) ? e.Color : 0;
+	p.BgPriority = (layer == 1 && (e.Attributes & 0x80)) ? 1 : 0;
+	p.Fallback = fallback;
+	p.BgZero = bgZero;
 }
 
 void GbPpu::WriteBgPixel(uint8_t colorIndex)
@@ -953,6 +981,19 @@ void GbPpu::SendFrame()
 			list.push_back(s);
 		}
 	}
+	if(_hdEnabled) {
+		// Conditions memoryCheckConstant : une lecture par adresse surveillee, en fin d'image
+		const GbHdPackData& pack = _gameboy->GetHdPackData();
+		std::vector<uint8_t>& mem = _hdMem[_hdIndex];
+		mem.resize(pack.WatchedAddresses.size());
+		for(size_t k = 0; k < pack.WatchedAddresses.size(); k++) {
+			mem[k] = _gameboy->GetMemoryManager()->DebugRead(pack.WatchedAddresses[k]);
+		}
+		_hdFrame[_hdIndex].Memory = &mem;
+	}
+	_hdFrame[_hdIndex].ScrollX = _state.ScrollX;
+	_hdFrame[_hdIndex].ScrollY = _state.ScrollY;
+	_hdFrame[_hdIndex].FrameNumber = _state.FrameCount;
 	_hdFrame[_hdIndex].Pixels = _hdInfo[_hdIndex].data();
 	_hdFrame[_hdIndex].Sprites = &_hdSprites[_hdIndex];
 	frame.Data = _hdEnabled ? (void*)&_hdFrame[_hdIndex] : nullptr;
@@ -968,6 +1009,14 @@ void GbPpu::SendFrame()
 		const GbHdPackData& pack = _gameboy->GetHdPackData();
 		const GbHdPixelInfo* info = _hdInfo[_hdIndex].data();
 		uint32_t bgTotal = 0, bgFound = 0, objTotal = 0, objFound = 0;
+		// Diagnostic : hash des sprites calcule en fin d'image (liste) ; un pixel d'objet dont le hash n'y figure pas
+		// a ete dessine avec une autre tile : VRAM ou OAM modifiee pendant l'image
+		std::vector<uint64_t> listHashes;
+		for(const GbHdSpriteInfo& s : _hdSprites[_hdIndex]) {
+			listHashes.push_back(s.Hash[0]);
+			if(s.Hash[1]) listHashes.push_back(s.Hash[1]);
+		}
+		uint32_t objOrphan = 0;
 		for(int px = 0; px < GbConstants::PixelCount; px++) {
 			if(info[px].Layer == 0) {
 				continue;
@@ -979,9 +1028,10 @@ void GbPpu::SendFrame()
 			} else {
 				objTotal++;
 				if(found) objFound++;
+				if(std::find(listHashes.begin(), listHashes.end(), info[px].Hash) == listHashes.end()) objOrphan++;
 			}
 		}
-		MessageManager::Log("[HD-GB-PIX] 300 images : fond " + std::to_string(bgTotal) + " pixels, " + std::to_string(bgFound) + " couverts par le pack ; objets " + std::to_string(objTotal) + " pixels, " + std::to_string(objFound) + " couverts");
+		MessageManager::Log("[HD-GB-PIX] 300 images : fond " + std::to_string(bgTotal) + " pixels, " + std::to_string(bgFound) + " couverts par le pack ; objets " + std::to_string(objTotal) + " pixels, " + std::to_string(objFound) + " couverts ; hash objet absent de la liste des sprites : " + std::to_string(objOrphan));
 	}
 	_hdIndex ^= 1;
 	_hdCur = _hdEnabled ? _hdInfo[_hdIndex].data() : nullptr;

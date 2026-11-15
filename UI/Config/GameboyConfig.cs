@@ -24,6 +24,7 @@ namespace Mesen.Config
 		[Reactive] public bool DisableBackground { get; set; } = false;
 		[Reactive] public bool DisableSprites { get; set; } = false;
 		[Reactive] public bool HideSgbBorders { get; set; } = false;
+		[Reactive] public bool EnableHdPacks { get; set; } = true;
 
 		[Reactive] public RamState RamPowerOnState { get; set; } = RamState.Random;
 		[Reactive] public bool AllowInvalidInput { get; set; } = false;
@@ -51,6 +52,7 @@ namespace Mesen.Config
 				DisableBackground = DisableBackground,
 				DisableSprites = DisableSprites,
 				HideSgbBorders = HideSgbBorders,
+				EnableHdPacks = EnableHdPacks,
 
 				RamPowerOnState = RamPowerOnState,
 				AllowInvalidInput = AllowInvalidInput,
@@ -86,6 +88,7 @@ namespace Mesen.Config
 		[MarshalAs(UnmanagedType.I1)] public bool DisableBackground;
 		[MarshalAs(UnmanagedType.I1)] public bool DisableSprites;
 		[MarshalAs(UnmanagedType.I1)] public bool HideSgbBorders;
+		[MarshalAs(UnmanagedType.I1)] public bool EnableHdPacks;
 
 		public RamState RamPowerOnState;
 		[MarshalAs(UnmanagedType.I1)] public bool AllowInvalidInput;

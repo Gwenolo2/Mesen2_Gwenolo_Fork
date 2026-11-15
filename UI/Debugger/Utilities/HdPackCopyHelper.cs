@@ -19,6 +19,7 @@ namespace Mesen.Debugger.Utilities
 				MemoryType.NesChrRam => true,
 				MemoryType.NesChrRom => true,
 				MemoryType.SnesVideoRam => true, // <-- Ajout SNES
+				MemoryType.GbVideoRam => true,   // <-- Ajout Game Boy
 				_ => false,
 			};
 		}
@@ -88,6 +89,36 @@ namespace Mesen.Debugger.Utilities
 			return sb.ToString();
 		}
 		//--------------------------------------------------------------------------------------------------------------------------------------
+		// ====================================================================
+		// GAME BOY / GBC : hash des 16 octets de la tile (identique au builder, doc 30 D8)
+		// Palette : GBC = index 0-7 (BG) ou 8-15 (OBJ) ; DMG = registre BGP (BG) ou 256 + OBP0/OBP1 (OBJ)
+		// ====================================================================
+		public static ulong GbTileHash(int tileAddress)
+		{
+			ulong hash = 0;
+			for(uint i = 0; i < 16; i++) {
+				byte b = DebugApi.GetMemoryValue(MemoryType.GbVideoRam, (uint)(tileAddress + i));
+				hash = (hash * 31) + b;
+			}
+			return hash;
+		}
+
+		public static int GbPaletteIndex(bool cgb, bool forSprite, int attrPalette, GbPpuState state)
+		{
+			if(cgb) {
+				return forSprite ? 8 + attrPalette : attrPalette;
+			}
+			if(forSprite) {
+				return 256 + (attrPalette == 1 ? state.ObjPalette1 : state.ObjPalette0);
+			}
+			return state.BgPalette;
+		}
+
+		public static string GbTileLine(int tileAddress, int palette, string image, int x, int y)
+		{
+			return "<tile>" + GbTileHash(tileAddress).ToString("X16") + "," + palette + "," + image + "," + x + "," + y;
+		}
+
 		public static void CopyToHdPackFormat(int address, MemoryType memoryType, UInt32[] palette, int paletteIndex, bool forSprite, bool isLargeSprite = false)
 		{
 			AddressInfo addr = new AddressInfo() { Address = address, Type = memoryType };

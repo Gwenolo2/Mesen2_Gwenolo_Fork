@@ -210,7 +210,7 @@ namespace Mesen.Debugger.ViewModels
 
 new ContextMenuAction() {
 					ActionType = ActionType.CopyToHdPackFormat,
-					IsVisible = () => CpuType == CpuType.Nes || CpuType == CpuType.Snes,
+					IsVisible = () => CpuType == CpuType.Nes || CpuType == CpuType.Snes || CpuType == CpuType.Gameboy,
 					
 					// On force l'activation pour la SNES, et on garde la vérification par défaut pour la NES
 					IsEnabled = () => CpuType == CpuType.Snes || HdPackCopyHelper.IsActionAllowed(GetVramMemoryType()),
@@ -220,7 +220,16 @@ new ContextMenuAction() {
 						DebugTilemapTileInfo? tile = GetSelectedTileInfo();
 						if (tile != null && tile.Value.TileIndex >= 0) {
 
-							if (CpuType == CpuType.Snes) {
+							if (CpuType == CpuType.Gameboy) {
+								// Game Boy / GBC : <tile>HASH,PALETTE,1,0,0 (meme convention que la SNES)
+								GbPpuState gbState = DebugApi.GetPpuState<GbPpuState>(CpuType.Gameboy);
+								int gbPalette = HdPackCopyHelper.GbPaletteIndex(gbState.CgbEnabled, false, tile.Value.PaletteIndex, gbState);
+								string gbLine = HdPackCopyHelper.GbTileLine(tile.Value.TileAddress, gbPalette, "1", 0, 0);
+								var gbClipboard = TopLevel.GetTopLevel(_picViewer)?.Clipboard;
+								if (gbClipboard != null) {
+									await gbClipboard.SetTextAsync(gbLine);
+								}
+							} else if (CpuType == CpuType.Snes) {
 								// ====================================================================
 								// NOTRE LOGIQUE SNES PERSONNALISÉE
 								// ====================================================================

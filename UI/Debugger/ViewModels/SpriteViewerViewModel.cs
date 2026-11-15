@@ -259,7 +259,7 @@ namespace Mesen.Debugger.ViewModels
 		{
 			return new ContextMenuAction() {
 				ActionType = ActionType.CopyToHdPackFormat,
-				IsVisible = () => CpuType == CpuType.Nes || CpuType == CpuType.Snes,
+				IsVisible = () => CpuType == CpuType.Nes || CpuType == CpuType.Snes || CpuType == CpuType.Gameboy,
 
 				// On s'assure que le bouton est cliquable sur SNES, ou selon la logique NES originale
 				IsEnabled = () => {
@@ -313,6 +313,19 @@ namespace Mesen.Debugger.ViewModels
 								await clipboard.SetTextAsync(hdFormatString.ToString());
 							}
 
+						} else if(CpuType == CpuType.Gameboy) {
+							// Game Boy / GBC : une ligne par tile (8x16 = deux tiles), convention SNES : FILE,x,y
+							GbPpuState gbState = DebugApi.GetPpuState<GbPpuState>(CpuType.Gameboy);
+							int gbPalette = HdPackCopyHelper.GbPaletteIndex(gbState.CgbEnabled, true, sprite.Palette, gbState);
+							string gbText = HdPackCopyHelper.GbTileLine(sprite.TileAddress, gbPalette, "FILE", 0, 0);
+							if(sprite.Height > 8) {
+								gbText += System.Environment.NewLine + HdPackCopyHelper.GbTileLine(sprite.TileAddress + 16, gbPalette, "FILE", 0, 8);
+							}
+							var gbLifetime = Avalonia.Application.Current?.ApplicationLifetime as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+							var gbClipboard = gbLifetime?.MainWindow?.Clipboard;
+							if(gbClipboard != null) {
+								await gbClipboard.SetTextAsync(gbText);
+							}
 						} else if(_data.Palette != null) {
 							// ====================================================================
 							// LOGIQUE NES ORIGINALE

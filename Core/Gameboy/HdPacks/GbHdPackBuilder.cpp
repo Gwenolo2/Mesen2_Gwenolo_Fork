@@ -390,13 +390,13 @@ void GbHdPackBuilder::WriteObjectFiles()
 	for(const GbObjectInfo& obj : _objects) {
 		std::ostringstream out;
 		out << "# Objet " << obj.Name << " : vu sur " << obj.Count << " images\n";
-		out << "# Image entière : Tiles/Sprites/Objects/" << obj.Name << ".png\n";
-		out << "# Tiles de l'objet ; [x,y] = position dans l'objet, en pixels GB\n";
+		out << "# Fichier autonome : canevas de l'objet en index d'image 0 (pixels HD, scale " << _scale << ")\n";
+		out << "<img>Tiles/Sprites/Objects/" << obj.Name << ".png\n";
+		out << "# [x,y] = position dans l'objet, en pixels GB\n";
 		for(const GbOamTile& t : obj.Members) {
 			char hashStr[32];
 			snprintf(hashStr, sizeof(hashStr), "%016llX", (unsigned long long)t.Hash);
-			auto it = _spriteAtlasRef.find(std::make_tuple(t.Hash, t.Palette, t.Flags));
-			if(it == _spriteAtlasRef.end()) {
+			if(_spriteAtlasRef.find(std::make_tuple(t.Hash, t.Palette, t.Flags)) == _spriteAtlasRef.end()) {
 				out << "# tile absente de l'atlas : " << hashStr << "\n";
 				continue;
 			}
@@ -405,7 +405,8 @@ void GbHdPackBuilder::WriteObjectFiles()
 			else if(t.Flags & 2) tag += "_hflip";
 			else if(t.Flags & 4) tag += "_vflip";
 			tag += ">";
-			out << tag << hashStr << "," << t.Palette << "," << it->second
+			// Position dans le canevas de l'objet (pixels HD), image d'index 0 de ce fichier
+			out << tag << hashStr << "," << t.Palette << ",0," << (t.X * _scale) << "," << (t.Y * _scale)
 				<< "   # [" << t.X << "," << t.Y << "]\n";
 		}
 		FILE* f = fopen(FolderUtilities::CombinePath(objDir, obj.Name + ".mesen").c_str(), "wb");

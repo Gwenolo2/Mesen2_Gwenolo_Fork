@@ -116,11 +116,18 @@ void GbApu::Run()
 
 void GbApu::UpdateOutput(GameboyConfig& cfg)
 {
+	// <muteAudio> (pack HD Game Boy) : volume 0 pour les canaux coupes par le pack
+	const uint8_t hdMute = _gameboy->GetHdAudioMuteMask();
+	const uint32_t sq1Vol = (hdMute & 0x01) ? 0 : cfg.Square1Vol;
+	const uint32_t sq2Vol = (hdMute & 0x02) ? 0 : cfg.Square2Vol;
+	const uint32_t waveVol = (hdMute & 0x04) ? 0 : cfg.WaveVol;
+	const uint32_t noiseVol = (hdMute & 0x08) ? 0 : cfg.NoiseVol;
+
 	int16_t leftOutput = (
-		(_square1->GetOutput() * (int32_t)(cfg.Square1Vol & _state.EnableLeftSq1) / 100) +
-		(_square2->GetOutput() * (int32_t)(cfg.Square2Vol & _state.EnableLeftSq2) / 100) +
-		(_wave->GetOutput() * (int32_t)(cfg.WaveVol & _state.EnableLeftWave) / 100) +
-		(_noise->GetOutput() * (int32_t)(cfg.NoiseVol & _state.EnableLeftNoise) / 100)
+		(_square1->GetOutput() * (int32_t)(sq1Vol & _state.EnableLeftSq1) / 100) +
+		(_square2->GetOutput() * (int32_t)(sq2Vol & _state.EnableLeftSq2) / 100) +
+		(_wave->GetOutput() * (int32_t)(waveVol & _state.EnableLeftWave) / 100) +
+		(_noise->GetOutput() * (int32_t)(noiseVol & _state.EnableLeftNoise) / 100)
 	) * (_state.LeftVolume + 1) * 40;
 
 	if(_prevLeftOutput != leftOutput) {
@@ -129,10 +136,10 @@ void GbApu::UpdateOutput(GameboyConfig& cfg)
 	}
 
 	int16_t rightOutput = (
-		(_square1->GetOutput() * (int32_t)(cfg.Square1Vol & _state.EnableRightSq1) / 100) +
-		(_square2->GetOutput() * (int32_t)(cfg.Square2Vol & _state.EnableRightSq2) / 100) +
-		(_wave->GetOutput() * (int32_t)(cfg.WaveVol & _state.EnableRightWave) / 100) +
-		(_noise->GetOutput() * (int32_t)(cfg.NoiseVol & _state.EnableRightNoise) / 100)
+		(_square1->GetOutput() * (int32_t)(sq1Vol & _state.EnableRightSq1) / 100) +
+		(_square2->GetOutput() * (int32_t)(sq2Vol & _state.EnableRightSq2) / 100) +
+		(_wave->GetOutput() * (int32_t)(waveVol & _state.EnableRightWave) / 100) +
+		(_noise->GetOutput() * (int32_t)(noiseVol & _state.EnableRightNoise) / 100)
 	) * (_state.RightVolume + 1) * 40;
 
 	if(_prevRightOutput != rightOutput) {

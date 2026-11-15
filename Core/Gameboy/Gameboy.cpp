@@ -12,6 +12,7 @@
 #include "Gameboy/GameboyHeader.h"
 #include "Gameboy/HdPacks/GbHdPackBuilder.h"
 #include "Gameboy/HdPacks/GbHdPackLoader.h"
+#include "Gameboy/HdPacks/GbHdAudio.h"
 #include "Utilities/FolderUtilities.h"
 #include "Gameboy/GbsHeader.h"
 #include "Gameboy/Carts/GbsCart.h"
@@ -462,7 +463,14 @@ LoadRomResult Gameboy::LoadRom(VirtualFile& romFile)
 			}
 			// Pack HD Game Boy (etape 1 : lecture seule, aucun rendu)
 			std::string romName = FolderUtilities::GetFilename(romFile.GetFileName(), false);
-			GbHdPackLoader::Load(FolderUtilities::CombinePath(FolderUtilities::GetHdPackFolder(), romName), _hdPackData);
+			if(_emu->GetSettings()->GetGameboyConfig().EnableHdPacks) {
+				GbHdPackLoader::Load(FolderUtilities::CombinePath(FolderUtilities::GetHdPackFolder(), romName), _hdPackData);
+			}
+			// Musique OGG du pack : un OggMixer enregistre aupres du mixer de l'emulateur (comme NES)
+			_hdAudio.reset();
+			if(!_hdPackData.ConditionalBgms.empty()) {
+				_hdAudio.reset(new GbHdAudio(_emu, &_hdPackData));
+			}
 			if(_emu->GetVideoDecoder()) {
 				_emu->GetVideoDecoder()->ForceFilterUpdate();
 			}
@@ -559,6 +567,11 @@ void Gameboy::RunFrame()
 	uint32_t frameCount = _ppu->GetFrameCount();
 	while(frameCount == _ppu->GetFrameCount()) {
 		_cpu->Exec();
+	}
+
+	// <play_conditional_bgm> : une fois par image, sur le thread de l'emulation (avant le mixage)
+	if(_hdAudio) {
+		_hdAudio->Update();
 	}
 
 	_apu->Run();

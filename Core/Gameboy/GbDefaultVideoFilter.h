@@ -23,6 +23,8 @@ private:
 	__forceinline static uint32_t BlendPixels(uint32_t a, uint32_t b);
 
 protected:
+	// Couleur RGB555 -> ARGB, sans fondu entre images (repli des pixels transparents des packs HD)
+	uint32_t ColorFromRgb555(uint16_t color) const { return _calculatedPalette[color & 0x7FFF]; }
 	bool _blendFrames = false;
 	uint32_t GetPixel(uint16_t* ppuFrame, uint32_t offset);
 	void OnBeforeApplyFilter() override;

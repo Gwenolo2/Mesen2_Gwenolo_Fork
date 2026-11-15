@@ -30,6 +30,9 @@ struct GbHdPixelInfo
 	uint8_t Col = 0;   // colonne dans la tile (0-7)
 	uint8_t Layer = 0;
 	uint8_t BgColor = 0; // couleur du fond (0-3) quand Layer = 1
+	uint16_t BgZero = 0;   // RGB555 de la couleur 0 de la palette de fond (<disableOriginalTiles>)
+	uint16_t Fallback = 0; // RGB555 affiche si la tile HD est transparente (fond : couleur 0 ; sprite : fond sous le pixel)
+	uint8_t BgPriority = 0; // 1 = tile de fond avec le bit de priorite GBC (0x80) : au-dessus des sprites
 };
 
 // Donnees HD transmises avec chaque image : tampon des pixels et liste des sprites
@@ -37,6 +40,10 @@ struct GbHdFrameData
 {
 	const GbHdPixelInfo* Pixels = nullptr;
 	const std::vector<GbHdSpriteInfo>* Sprites = nullptr;
+	const std::vector<uint8_t>* Memory = nullptr; // octets CPU des adresses surveillees (fin de l'image)
+	uint8_t ScrollX = 0; // SCX de fin d'image (pour <background>)
+	uint8_t ScrollY = 0; // SCY de fin d'image
+	uint32_t FrameNumber = 0; // compteur d'images de la PPU (condition frameRange)
 };
 
 class GbPpu : public ISerializable
@@ -103,6 +110,7 @@ private:
 	std::vector<GbHdPixelInfo> _hdInfo[2];
 	std::vector<GbHdSpriteInfo> _hdSprites[2];
 	GbHdFrameData _hdFrame[2];
+	std::vector<uint8_t> _hdMem[2];
 	GbHdPixelInfo* _hdCur = nullptr;
 	int _hdIndex = 0;
 	bool _hdEnabled = false;
@@ -110,7 +118,9 @@ private:
 
 	__forceinline void WriteBgPixel(uint8_t colorIndex);
 	__forceinline void WriteObjPixel(uint8_t colorIndex);
-	__forceinline void RecordHdPixel(const GbFifoEntry& e, uint8_t layer);
+	uint16_t BgZeroColor(const GbFifoEntry& e);
+	uint16_t BgRawColor(const GbFifoEntry& e);
+	__forceinline void RecordHdPixel(const GbFifoEntry& e, uint8_t layer, uint16_t fallback, uint16_t bgZero);
 
 	__forceinline void ProcessPpuCycle();
 

@@ -36,6 +36,7 @@
 						<c:EnumComboBox SelectedItem="{Binding Config.Model}" MinWidth="200" />
 					</StackPanel>
 					<CheckBox IsChecked="{Binding Config.UseSgb2}" Content="{l:Translate chkUseSgb2}" />
+					<CheckBox IsChecked="{Binding Config.EnableHdPacks}" Content="{l:Translate chkEnableHdPacks}" />
 				</StackPanel>
 			</ScrollViewer>
 		</TabItem>

@@ -436,6 +436,7 @@ static constexpr const char* MesenGameboyDisableBackground = "mesen_gameboy_disa
 static constexpr const char* MesenGameboyDisableSprites = "mesen_gameboy_disable_sprites";
 static constexpr const char* MesenGameboyRemoveSpriteLimit = "mesen_gameboy_remove_sprite_limit";
 static constexpr const char* MesenGameboyHideSgbBorders = "mesen_gameboy_hide_sgb_borders";
+static constexpr const char* MesenGameboyHdPacks = "mesen_gameboy_hdpacks"; // [fork HD] packs HD Game Boy
 static constexpr const char* MesenGbaSkipBootScreen = "mesen_gba_skip_boot_screen";
 static constexpr const char* MesenGbaBlendFrames = "mesen_gba_blend_frames";
 static constexpr const char* MesenGbaAdjustColors = "mesen_gba_adjust_colors";
@@ -537,7 +538,7 @@ uint32_t wavebeamPalette[0x40] { 0xFF6B6B6B, 0xFF001B88, 0xFF21009A, 0xFF40008C,
 		if(consoleType == ConsoleType::Gameboy) {
 			return matches(MesenAudioSampleRate) || matches(MesenControllerTurboSpeed) || matches(MesenGameboyModel) || matches(MesenGameboyBlendFrames) ||
 				matches(MesenGameboyAdjustColors) || matches(MesenGameboyDisableSprites) ||
-				matches(MesenGameboyHideSgbBorders);
+				matches(MesenGameboyHideSgbBorders) || matches(MesenGameboyHdPacks);
 		}
 
 		if(consoleType == ConsoleType::Gba) {
@@ -593,7 +594,7 @@ uint32_t wavebeamPalette[0x40] { 0xFF6B6B6B, 0xFF001B88, 0xFF21009A, 0xFF40008C,
 			MesenSnesEnableStrictBoardMappings, MesenSnesRandomizePowerOnState,
 			MesenGameboyModel, MesenGameboyBlendFrames, MesenGameboyAdjustColors,
 			MesenGameboyDisableBackground, MesenGameboyDisableSprites,
-			MesenGameboyHideSgbBorders,
+			MesenGameboyHideSgbBorders, MesenGameboyHdPacks,
 			MesenGbaSkipBootScreen, MesenGbaBlendFrames, MesenGbaAdjustColors,
 			MesenGbaDisableSprites, MesenGbaDisableBackground, MesenGbaHideBgLayer1,
 			MesenGbaHideBgLayer2, MesenGbaHideBgLayer3, MesenGbaHideBgLayer4,
@@ -878,6 +879,9 @@ uint32_t wavebeamPalette[0x40] { 0xFF6B6B6B, 0xFF001B88, 0xFF21009A, 0xFF40008C,
 			{ MesenGameboyDisableSprites, "Enhancements - Game Boy Disable Sprites", "Disable Sprites", "Disable Game Boy sprite rendering", NULL, "enhancements",
 				{{ "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL }},
 				"disabled" },
+			{ MesenGameboyHdPacks, "Enhancements - Game Boy HD Packs", "HD Packs", "Enable Game Boy HD packs (system/HdPacks/<rom name>/gb_hires.txt). Restart the content to apply.", NULL, "enhancements",
+				{{ "enabled", "On" }, { "disabled", "Off" }, { NULL, NULL }},
+				"enabled" },
 			{ MesenGameboyHideSgbBorders, "Video - Game Boy Hide SGB Borders", "Hide SGB Borders", "Hide Super Game Boy borders", NULL, "video",
 				{{ "disabled", "Off" }, { "enabled", "On" }, { NULL, NULL }},
 				"disabled" },
@@ -1017,7 +1021,7 @@ uint32_t wavebeamPalette[0x40] { 0xFF6B6B6B, 0xFF001B88, 0xFF21009A, 0xFF40008C,
 				"disabled" },
 
 			// [fork HD] packs HD NES et SNES : dossier <system>/HdPacks/<nom de la ROM>/
-			{ MesenHdPacks, "Enhancements - HD Packs", "HD Packs", "Enable HD graphics packs (NES, SNES). Packs are read from system/HdPacks/<rom name>. Restart the content to apply.", NULL, "enhancements",
+			{ MesenHdPacks, "Enhancements - HD Packs", "HD Packs", "Enable HD graphics packs (NES, SNES ; Game Boy has its own option). Packs are read from system/HdPacks/<rom name>. Restart the content to apply.", NULL, "enhancements",
 				{{ "enabled", "On" }, { "disabled", "Off" }, { NULL, NULL }},
 				"enabled" },
 			{ MesenAsyncDecode, "Enhancements - HD Async Decode", "HD Async Decode", "Decode HD frames on a separate thread (faster). Off = decode on the emulation thread.", NULL, "enhancements",
@@ -1369,6 +1373,9 @@ void libretro_probe_inputs(const char* tag)
 		}
 		if(readVariable(MesenGameboyHideSgbBorders, var)) {
 			gameboyCfg.HideSgbBorders = (string(var.value) == "enabled");
+		}
+		if(readVariable(MesenGameboyHdPacks, var)) {
+			gameboyCfg.EnableHdPacks = (string(var.value) != "disabled");
 		}
 		
 		// Region

@@ -20,6 +20,7 @@ class GbControlManager;
 class SuperGameboy;
 class VirtualFile;
 class BaseControlManager;
+class GbHdAudio;
 
 class Gameboy final : public IConsole
 {
@@ -31,6 +32,7 @@ private:
 	SuperGameboy* _superGameboy = nullptr;
 	bool _allowSgb = false;
 	GbHdPackData _hdPackData; // Pack HD Game Boy (etape 1 : lecture seule)
+	unique_ptr<GbHdAudio> _hdAudio; // musique OGG du pack (<bgm>, <play_conditional_bgm>), nul si le pack n'en a pas
 
 	unique_ptr<GbMemoryManager> _memoryManager;
 	unique_ptr<GbCpu> _cpu;
@@ -106,6 +108,8 @@ public:
 	bool IsSgb();
 	bool IsHdPackActive();
 	const GbHdPackData& GetHdPackData();
+	// <muteAudio> : canaux coupes par le pack HD (1 = Square1, 2 = Square2, 4 = Wave, 8 = Noise)
+	uint8_t GetHdAudioMuteMask() const { return _hdPackData.AudioMuteMask ? _hdPackData.AudioMuteMask->load(std::memory_order_relaxed) : 0; }
 	SuperGameboy* GetSgb();
 
 	uint64_t GetCycleCount();
