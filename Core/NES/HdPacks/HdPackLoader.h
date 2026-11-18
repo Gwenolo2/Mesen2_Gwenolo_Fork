@@ -33,6 +33,11 @@ private:
 	unordered_map<string, HdPackBitmapInfo*> _backgroundsByName;
 	// Pile des blocs <Ignore2DOverlays>{ ... } ouverts : chaque entree = conditions du bloc (heritees)
 	vector<vector<HdPackCondition*>> _ign2dBlockStack;
+	// Blocs { } ouverts, dans l'ordre : 'i' = <Ignore2DOverlays>{, 'o' = <DioramaOffCamera>{ (doc 38). '}' ferme le dernier.
+	vector<char> _blockKinds;
+	int _dioOffDepth = 0;
+	vector<int> _dioShadowStack; // G6c : regle (numero + 1) de chaque bloc <DioramaShadow>{ ouvert (type 's' dans _blockKinds)
+	int _dioIgnoreDepth = 0; // blocs <DioramaIgnore>{ ouverts (type 'g' dans _blockKinds)
 
 	HdPackLoader();
 
@@ -81,6 +86,27 @@ private:
 	void ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessPerspectiveTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessWatchMemoryAddressTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaOffCameraTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaExtendTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaSkyboxTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaLightTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaPadTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaCameraTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaCameraDefaultTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaCameraKeysTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	bool ParseDioramaShadowOptions(vector<string>& tokens, HdDioramaShadowRule& rule, bool allowTile);
+	void ProcessDioramaShadowTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaNormalTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	HdPackBitmapInfo* LoadAuxBitmap(string name); // PNG hors de la liste des <img> (reutilise celui d'un <img> de meme nom)
+	void ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	std::map<string, std::shared_ptr<vector<float>>> _dioObjCache; // H1 : .obj deja lus
+	void ProcessDioramaDepthTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	bool ParseDioramaDepthOptions(vector<string>& tokens, HdDioramaDepthGroup& group);
+	HdPackBitmapInfo* LoadDioramaTexture(const string& filename);
+	bool ParseDioramaWallOption(const string& base, const string& val, HdDioramaWallTex& wall);
+	int AddDioramaDepthGroup(const HdDioramaDepthGroup& group);
+	vector<int> _dioDepthStack; // groupe (1 a 4, 0 = aucun) de chaque bloc <DioramaDepth>{ ouvert (type 'd' dans _blockKinds)
 	void ProcessSpriteLightTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessLiquidTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessTexture2DTag(vector<string>& tokens, vector<HdPackCondition*> conditions);

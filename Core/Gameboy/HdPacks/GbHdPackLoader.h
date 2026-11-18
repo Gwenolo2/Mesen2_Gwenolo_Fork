@@ -8,6 +8,7 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include "Shared/HdWatchExpr.h"
 
 // Position d'une tile dans une image d'atlas (en pixels HD)
 struct GbHdTileRef
@@ -74,6 +75,18 @@ struct GbHdBackground
 	double Alpha = 1.0;
 	GbHdBgOperator Operator = GbHdBgOperator::Multiply;
 	std::vector<GbHdTerm> Terms; // vide = toujours vrai
+	// ramx= / ramy= : defilement de base lu en RAM ($nom de <watchMemoryAddress>) a la place de SCX / SCY
+	HdWatchExpr RamX;
+	HdWatchExpr RamY;
+};
+
+// <watchMemoryAddress> : valeur RAM nommee ; Slot[i] = indice de l'octet i dans GbHdPackData::WatchedAddresses
+struct GbHdWatchVar
+{
+	std::string Name;
+	uint8_t Size = 1;
+	bool Signed = false;
+	uint32_t Slot[2] = { 0, 0 };
 };
 
 // <2DOverlay> : effets 2D calcules, meme JSON que NES / SNES (docs/claude/09_2DOverlay.md).
@@ -234,6 +247,8 @@ struct GbHdPackData
 	std::map<std::pair<uint64_t, uint32_t>, std::vector<size_t>> ConditionalIndex;
 	// Adresses CPU releves a chaque image (une seule lecture par adresse)
 	std::vector<uint16_t> WatchedAddresses;
+	// Valeurs nommees (<watchMemoryAddress>), utilisables dans <background> via ramx= / ramy=
+	std::vector<GbHdWatchVar> WatchedVars;
 	// Fonds dans l'ordre du fichier : le premier dont les termes sont vrais est utilise
 	std::vector<GbHdBackground> Backgrounds;
 	// Niveau des sprites (<spriteZ>, defaut 20) : un fond de niveau inferieur passe derriere les sprites

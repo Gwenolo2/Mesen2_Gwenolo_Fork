@@ -104,8 +104,12 @@ void HdVideoFilter::ApplyFilter(uint16_t *ppuOutputBuffer)
 	_hdNesPack->SetWidescreenMode(true, (float)dstW / (float)hdScale);
 	_hdNesPack->Process((HdScreenInfo*)_frameData, _wsBuffer.data(), overscan);
 	const size_t offX = (size_t)ws * hdScale;
-	for(size_t y = 0; y < srcH; y++) {
-		memcpy(out + y * dstW + offX, _wsBuffer.data() + y * srcW, srcW * sizeof(uint32_t));
+	// Diorama : l'image GPU est deja large (bandes comprises) ; sinon copie du centre puis fonds <background> dans les bandes
+	const bool dioWide = _hdNesPack->TakeDioramaWide(out, dstW * srcH);
+	if(!dioWide) {
+		for(size_t y = 0; y < srcH; y++) {
+			memcpy(out + y * dstW + offX, _wsBuffer.data() + y * srcW, srcW * sizeof(uint32_t));
+		}
 	}
 	// Fonds <background> dans les bandes (apres le centre, sans toucher aux effets)
 	// Chronometrage des passes widescreen (journal [HD-WS] toutes les 300 images)
@@ -118,7 +122,9 @@ void HdVideoFilter::ApplyFilter(uint16_t *ppuOutputBuffer)
 		wsMs[i] += std::chrono::duration<double, std::milli>(tNow - wsT0).count();
 		wsT0 = tNow;
 	};
-	_hdNesPack->DrawWidescreenBands(out, (uint32_t)dstW, (uint32_t)offX, overscan.Left, overscan.Top, overscan.Bottom);
+	if(!dioWide) {
+		_hdNesPack->DrawWidescreenBands(out, (uint32_t)dstW, (uint32_t)offX, overscan.Left, overscan.Top, overscan.Bottom);
+	}
 	wsLap(0);
 	_hdNesPack->ProcessWidescreenOverlays(out, (uint32_t)dstW, (uint32_t)offX, overscan.Left, overscan.Top, overscan.Bottom);
 	wsLap(1);

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cmath>
 #include "Shared/MessageManager.h"
+#include "Shared/HdWatchExpr.h"
 #include "Shared/HdLoadingScreen.h"
 #include <unordered_set>
 #include <atomic>
@@ -519,6 +520,9 @@ struct SnesHdBackgroundInfo
 
 
 	float AlphaFactor = 1.0f; // Défaut 1.00 (100% de l'alpha d'origine)
+	// ramx= / ramy= : défilement de base lu en RAM ($nom de <watchMemoryAddress>) à la place du défilement PPU de la couche maître
+	HdWatchExpr RamScrollX;
+	HdWatchExpr RamScrollY;
 	ScrollOperator ScrollSpeedOperator = ScrollOperator::Multiply; // Défaut 'multiply' / '*'
 
 	std::vector<SnesHdPackCondition*> Conditions;
@@ -1811,6 +1815,25 @@ public:
 	// Stockage global des conditions et adresses surveillées
 	std::vector<std::unique_ptr<SnesHdPackCondition>> Conditions;
 	std::unordered_set<uint32_t> WatchedMemoryAddresses;
+	// <watchMemoryAddress> : valeurs nommees (lecture seule), utilisables dans <background> via ramx= / ramy=
+	std::vector<HdWatchVar> WatchedVars;
+	// Valeur de l'expression pour l'image courante ; false si une adresse n'est pas encore lue
+	bool EvalWatchExpr(const HdWatchExpr& e, float& out) const
+	{
+		std::vector<int32_t> vals;
+		vals.reserve(WatchedVars.size());
+		for(const HdWatchVar& w : WatchedVars) {
+			uint32_t raw = 0;
+			bool ok = true;
+			for(uint32_t i = 0; i < w.Size; i++) {
+				auto it = ScreenInfo.WatchedAddressValues.find((w.Address + i) | w.Space);
+				if(it == ScreenInfo.WatchedAddressValues.end()) { ok = false; break; }
+				raw |= (uint32_t)it->second << (8 * i);
+			}
+			vals.push_back(ok ? HdWatchCompose(raw, w.Size, w.Signed) : INT32_MIN);
+		}
+		return e.Eval(vals, out);
+	}
 	
 	// Stockage des conditions rattachées au tag <disableColorMath>
 	std::vector<SnesHdPackCondition*> DisableColorMathConditions;

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <chrono>
 #include <filesystem>
@@ -12,8 +13,10 @@
 #include "NES/NesDefaultVideoFilter.h"
 #include "Shared/MessageManager.h"
 #include "Shared/HdGpuCore.h"
+static_assert(HdDioMaxGroups == 8, "HdNesPack::DioGroups doit valoir HdDioMaxGroups");
 #include "Shared/HdCamera.h"
 #include "Shared/EmuSettings.h"
+#include "Shared/KeyManager.h"
 #include "Shared/Audio/SoundMixer.h"
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/PNGHelper.h"
@@ -123,10 +126,13 @@ void HdNesPack<scale>::BlendColors(uint8_t output[4], uint8_t input[4])
 {
 	if constexpr(blendMode == HdPackBlendMode::Alpha) {
 		uint8_t invertedAlpha = 256 - input[3];
+		// Destinataire transparent ou translucide (couche diorama) : l'alpha doit etre cumule, sinon le pixel devient
+		// opaque avec une couleur premultipliee = halo noir. Destinataire opaque : comportement inchange.
+		const uint8_t outA = output[3] == 0xFF ? 0xFF : (uint8_t)std::min(255, input[3] + ((invertedAlpha * output[3]) >> 8));
 		output[0] = input[0] + (uint8_t)((invertedAlpha * output[0]) >> 8);
 		output[1] = input[1] + (uint8_t)((invertedAlpha * output[1]) >> 8);
 		output[2] = input[2] + (uint8_t)((invertedAlpha * output[2]) >> 8);
-		output[3] = 0xFF;
+		output[3] = outA;
 	} else if constexpr(blendMode == HdPackBlendMode::Add) {
 		output[0] = (uint8_t)std::min(255, (int)input[0] + (int)output[0]);
 		output[1] = (uint8_t)std::min(255, (int)input[1] + (int)output[1]);
@@ -1759,15 +1765,15 @@ void HdNesPack<scale>::ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8
 {
 	//Passe 2 (parallele) : position des <background> pour la ligne, dans un tableau local au thread.
 	//Ne modifie aucun membre de la classe.
-	int32_t scrollX = ((lineFirstPixel.TmpVideoRamAddr & 0x1F) << 3) | lineFirstPixel.XScroll | ((lineFirstPixel.TmpVideoRamAddr & 0x400) ? 0x100 : 0);
-	int32_t scrollY = (((lineFirstPixel.TmpVideoRamAddr & 0x3E0) >> 2) | ((lineFirstPixel.TmpVideoRamAddr & 0x7000) >> 12)) + ((lineFirstPixel.TmpVideoRamAddr & 0x800) ? 240 : 0);
+	int32_t lineScrollX = ((lineFirstPixel.TmpVideoRamAddr & 0x1F) << 3) | lineFirstPixel.XScroll | ((lineFirstPixel.TmpVideoRamAddr & 0x400) ? 0x100 : 0);
+	int32_t lineScrollY = (((lineFirstPixel.TmpVideoRamAddr & 0x3E0) >> 2) | ((lineFirstPixel.TmpVideoRamAddr & 0x7000) >> 12)) + ((lineFirstPixel.TmpVideoRamAddr & 0x800) ? 240 : 0);
 	
 	for(int layer = 0; layer < 5; layer++) {
 		for(int i = 0; i < _activeBgCount[layer]; i++) {
 			int cfgIndex = layer * HdNesPack::PriorityLevelsPerLayer + i;
 			HdBgConfig cfg = _bgConfig[cfgIndex];
-			cfg.RawScrollX = scrollX;
-			cfg.RawScrollY = scrollY;
+			cfg.RawScrollX = lineScrollX;
+			cfg.RawScrollY = lineScrollY;
 			cfg.BgMinX = -1;
 			cfg.BgMaxX = -1;
 			if(cfg.BackgroundIndex >= 0) {
@@ -1777,6 +1783,9 @@ void HdNesPack<scale>::ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8
 				const float rx = bgInfo.HorizontalScrollRatio;
 				const float ry = bgInfo.VerticalScrollRatio;
 				const float frame = (float)_hdScreenInfo->FrameNumber;
+				// ramx= / ramy= : defilement lu en RAM a la place du defilement PPU de la ligne
+				const int32_t scrollX = bgInfo.ExprXOk ? bgInfo.ExprX : lineScrollX;
+				const int32_t scrollY = bgInfo.ExprYOk ? bgInfo.ExprY : lineScrollY;
 				switch(bgInfo.Operator) {
 					case HdBackgroundInfo::ScrollOperator::Divide:
 						cfg.BgScrollX = rx != 0.0f ? (int32_t)(scrollX / rx) : scrollX;
@@ -1862,6 +1871,35 @@ void HdNesPack<scale>::OnBeforeApplyFilter()
 		for(uint32_t i = 0; i < activeCount; i++) {
 			HdBgConfig& cfg = _bgConfig[layer * HdNesPack::PriorityLevelsPerLayer + i];
 			_hdData->BackgroundsByPriority[cfg.BgPriority][cfg.BackgroundIndex].Data->Init();
+		}
+	}
+
+	// <background> avec ramx= / ramy= : valeurs RAM de cette image
+	if(_hdScreenInfo) {
+		vector<int32_t> wv;
+		bool wvBuilt = false;
+		for(auto& bgs : _hdData->BackgroundsByPriority) {
+			for(HdBackgroundInfo& bgi : bgs) {
+				if(bgi.ScrollXExpr.Empty() && bgi.ScrollYExpr.Empty()) continue;
+				if(!wvBuilt) {
+					wvBuilt = true;
+					for(const HdWatchedValue& w : _hdData->WatchedValues) {
+						uint32_t raw = 0;
+						bool okv = true;
+						for(uint32_t bi = 0; bi < w.Size; bi++) {
+							auto it = _hdScreenInfo->WatchedAddressValues.find(w.Address + bi);
+							if(it == _hdScreenInfo->WatchedAddressValues.end()) { okv = false; break; }
+							raw |= (uint32_t)it->second << (8 * bi);
+						}
+						wv.push_back(okv ? HdWatchCompose(raw, w.Size, w.Signed) : INT32_MIN);
+					}
+				}
+				float v = 0.0f;
+				bgi.ExprXOk = !bgi.ScrollXExpr.Empty() && bgi.ScrollXExpr.Eval(wv, v);
+				if(bgi.ExprXOk) bgi.ExprX = (int32_t)v;
+				bgi.ExprYOk = !bgi.ScrollYExpr.Empty() && bgi.ScrollYExpr.Eval(wv, v);
+				if(bgi.ExprYOk) bgi.ExprY = (int32_t)v;
+			}
 		}
 	}
 
@@ -2321,6 +2359,16 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	}
 
 	lap(2);
+	//Diorama (G2a, G2b) : couches separees, composees par le GPU ; la sortie est remplacee par l'image GPU, identique a celle du
+	//processeur (controle toutes les 300 images). Les lignes grayscale / emphase gardent l'image du processeur.
+	//Le temps n'est pas compte dans les passes du journal [HD-PASS].
+	_dioWsReady = false;
+	if(_hdData->DioramaEnabled) {
+		const bool dioCheck = (_dioFrame++ % 300) == 0;
+		RunDioramaLayers(hdScreenInfo, outputBuffer, screenWidth, yStart, yEnd, xStart, xEnd, dioCheck);
+		DioramaGpuStep(hdScreenInfo, outputBuffer, screenWidth, (yEnd - yStart) * hdScale, yStart, yEnd, dioCheck);
+		tLap = std::chrono::steady_clock::now();
+	}
 	//<2DReflect> : reflet des sprites sous le sol, sur l'image composee (avant les overlays)
 	if(_reflectEnabled && !_wsMode) {
 		ProcessReflections(outputBuffer, screenWidth, overscan);
@@ -2538,6 +2586,1175 @@ void HdNesPack<scale>::GpuTestG0(uint32_t* outputBuffer, uint32_t screenWidth, u
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Diorama G2a (doc 36) : les memes tiles que DrawPixel, mais dans 4 images separees, alpha conserve.
+// Ne modifie ni DrawPixel ni la sortie. Groupes <background>, liquides, overlays et grayscale/emphase : non geres.
+// ---------------------------------------------------------------------------
+// Fusion "par-dessus" d'un pixel premultiplie, memes arrondis que BlendColors<Alpha> (canal alpha compris).
+static inline uint32_t DioOver(uint32_t dst, uint32_t src)
+{
+	const uint32_t a = src >> 24;
+	if(a == 0) return dst;
+	if(a == 255) return src;
+	const uint32_t inv = 256 - a;
+	uint32_t out = 0;
+	for(int sh = 0; sh < 32; sh += 8) {
+		const uint32_t s = (src >> sh) & 0xFF, d = (dst >> sh) & 0xFF;
+		out |= ((s + ((inv * d) >> 8)) & 0xFF) << sh;
+	}
+	return out;
+}
+
+// Copie de DrawTile pour une image de couche : les pixels translucides sont fusionnes par DioOver (le destinataire peut
+// etre transparent), les tuiles opaques ecrivent un pixel d'alpha 255.
+template<uint32_t scale>
+void HdNesPack<scale>::DrawTileLayer(HdPpuTileInfo &tileInfo, HdPackTileInfo &hdPackTileInfo, uint32_t *outputBuffer, uint32_t screenWidth)
+{
+	if(hdPackTileInfo.IsFullyTransparent) {
+		return;
+	}
+	const bool hMirror = tileInfo.HorizontalMirroring != hdPackTileInfo.IsHFlip;
+	const bool vMirror = tileInfo.VerticalMirroring != hdPackTileInfo.IsVFlip;
+	uint32_t *bitmapData = hdPackTileInfo.HdTileData.data();
+	uint32_t tileWidth = 8 * scale;
+	uint8_t tileOffsetX = hMirror ? 7 - tileInfo.OffsetX : tileInfo.OffsetX;
+	uint32_t bitmapOffset = (tileInfo.OffsetY * scale) * tileWidth + tileOffsetX * scale;
+	int32_t bitmapSmallInc = 1;
+	int32_t bitmapLargeInc = tileWidth - scale;
+	if(hMirror) {
+		bitmapOffset += scale - 1;
+		bitmapSmallInc = -1;
+		bitmapLargeInc = tileWidth + scale;
+	}
+	if(vMirror) {
+		bitmapOffset += tileWidth * (scale - 1);
+		bitmapLargeInc = (hMirror ? (int32_t)scale : -(int32_t)scale) - (int32_t)tileWidth;
+	}
+
+	const bool transparent = hdPackTileInfo.HasTransparentPixels;
+	for(uint32_t y = 0; y < scale; y++) {
+		for(uint32_t x = 0; x < scale; x++) {
+			uint32_t rgbValue = hdPackTileInfo.Brightness == 255 ? bitmapData[bitmapOffset] : AdjustBrightness((uint8_t*)(bitmapData + bitmapOffset), hdPackTileInfo.Brightness);
+			if(!transparent) {
+				*outputBuffer = rgbValue | 0xFF000000u;
+			} else if((bitmapData[bitmapOffset] & 0xFF000000) == 0xFF000000) {
+				*outputBuffer = rgbValue;
+			} else if(bitmapData[bitmapOffset] & 0xFF000000) {
+				*outputBuffer = DioOver(*outputBuffer, rgbValue);
+			}
+			outputBuffer++;
+			bitmapOffset += bitmapSmallInc;
+		}
+		bitmapOffset += bitmapLargeInc;
+		outputBuffer += screenWidth - scale;
+	}
+}
+
+// G6d : meme parcours que DrawTileLayer, mais ecrit la normale de la tile (RGB, alpha 255) ; un retournement de la tile inverse x (R) ou y (G).
+template<uint32_t scale>
+void HdNesPack<scale>::DrawNormalLayer(HdPpuTileInfo &tileInfo, HdPackTileInfo &hdPackTileInfo, uint32_t *outputBuffer, uint32_t screenWidth)
+{
+	if(hdPackTileInfo.NormalTileData.size() < (size_t)(8 * scale) * (8 * scale)) {
+		return;
+	}
+	const bool hMirror = tileInfo.HorizontalMirroring != hdPackTileInfo.IsHFlip;
+	const bool vMirror = tileInfo.VerticalMirroring != hdPackTileInfo.IsVFlip;
+	const uint32_t *bitmapData = hdPackTileInfo.NormalTileData.data();
+	uint32_t tileWidth = 8 * scale;
+	uint8_t tileOffsetX = hMirror ? 7 - tileInfo.OffsetX : tileInfo.OffsetX;
+	uint32_t bitmapOffset = (tileInfo.OffsetY * scale) * tileWidth + tileOffsetX * scale;
+	int32_t bitmapSmallInc = 1;
+	int32_t bitmapLargeInc = tileWidth - scale;
+	if(hMirror) {
+		bitmapOffset += scale - 1;
+		bitmapSmallInc = -1;
+		bitmapLargeInc = tileWidth + scale;
+	}
+	if(vMirror) {
+		bitmapOffset += tileWidth * (scale - 1);
+		bitmapLargeInc = (hMirror ? (int32_t)scale : -(int32_t)scale) - (int32_t)tileWidth;
+	}
+	for(uint32_t y = 0; y < scale; y++) {
+		for(uint32_t x = 0; x < scale; x++) {
+			const uint32_t v = bitmapData[bitmapOffset];
+			if(v & 0xFF000000u) {
+				uint32_t r = (v >> 16) & 0xFF, g = (v >> 8) & 0xFF;
+				const uint32_t b = v & 0xFF;
+				if(hMirror) r = 255 - r;
+				if(vMirror) g = 255 - g;
+				*outputBuffer = 0xFF000000u | (r << 16) | (g << 8) | b;
+			}
+			outputBuffer++;
+			bitmapOffset += bitmapSmallInc;
+		}
+		bitmapOffset += bitmapLargeInc;
+		outputBuffer += screenWidth - scale;
+	}
+}
+
+// Meme logique de choix que DrawPixel (bloc scale x scale d'un pixel NES), repartie sur les couches.
+// L0 et L1 sont dessinees meme quand la tile de fond est opaque (elles sont alors cachees : l'identite est inchangee,
+// et le diorama pourra les montrer si la tile est decalee en profondeur).
+template<uint32_t scale>
+void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelInfo, size_t offset, uint32_t screenWidth, const HdBgConfig* lineCfg)
+{
+	const uint32_t pixelIndex = (y << 8) | x;
+	HdPackTileInfo* hdPackTileInfo = _resolvedBg[pixelIndex];
+	HdPackTileInfo* const* sprites = _resolvedSprites.data() + (pixelIndex << 2);
+	uint32_t* l0 = _dioL[0].data() + offset;
+	uint32_t* l1 = _dioL[1].data() + offset;
+	uint32_t* l2 = _dioL[2].data() + offset;
+	uint32_t* l3 = _dioL[3].data() + offset;
+	// G3c : dans une zone off camera, sprites et tiles vont dans la couche fixe (meme ordre de dessin, donc meme resultat a plat)
+	// Tiles marquees par un bloc <DioramaOffCamera>{ } : meme couche fixe, ou qu'elles soient a l'ecran (l4 nul = pas de couche fixe).
+	uint32_t* const l4 = _dioL4Rows ? _dioL4.data() + offset : nullptr;
+	if(l4 && _dioOffMask[pixelIndex]) {
+		l1 = l2 = l3 = l4;
+	}
+	// G3e : groupe de profondeur de la tile de fond (bloc : marque de la tile ; rect= : position). Sprites non concernes.
+	uint32_t* tileTarget = l2;
+	int tileNrm = 0; // G6d : tampon de normales de la couche de la tile (0 = L2, 2 a 5 = groupes)
+	if(!_hdData->DioramaDepthGroups.empty() && l2 != l4) {
+		int g = hdPackTileInfo ? (int)hdPackTileInfo->DioDepthGroup : 0;
+		if(g == 0) {
+			g = _dioDepthMask[pixelIndex];
+		}
+		if(g > 0 && g <= DioGroups && !(hdPackTileInfo && hdPackTileInfo->DioOffCamera)) {
+			tileTarget = _dioG[g - 1].data() + offset;
+			tileNrm = 1 + g;
+			_dioGLines[g - 1][y] = 1;
+		}
+	}
+	const bool hasSprite = pixelInfo.SpriteCount > 0;
+	if(hasSprite && l1 != l4) { _dioLLines[0][y] = 1; _dioLLines[1][y] = 1; } // G3h : la ligne NES porte un sprite (L1 / L3)
+	const bool renderOriginalTiles = ((_hdData->OptionFlags & (int)HdPackOptions::DontRenderOriginalTiles) == 0);
+	// <background> dans le diorama (doc 50) : memes dessins que DrawPixel (defilement, tileX, fusion, luminosite, animation), mais chaque fond
+	// est ecrit dans la couche voulue : cible par defaut selon la bande de priorite, ou groupe <DioramaDepth> / option dio=.
+	const size_t bgGroups = std::min<size_t>(_hdData->DioramaDepthGroups.size(), (size_t)DioGroups);
+	auto drawBgs = [&](int cls, uint32_t* defTarget) {
+		if(!lineCfg) return;
+		for(int i = 0; i < _activeBgCount[cls]; i++) {
+			const HdBgConfig& c = lineCfg[cls * HdNesPack::PriorityLevelsPerLayer + i];
+			if(c.BackgroundIndex < 0) continue;
+			const int t = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex].DioTarget;
+			if(t == -2) continue;
+			uint32_t* tgt = defTarget;
+			if(t >= 0 && t <= 3) {
+				tgt = t == 0 ? l0 : (t == 1 ? l1 : (t == 2 ? l2 : l3));
+			} else if(t >= 4 && t <= 3 + DioGroups && (size_t)(t - 4) < bgGroups && !(l4 && _dioOffMask[pixelIndex]) && _dioG[t - 4].size() > offset) {
+				tgt = _dioG[t - 4].data() + offset;
+				_dioGLines[t - 4][y] = 1;
+			}
+			if((tgt == l1 || tgt == l3) && tgt != l4) { _dioLLines[0][y] = 1; _dioLLines[1][y] = 1; } // L1 / L3 : lignes a renvoyer au GPU
+			DrawBackgroundLayer(c, x, y, tgt, screenWidth);
+		}
+	};
+
+	if(_dioL0Clear) {
+		for(uint32_t i = 0; i < scale; i++) {
+			uint32_t* p = l0 + (size_t)i * screenWidth;
+			for(uint32_t j = 0; j < scale; j++) p[j] = 0u;
+		}
+	} else {
+		DrawColor(_palette[pixelInfo.Tile.PpuBackgroundColor] | 0xFF000000u, l0, screenWidth);
+	}
+	drawBgs(0, l0);
+
+	int lowestBgSprite = 999;
+	if(hasSprite) {
+		for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
+			if(pixelInfo.Sprite[k].BackgroundPriority) {
+				if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
+					lowestBgSprite = k;
+				}
+				if(sprites[k]) {
+					if(!sprites[k]->DioIgnore) DrawTileLayer(pixelInfo.Sprite[k], *sprites[k], (l4 && sprites[k]->DioOffCamera) ? l4 : l1, screenWidth);
+				} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
+					DrawColor(_palette[pixelInfo.Sprite[k].SpriteColor] | 0xFF000000u, l1, screenWidth);
+				}
+			}
+		}
+	}
+
+	drawBgs(1, l1);
+
+	if(hdPackTileInfo) {
+		if(!hdPackTileInfo->DioIgnore) DrawTileLayer(pixelInfo.Tile, *hdPackTileInfo, (l4 && hdPackTileInfo->DioOffCamera) ? l4 : tileTarget, screenWidth);
+		// G6d : normales de la tile (couches normales seulement)
+		if(!_dioNrm[0].empty() && hdPackTileInfo->NormalBitmap && !hdPackTileInfo->NormalTileData.empty() && !hdPackTileInfo->DioIgnore && tileTarget != l4 && !(l4 && hdPackTileInfo->DioOffCamera)) {
+			DrawNormalLayer(pixelInfo.Tile, *hdPackTileInfo, _dioNrm[tileNrm].data() + offset, screenWidth);
+			_dioNrmLines[tileNrm][y] = 1;
+		}
+	} else if(renderOriginalTiles && pixelInfo.Tile.BgColorIndex != 0) {
+		DrawColor(_palette[pixelInfo.Tile.BgColor] | 0xFF000000u, tileTarget, screenWidth);
+	}
+	drawBgs(2, tileTarget);
+
+	if(hasSprite) {
+		for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
+			if(!pixelInfo.Sprite[k].BackgroundPriority && lowestBgSprite > k) {
+				if(sprites[k]) {
+					if(!sprites[k]->DioIgnore) DrawTileLayer(pixelInfo.Sprite[k], *sprites[k], (l4 && sprites[k]->DioOffCamera) ? l4 : l3, screenWidth);
+				} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
+					DrawColor(_palette[pixelInfo.Sprite[k].SpriteColor] | 0xFF000000u, l3, screenWidth);
+				}
+				// G6d : normales du sprite (L3)
+				if(!_dioNrm[1].empty() && sprites[k] && sprites[k]->NormalBitmap && !sprites[k]->NormalTileData.empty() && l3 != l4 && !sprites[k]->DioIgnore && !(l4 && sprites[k]->DioOffCamera)) {
+					DrawNormalLayer(pixelInfo.Sprite[k], *sprites[k], _dioNrm[1].data() + offset, screenWidth);
+					_dioNrmLines[1][y] = 1;
+				}
+				// G6c : silhouette du sprite dans le masque des ombres (sprite d'une couche normale seulement)
+				if(!_dioS.empty() && l3 != l4 && !(sprites[k] && (sprites[k]->DioIgnore || (l4 && sprites[k]->DioOffCamera)))) {
+					int sr = -1;
+					if(sprites[k] && sprites[k]->DioShadow) {
+						sr = (int)sprites[k]->DioShadow - 1;
+					} else {
+						const vector<HdDioramaShadowRule>& srules = _hdData->DioramaShadowRules;
+						for(size_t r = 0; r < srules.size(); r++) {
+							const HdDioramaShadowRule& rr = srules[r];
+							if(!rr.HasTile || !rr.MatchesTile(pixelInfo.Sprite[k])) continue;
+							bool ok = true;
+							for(HdPackCondition* c : rr.Conditions) {
+								if(!c->CheckCondition((int)x, (int)y, &pixelInfo.Sprite[k])) { ok = false; break; }
+							}
+							if(ok) { sr = (int)r; break; }
+						}
+					}
+					if(sr >= 0) {
+						uint32_t* ms = _dioS.data() + offset;
+						if(sprites[k]) DrawTileLayer(pixelInfo.Sprite[k], *sprites[k], ms, screenWidth);
+						else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) DrawColor(_palette[pixelInfo.Sprite[k].SpriteColor] | 0xFF000000u, ms, screenWidth);
+						_dioSLines[y] = 1;
+						if(_dioSRule[y] < 0 || sr < _dioSRule[y]) _dioSRule[y] = sr;
+					}
+				}
+			}
+		}
+	}
+	drawBgs(3, l3);
+	drawBgs(4, l3);
+}
+
+// Remplit les 4 couches (en parallele, une ligne NES par tache comme la passe 2) puis compare leur composition a plat
+// avec l'image du processeur juste apres la passe 2 : couleurs RGB seulement, alpha ignore.
+template<uint32_t scale>
+void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32_t* outputBuffer, uint32_t screenWidth, uint32_t yStart, uint32_t yEnd, uint32_t xStart, uint32_t xEnd, bool compare)
+{
+	const auto t0 = std::chrono::steady_clock::now();
+	const uint32_t hdScale = GetScale();
+	const size_t pixels = (size_t)screenWidth * (yEnd - yStart) * hdScale;
+	// Skybox derriere les fonds : si une regle <DioramaSkybox> est vraie (et L0 sans epaisseur), L0 commence transparente au lieu de la
+	// couleur de fond PPU ; les pixels transparents des <background> laissent alors voir le ciel.
+	_dioL0Clear = false;
+	if(!_hdData->DioramaSkyboxRules.empty() && _hdData->Diorama.T[0] <= 0.0f) {
+		for(const HdDioramaSkyboxRule& r : _hdData->DioramaSkyboxRules) {
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) { if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; } }
+			if(ok) { _dioL0Clear = true; break; }
+		}
+	}
+	// G3h : effacement reduit. L0 est entierement reecrite (pas d'effacement) ; L1 et L3 (sprites) : seulement les lignes NES
+	// utilisees a l'image precedente, qui sont aussi marquees a renvoyer au GPU ; L2 en entier.
+	{
+		const uint64_t layerKey = ((uint64_t)screenWidth << 40) ^ ((uint64_t)yStart << 24) ^ ((uint64_t)hdScale << 8) ^ (uint64_t)pixels;
+		bool fullClear = _dioLKey != layerKey;
+		for(int k = 0; k < 4; k++) if(_dioL[k].size() != pixels) fullClear = true;
+		for(int i = 0; i < 2; i++) if(_dioLLines[i].size() != 240 || _dioLDirty[i].size() != 240) fullClear = true;
+		if(fullClear) {
+			for(int k = 0; k < 4; k++) _dioL[k].assign(pixels, 0u);
+			for(int i = 0; i < 2; i++) { _dioLLines[i].assign(240, 0); _dioLDirty[i].assign(240, 0); }
+			_dioLFull = true;
+			_dioLKey = layerKey;
+		} else {
+			std::fill(_dioL[2].begin(), _dioL[2].end(), 0u);
+			for(int i = 0; i < 2; i++) {
+				vector<uint32_t>& buf = _dioL[i == 0 ? 1 : 3];
+				for(uint32_t y = 0; y < 240; y++) {
+					if(!_dioLLines[i][y]) continue;
+					_dioLLines[i][y] = 0;
+					_dioLDirty[i][y] = 1;
+					if(y < yStart) continue;
+					const size_t r0 = (size_t)(y - yStart) * hdScale * screenWidth;
+					if(r0 >= pixels) continue;
+					std::fill(buf.begin() + r0, buf.begin() + std::min(pixels, r0 + (size_t)hdScale * screenWidth), 0u);
+				}
+			}
+		}
+	}
+
+	// G3c : masque des zones off camera (construit une fois) et lignes HD de la couche fixe
+	if(!_dioOffReady) {
+		_dioOffReady = true;
+		_dioOffMask.assign(256 * 240, 0);
+		for(const HdDioramaOffRect& r : _hdData->DioramaOffRects) {
+			for(int y = r.Y; y < r.Y + r.H && y < 240; y++) {
+				for(int x = r.X; x < r.X + r.W && x < 256; x++) _dioOffMask[(y << 8) | x] = 1;
+			}
+		}
+	}
+	// G3e : groupes <DioramaDepth> (masque des zones rect= construit une fois, un groupe plus tardif l'emporte)
+	const size_t groupCount = std::min<size_t>(_hdData->DioramaDepthGroups.size(), (size_t)DioGroups);
+	if(!_dioDepthReady) {
+		_dioDepthReady = true;
+		_dioDepthMask.assign(256 * 240, 0);
+		for(size_t g = 0; g < groupCount; g++) {
+			const HdDioramaDepthGroup& grp = _hdData->DioramaDepthGroups[g];
+			if(!grp.HasRect) continue;
+			for(int yy = grp.Y; yy < grp.Y + grp.H && yy < 240; yy++) {
+				for(int xx = grp.X; xx < grp.X + grp.W && xx < 256; xx++) _dioDepthMask[(yy << 8) | xx] = (uint8_t)(g + 1);
+			}
+		}
+	}
+	// G3g : on n'efface que les lignes NES utilisees a l'image precedente (le reste est deja a zero) ; effacement complet si la geometrie change
+	const uint64_t groupKey = ((uint64_t)screenWidth << 40) ^ ((uint64_t)yStart << 24) ^ ((uint64_t)hdScale << 8) ^ (uint64_t)pixels;
+	for(size_t g = 0; g < groupCount; g++) {
+		if(_dioGKey != groupKey || _dioG[g].size() != pixels || _dioGLines[g].size() != 240) {
+			_dioG[g].assign(pixels, 0u);
+			_dioGLines[g].assign(240, 0);
+		} else {
+			for(uint32_t y = 0; y < 240; y++) {
+				if(!_dioGLines[g][y]) continue;
+				_dioGLines[g][y] = 0;
+				if(y < yStart) continue;
+				const size_t r0 = (size_t)(y - yStart) * hdScale * screenWidth;
+				if(r0 >= pixels) continue;
+				std::fill(_dioG[g].begin() + r0, _dioG[g].begin() + std::min(pixels, r0 + (size_t)hdScale * screenWidth), 0u);
+			}
+		}
+	}
+	// G6c : masque des silhouettes (ombres des sprites) : meme effacement partiel que les groupes
+	if(!_hdData->DioramaShadowRules.empty()) {
+		if(_dioGKey != groupKey || _dioS.size() != pixels || _dioSLines.size() != 240) {
+			_dioS.assign(pixels, 0u);
+			_dioSLines.assign(240, 0);
+		} else {
+			for(uint32_t y = 0; y < 240; y++) {
+				if(!_dioSLines[y]) continue;
+				_dioSLines[y] = 0;
+				if(y < yStart) continue;
+				const size_t r0 = (size_t)(y - yStart) * hdScale * screenWidth;
+				if(r0 >= pixels) continue;
+				std::fill(_dioS.begin() + r0, _dioS.begin() + std::min(pixels, r0 + (size_t)hdScale * screenWidth), 0u);
+			}
+		}
+		_dioSRule.assign(240, -1);
+	}
+	// G6d : tampons de normales : meme effacement partiel que le masque des ombres
+	if(!_hdData->DioramaNormalPairs.empty()) {
+		for(int i = 0; i < 2 + DioGroups; i++) {
+			if(_dioGKey != groupKey || _dioNrm[i].size() != pixels || _dioNrmLines[i].size() != 240) {
+				_dioNrm[i].assign(pixels, 0u);
+				_dioNrmLines[i].assign(240, 0);
+			} else {
+				for(uint32_t y = 0; y < 240; y++) {
+					if(!_dioNrmLines[i][y]) continue;
+					_dioNrmLines[i][y] = 0;
+					if(y < yStart) continue;
+					const size_t r0 = (size_t)(y - yStart) * hdScale * screenWidth;
+					if(r0 >= pixels) continue;
+					std::fill(_dioNrm[i].begin() + r0, _dioNrm[i].begin() + std::min(pixels, r0 + (size_t)hdScale * screenWidth), 0u);
+				}
+			}
+		}
+	}
+	_dioGKey = groupKey;
+	_dioL4Y0 = 0; _dioL4Rows = 0;
+	if(!_hdData->DioramaOffRects.empty() || _hdData->DioramaOffTiles) {
+		int ny0 = 240, ny1 = 0;
+		for(const HdDioramaOffRect& r : _hdData->DioramaOffRects) { ny0 = std::min(ny0, r.Y); ny1 = std::max(ny1, r.Y + r.H); }
+		if(_hdData->DioramaOffTiles) { ny0 = 0; ny1 = 240; } // tiles marquees : n'importe ou a l'ecran, couche fixe entiere
+		ny0 = std::max(ny0, (int)yStart); ny1 = std::min(ny1, (int)yEnd);
+		if(ny1 > ny0) {
+			_dioL4Y0 = (uint32_t)(ny0 - (int)yStart) * hdScale;
+			_dioL4Rows = (uint32_t)(ny1 - ny0) * hdScale;
+			if(_dioL4.size() != pixels) _dioL4.assign(pixels, 0u);
+			std::fill(_dioL4.begin() + (size_t)_dioL4Y0 * screenWidth, _dioL4.begin() + (size_t)(_dioL4Y0 + _dioL4Rows) * screenWidth, 0u);
+		}
+	}
+
+	bool anyBg = false;
+	for(int c = 0; c < 5; c++) { if(_activeBgCount[c] > 0) anyBg = true; }
+	auto drawLine = [&](uint32_t i) {
+		HdBgConfig lineCfg[50];
+		if(anyBg) ComputeLineBgConfig(hdScreenInfo->ScreenTiles[i << 8], (uint8_t)i, lineCfg);
+		size_t idx = (size_t)(i - yStart) * screenWidth * hdScale;
+		for(uint32_t j = xStart; j < xEnd; j++) {
+			DrawPixelLayers(j, i, hdScreenInfo->ScreenTiles[i * 256 + j], idx, screenWidth, anyBg ? lineCfg : nullptr);
+			idx += hdScale;
+		}
+	};
+	const int nThreads = _pool.Size();
+	if(nThreads <= 1 || yEnd <= yStart || yEnd - yStart < 16) {
+		for(uint32_t i = yStart; i < yEnd; i++) drawLine(i);
+	} else {
+		_pool.Run(nThreads, [&](int t) {
+			for(uint32_t i = yStart + (uint32_t)t; i < yEnd; i += (uint32_t)nThreads) drawLine(i);
+		});
+	}
+	const double layersMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	_dioMsLayers += layersMs;
+	if(!compare) return;
+
+	// Comparaison : L0, puis L1, L2, L3 par-dessus
+	uint32_t diff = 0, big = 0, excused = 0, shown = 0;
+	for(size_t p = 0; p < pixels; p++) {
+		uint32_t c = _dioL[0][p];
+		c = DioOver(c, _dioL[1][p]);
+		c = DioOver(c, _dioL[2][p]);
+		for(size_t g = 0; g < groupCount; g++) c = DioOver(c, _dioG[g][p]); // G3e : tiles routees vers un groupe (a la place de L2)
+		c = DioOver(c, _dioL[3][p]);
+		if(_dioL4Rows) c = DioOver(c, _dioL4[p]); // G3c : couche fixe (nulle hors de ses lignes)
+		const uint32_t o = outputBuffer[p];
+		if(((c ^ o) & 0x00FFFFFFu) == 0) continue;
+		const uint32_t hx = (uint32_t)(p % screenWidth), hy = (uint32_t)(p / screenWidth);
+		const uint32_t nx = xStart + hx / hdScale, ny = yStart + hy / hdScale;
+		const HdPpuPixelInfo& lineInfo = hdScreenInfo->ScreenTiles[ny << 8];
+		if(lineInfo.Grayscale || lineInfo.EmphasisBits) { excused++; continue; }
+		diff++;
+		int worst = 0;
+		for(int sh = 0; sh < 24; sh += 8) {
+			worst = std::max(worst, std::abs((int)((c >> sh) & 0xFF) - (int)((o >> sh) & 0xFF)));
+		}
+		if(worst > 2) big++;
+		if(shown < 3) {
+			shown++;
+			char buf[220];
+			snprintf(buf, sizeof(buf), "[HD-DIORAMA] G2a ecart nes=(%u,%u) sortie=%08X couches=%08X L0=%08X L1=%08X L2=%08X L3=%08X",
+				nx, ny, o, c, _dioL[0][p], _dioL[1][p], _dioL[2][p], _dioL[3][p]);
+			MessageManager::Log(buf);
+		}
+	}
+	const double totalMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	char buf[260];
+	snprintf(buf, sizeof(buf), "[HD-DIORAMA] G2a identite f=%u : %u pixels HD, differents %u (dont ecart > 2 : %u), lignes grayscale/emphase ignorees %u ; couches %.2f ms, avec controle %.2f ms",
+		hdScreenInfo->FrameNumber, (uint32_t)pixels, diff, big, excused, layersMs, totalMs);
+	MessageManager::Log(buf);
+}
+
+// G2b (doc 36) : les 4 couches de RunDioramaLayers partent au GPU, qui les compose a plat (un seul passage) ; l'image relue
+// remplace la sortie du processeur. Si une ligne utilise grayscale / emphase (non geres par les couches), ou si le GPU est
+// indisponible ou en echec, la sortie du processeur reste telle quelle. Toutes les 300 images : comparaison GPU / processeur.
+// Cameras multiples (doc 49) : choisit la camera (par defaut selon les conditions, ou au clavier), calcule ses reglages
+// (<Diorama> + lignes <DioramaCamera> vraies) et deplace la vue de facon lisse (smoothstep) quand la cible change.
+template<uint32_t scale>
+void HdNesPack<scale>::DioramaCameraStep(const HdDioramaConfig& cfg, float& yaw, float& pitch, float& dist, float& zoom)
+{
+	const vector<string>& names = _hdData->DioramaCameraNames;
+	const int n = (int)names.size();
+	auto condsOk = [](const vector<HdPackCondition*>& cs) {
+		for(HdPackCondition* c : cs) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+		return true;
+	};
+	// camera par defaut : derniere regle <DioramaCameraDefault> vraie, sinon default=on, sinon la premiere declaree
+	int def = 0;
+	bool found = false;
+	for(const HdDioramaCameraDefaultRule& r : _hdData->DioramaCameraDefaults) { if(condsOk(r.Conditions)) { def = r.Index; found = true; } }
+	if(!found) { for(const HdDioramaCameraLine& L : _hdData->DioramaCameraLines) { if(L.IsDefault) { def = L.Index; break; } } }
+	if(def != _camDefault) { _camDefault = def; _camManual = -1; } // la camera par defaut change : la vue la suit
+	// touches : une par camera + suivante / precedente / retour a la camera par defaut (front montant)
+	const HdDioramaCameraKeys& ks = _hdData->DioramaCameraKeys;
+	vector<string> keyNames((size_t)n + 3);
+	for(const HdDioramaCameraLine& L : _hdData->DioramaCameraLines) { if(!L.Key.empty() && keyNames[(size_t)L.Index].empty()) keyNames[(size_t)L.Index] = L.Key; }
+	keyNames[(size_t)n] = ks.Next; keyNames[(size_t)n + 1] = ks.Prev; keyNames[(size_t)n + 2] = ks.Default;
+	if(_camKeyDown.size() != keyNames.size()) _camKeyDown.assign(keyNames.size(), 0);
+	int active = _camManual >= 0 ? _camManual : _camDefault;
+	for(size_t k = 0; k < keyNames.size(); k++) {
+		if(keyNames[k].empty()) continue;
+		const uint16_t code = KeyManager::GetKeyCode(keyNames[k]);
+		if(code == 0) {
+			if(!_camKeyWarned) { _camKeyWarned = true; MessageManager::Log("[HD-DIORAMA] camera : nom de touche inconnu : " + keyNames[k]); }
+			continue;
+		}
+		const bool down = KeyManager::IsKeyPressed(code);
+		if(down && !_camKeyDown[k]) {
+			if((int)k < n) _camManual = (int)k;
+			else if((int)k == n) _camManual = (active + 1) % n;
+			else if((int)k == n + 1) _camManual = (active + n - 1) % n;
+			else _camManual = -1;
+			active = _camManual >= 0 ? _camManual : _camDefault;
+		}
+		_camKeyDown[k] = down ? 1 : 0;
+	}
+	// reglages de la camera active : <Diorama>, puis chaque ligne vraie de cette camera dans l'ordre du fichier
+	float v[4] = { cfg.Yaw, cfg.Pitch, cfg.Dist, cfg.Zoom };
+	float time = 40.0f;
+	for(const HdDioramaCameraLine& L : _hdData->DioramaCameraLines) {
+		if(L.Index != active || !condsOk(L.Conditions)) continue;
+		for(int i = 0; i < 4; i++) { if(L.Has[i]) v[i] = L.V[i]; }
+		if(L.HasTime) time = L.Time;
+	}
+	// la distance ne doit pas amener un plan derriere la camera (meme borne que le chargeur : z >= -0,9 x dist)
+	float minZ = 0.0f;
+	for(int k = 0; k < 4; k++) minZ = std::min(minZ, cfg.Z[k]);
+	for(const HdDioramaDepthGroup& g : _hdData->DioramaDepthGroups) minZ = std::min(minZ, g.Z);
+	for(const HdDioramaObjectRule& o : _hdData->DioramaObjectRules) minZ = std::min(minZ, o.Z);
+	v[2] = std::max(v[2], std::max(16.0f, -minZ / 0.9f + 1.0f));
+	if(!_camInit) {
+		for(int i = 0; i < 4; i++) { _camFrom[i] = _camTo[i] = _camCur[i] = v[i]; }
+		_camT = _camDur = 1.0f; _camInit = true;
+	}
+	bool changed = false;
+	for(int i = 0; i < 4; i++) { if(std::fabs(v[i] - _camTo[i]) > 1e-4f) changed = true; }
+	if(changed) {
+		for(int i = 0; i < 4; i++) { _camFrom[i] = _camCur[i]; _camTo[i] = v[i]; }
+		_camT = 0.0f; _camDur = std::max(1.0f, time);
+		if(time <= 0.0f) { for(int i = 0; i < 4; i++) _camCur[i] = v[i]; _camT = _camDur; }
+	}
+	if(_camT < _camDur) {
+		_camT += 1.0f;
+		const float t = std::min(1.0f, _camT / _camDur);
+		const float s = t * t * (3.0f - 2.0f * t);
+		for(int i = 0; i < 4; i++) _camCur[i] = _camFrom[i] + (_camTo[i] - _camFrom[i]) * s;
+	}
+	yaw = _camCur[0]; pitch = _camCur[1]; dist = _camCur[2]; zoom = _camCur[3];
+}
+
+template<uint32_t scale>
+void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outputBuffer, uint32_t screenWidth, uint32_t outHeight, uint32_t yStart, uint32_t yEnd, bool compare)
+{
+	HdGpuCore& gpu = HdGpuCore::Get();
+	if(!_dioGpuTried) {
+		_dioGpuTried = true;
+		_dioGpuOk = gpu.Available();
+		MessageManager::Log(_dioGpuOk ? ("[HD-DIORAMA] G2b : GPU actif (" + gpu.Info() + ")") : ("[HD-DIORAMA] G2b : GPU indisponible (" + gpu.Info() + "), image du processeur conservee"));
+	}
+	if(!_dioGpuOk) return;
+	for(uint32_t y = yStart; y < yEnd && y < 240; y++) {
+		const HdPpuPixelInfo& lineInfo = hdScreenInfo->ScreenTiles[y << 8];
+		if(lineInfo.Grayscale || lineInfo.EmphasisBits) return;
+	}
+
+	const auto t0 = std::chrono::steady_clock::now();
+	const size_t pixels = (size_t)screenWidth * outHeight;
+	// G3a : vue du diorama. Options de <Diorama> (yaw, pitch, dist, z0..z3) + orbite automatique si orbit=on.
+	const HdDioramaConfig& cfg = _hdData->Diorama;
+	float yaw = cfg.Yaw, pitch = cfg.Pitch, dist = cfg.Dist, baseZoom = cfg.Zoom;
+	if(!_hdData->DioramaCameraNames.empty()) DioramaCameraStep(cfg, yaw, pitch, dist, baseZoom); // cameras multiples
+	if(cfg.Orbit) {
+		const double ph = 6.283185307179586 * (double)(_dioOrbit++) / (double)cfg.OrbitPeriod;
+		yaw += cfg.OrbitAmp * (float)std::sin(ph);
+		pitch += 0.4f * cfg.OrbitAmp * (float)std::sin(ph / 1.5);
+	}
+	// Manette : <DioramaPad> ajoute au yaw/pitch/zoom de la vue ; la premiere regle dont les conditions sont vraies commande (lissage, retour a 0 sans regle)
+	float zoom = baseZoom;
+	{
+		float tYaw = 0.0f, tPitch = 0.0f, tZoom = 0.0f, smooth = 0.2f;
+		const HdDioramaPadRule* pr = nullptr;
+		for(const HdDioramaPadRule& r : _hdData->DioramaPadRules) {
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) { if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; } }
+			if(ok) { pr = &r; break; }
+		}
+		if(pr) {
+			smooth = pr->Smooth;
+			const string pad = "Pad" + std::to_string(pr->Port) + " ", joy = "Joy" + std::to_string(pr->Port) + " ";
+			auto axis = [&](const char* padName, const char* joyName, float& out) {
+				optional<int16_t> a;
+				const uint16_t cp = KeyManager::GetKeyCode(pad + padName);
+				if(cp != 0) a = KeyManager::GetAxisPosition(cp);
+				if(!a.has_value()) { const uint16_t cj = KeyManager::GetKeyCode(joy + joyName); if(cj != 0) a = KeyManager::GetAxisPosition(cj); }
+				if(!a.has_value()) return false;
+				float v = (float)a.value() / 32767.0f;
+				const float av = std::fabs(v);
+				if(av <= pr->Dead) v = 0.0f; else v = (v < 0 ? -1.0f : 1.0f) * std::min(1.0f, (av - pr->Dead) / (1.0f - pr->Dead));
+				out = v; return true;
+			};
+			auto stick = [&](int fn, const char* nx, const char* ny, const char* jx, const char* jy) {
+				if(fn == 0) return;
+				float x = 0.0f, y = 0.0f;
+				axis(nx, jx, x); axis(ny, jy, y);
+				if(pr->InvX) x = -x;
+				if(pr->InvY) y = -y;
+				if(fn == 1) { tYaw += x * pr->YawMax; tPitch += y * pr->PitchMax; }
+				else tZoom += y * std::log2(pr->ZoomRange);
+			};
+			stick(pr->Left, "LT X", "LT Y", "X", "Y");
+			stick(pr->Right, "RT X", "RT Y", "X2", "Y2");
+		}
+		_padYaw += (tYaw - _padYaw) * smooth; _padPitch += (tPitch - _padPitch) * smooth; _padZoom += (tZoom - _padZoom) * smooth;
+		if(std::fabs(_padYaw) < 0.01f && tYaw == 0.0f) _padYaw = 0.0f;
+		if(std::fabs(_padPitch) < 0.01f && tPitch == 0.0f) _padPitch = 0.0f;
+		if(std::fabs(_padZoom) < 0.001f && tZoom == 0.0f) _padZoom = 0.0f;
+		yaw = std::max(-70.0f, std::min(70.0f, yaw + _padYaw));
+		pitch = std::max(-70.0f, std::min(70.0f, pitch + _padPitch));
+		zoom = std::max(0.1f, std::min(4.0f, zoom * std::pow(2.0f, _padZoom)));
+	}
+	const bool neutral = (yaw == 0.0f && pitch == 0.0f);
+	HdDioramaScene scene;
+	scene.W = (float)screenWidth / (float)GetScale();
+	scene.H = (float)outHeight / (float)GetScale();
+	// Widescreen : la scene garde la taille de l'ecran NES visible ; seule l'image de sortie s'elargit (colonnes NES ajoutees de chaque cote)
+	const float wsPadNes = (_wsMode && _simFieldNes > scene.W) ? std::floor((_simFieldNes - scene.W) * 0.5f + 0.5f) : 0.0f;
+	scene.OutPad = wsPadNes;
+	const size_t wsPadHd = (size_t)(wsPadNes * (float)GetScale());
+	scene.D = dist;
+	scene.Yaw = yaw; scene.Pitch = pitch;
+	for(int k = 0; k < 4; k++) { scene.PlaneZ[k] = cfg.Z[k]; scene.Thick[k] = cfg.T[k] * 8.0f; } // G3b1 : tiles -> pixels NES
+	scene.Scale = (float)GetScale();
+	scene.Aa = cfg.Aa; // G3f
+	scene.Clear = _dioL[0].empty() ? 0xFF000000u : (_dioL[0][0] | 0xFF000000u);
+	if(_dioL4Rows && _dioL4.size() >= pixels) { scene.Fixed = _dioL4.data(); scene.FixedY0 = _dioL4Y0; scene.FixedRows = _dioL4Rows; } // G3c
+	if(scene.Fixed && _hdData->DioramaFixed3d) { // G3c3 : plaque epaisse
+		scene.FixedThick = cfg.FixedT * 8.0f; scene.FixedZ = cfg.FixedZ; scene.FixedPersp = cfg.FixedPersp; scene.FixedDark = cfg.FixedDark;
+	}
+	// G3b2 : motifs de murs (PNG decodes a la demande). Defilement du motif du dessus : celui de la ligne NES de reference.
+	// zone : rectangle (pixels NES) que la texture couvre pour stretch=adapt ; thick : epaisseur de la couche (pixels NES)
+	auto fillWall = [&](int idx, const HdDioramaWallTex& wt, int refLine, float zoneX, float zoneY, float zoneW, float zoneH, float thick) {
+		if(!wt.Top && !wt.Side) return;
+		if(wt.Top) wt.Top->Init();
+		if(wt.Side) wt.Side->Init();
+		HdPackBitmapInfo* topBmp = wt.Top ? wt.Top : (wt.SideVol > 1 ? nullptr : wt.Side); // le dessus retombe sur les flancs (sauf bande volume : elle sert a tous les bords)
+		HdPackBitmapInfo* sideBmp = wt.Side;
+		HdDioramaWall& w = scene.Wall[idx];
+		if(topBmp && topBmp->Width > 0 && topBmp->Height > 0 && topBmp->PixelData.size() >= (size_t)topBmp->Width * topBmp->Height) {
+			w.TopPix = topBmp->PixelData.data(); w.TopW = topBmp->Width; w.TopH = topBmp->Height;
+		}
+		if(sideBmp && sideBmp->Width > 0 && sideBmp->Height > 0 && sideBmp->PixelData.size() >= (size_t)sideBmp->Width * sideBmp->Height) {
+			w.SidePix = sideBmp->PixelData.data(); w.SideW = sideBmp->Width; w.SideH = sideBmp->Height;
+		}
+		// pixels NES par repetition : taille du PNG en pixels HD / echelle, multipliee par l'etirement (1 = taille normale)
+		const float hdScale = (float)GetScale();
+		const float tsx = wt.Top ? wt.TopStretchX : wt.SideStretchX, tsy = wt.Top ? wt.TopStretchY : wt.SideStretchY;
+		// stretch < 0 = adapt : dessus X = largeur de la zone, flancs X = hauteur de la zone, Y = epaisseur de la couche
+		w.TopPerX = std::max(0.01f, tsx < 0.0f ? zoneW : (float)w.TopW / hdScale * tsx);
+		w.TopPerY = std::max(0.01f, tsy < 0.0f ? thick : (float)w.TopH / hdScale * tsy);
+		w.SidePerX = std::max(0.01f, wt.SideStretchX < 0.0f ? zoneH : (float)w.SideW / hdScale * wt.SideStretchX);
+		w.SidePerY = std::max(0.01f, wt.SideStretchY < 0.0f ? thick : (float)w.SideH / hdScale * wt.SideStretchY);
+		if(wt.SideVol > 1 && w.SidePix) {
+			// G3b3 : bande volume, motif en coordonnees du plan ; une image = hauteur de la bande / N
+			w.SideVol = (uint32_t)wt.SideVol;
+			w.SideVolVert = (wt.SideVolMode == 2 || (wt.SideVolMode == 0 && w.SideH > w.SideW)) ? 1u : 0u;
+			const float iw = (float)(w.SideVolVert ? w.SideW : w.SideW / w.SideVol);
+			const float ih = (float)(w.SideVolVert ? w.SideH / w.SideVol : w.SideH);
+			w.VolPerX = std::max(0.01f, wt.SideStretchX < 0.0f ? zoneW : iw / hdScale * wt.SideStretchX);
+			w.VolPerY = std::max(0.01f, wt.SideStretchY < 0.0f ? zoneH : ih / hdScale * wt.SideStretchY);
+			w.VolOriginX = wt.SideStretchX < 0.0f ? zoneX : 0.0f;
+			w.VolOriginY = wt.SideStretchY < 0.0f ? zoneY : 0.0f;
+			w.VolThick = thick;
+		}
+		w.TopOriginX = tsx < 0.0f ? zoneX : 0.0f;
+		w.SideOriginY = wt.SideStretchX < 0.0f ? zoneY : 0.0f;
+		if(!(_dioWallLog & (1u << idx))) {
+			_dioWallLog |= (1u << idx);
+			char buf[300];
+			snprintf(buf, sizeof(buf), "[HD-DIORAMA] G3b2 mur couche %d : dessus %s (%ux%u, repetition %.1f x %.1f px NES), flancs %s (%ux%u, repetition %.1f x %.1f px NES)",
+				idx, w.TopPix ? "ok" : "ABSENT ou illisible", w.TopW, w.TopH, w.TopPerX, w.TopPerY,
+				w.SidePix ? "ok" : "absents (extrusion)", w.SideW, w.SideH, w.SidePerX, w.SidePerY);
+			MessageManager::Log(buf);
+			if(w.SideVol > 1) {
+				snprintf(buf, sizeof(buf), "[HD-DIORAMA] G3b3 mur couche %d : volume de %u images (%s) de %ux%u (repetition %.1f x %.1f px NES, epaisseur %.0f)",
+					idx, w.SideVol, w.SideVolVert ? "de haut en bas" : "cote a cote", w.SideVolVert ? w.SideW : w.SideW / w.SideVol, w.SideVolVert ? w.SideH / w.SideVol : w.SideH, w.VolPerX, w.VolPerY, w.VolThick);
+				MessageManager::Log(buf);
+			}
+		}
+		const int line = std::min(std::max(refLine, (int)yStart), std::min((int)yEnd, 240) - 1);
+		w.Scroll = (float)NesLineScrollX(hdScreenInfo->ScreenTiles[(size_t)line << 8]);
+	};
+	for(int k = 0; k < 4; k++) fillWall(k, cfg.Wall[k], 120, 0.0f, 0.0f, scene.W, scene.H, cfg.T[k] * 8.0f);
+	// G3e : groupes <DioramaDepth>, seulement leurs lignes non vides (une ligne NES de marge de chaque cote pour le filtrage)
+	{
+		const uint32_t hdScale = GetScale();
+		const size_t groupCount = std::min<size_t>(_hdData->DioramaDepthGroups.size(), (size_t)DioGroups);
+		for(size_t g = 0; g < groupCount; g++) {
+			if(_dioG[g].size() < pixels || _dioGLines[g].size() < 240) continue;
+			int a = -1, b = -1;
+			for(int y = (int)yStart; y < (int)yEnd && y < 240; y++) {
+				if(_dioGLines[g][y]) {
+					if(a < 0) a = y;
+					b = y;
+				}
+			}
+			if(a < 0) continue;
+			a = std::max(a - 1, (int)yStart);
+			b = std::min(b + 1, (int)yEnd - 1);
+			const HdDioramaDepthGroup& grp = _hdData->DioramaDepthGroups[g];
+			scene.ExtraImg[g] = _dioG[g].data();
+			scene.ExtraY0[g] = (uint32_t)(a - (int)yStart) * hdScale;
+			scene.ExtraRows[g] = (uint32_t)(b - a + 1) * hdScale;
+			scene.ExtraZ[g] = std::max(grp.Z, -0.9f * dist);
+			scene.ExtraThick[g] = grp.T * 8.0f;
+			// zone du groupe : son rect=, sinon tout l'ecran
+			fillWall(4 + (int)g, grp.Wall, (a + b) / 2, grp.HasRect ? (float)grp.X : 0.0f, grp.HasRect ? (float)grp.Y : 0.0f,
+				grp.HasRect ? (float)grp.W : scene.W, grp.HasRect ? (float)grp.H : scene.H, grp.T * 8.0f);
+		}
+	}
+	scene.ExtDebug = cfg.ExtDebug; // G4 : controle visuel des extensions
+	scene.Zoom = zoom;
+	// G4a : <DioramaExtend> (doc 40) : regles dont les conditions [ ] sont vraies a cette image ; la derniere regle vraie l'emporte
+	if(!_hdData->DioramaExtendRules.empty()) {
+		const int sideBit[4] = { 1, 2, 4, 8 };
+		uint32_t active = 0;
+		for(const HdDioramaExtendRule& r : _hdData->DioramaExtendRules) {
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) {
+				if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; }
+			}
+			if(!ok || r.Layer < 0 || r.Layer > 3 + DioGroups) continue;
+			HdDioramaExtend& e = scene.Ext[r.Layer];
+			for(int sd = 0; sd < 4; sd++) {
+				if(!(r.Side & sideBit[sd])) continue;
+				e.Active = true;
+				e.Margin[sd] = (float)r.Size; e.Mode[sd] = r.Mode; e.Band[sd] = (float)r.Band * 8.0f;
+				if(r.RangeMin >= 0) { e.Range[sd][0] = (float)r.RangeMin; e.Range[sd][1] = (float)r.RangeMax; } else { e.Range[sd][0] = -100000.0f; e.Range[sd][1] = 100000.0f; }
+				e.Fog[sd] = r.Fog;
+				e.FogDist[sd] = r.FogDist > 0 ? (float)r.FogDist : (float)r.Size;
+				e.Color[sd][0] = r.HasColor ? (float)((r.Color >> 16) & 0xFF) / 255.0f : 0.0f;
+				e.Color[sd][1] = r.HasColor ? (float)((r.Color >> 8) & 0xFF) / 255.0f : 0.0f;
+				e.Color[sd][2] = r.HasColor ? (float)(r.Color & 0xFF) / 255.0f : 0.0f;
+				e.Color[sd][3] = r.HasColor ? 1.0f : 0.0f;
+				e.Edge[sd] = r.Edge >= 0 ? (float)r.Edge : (sd == 1 ? scene.H : (sd == 3 ? scene.W : 0.0f));
+			}
+			active++;
+		}
+		if(active) {
+			const int line = std::min(std::max(120, (int)yStart), std::min((int)yEnd, 240) - 1);
+			scene.ExtScrollX = (float)NesLineScrollX(hdScreenInfo->ScreenTiles[(size_t)line << 8]);
+			scene.ExtScrollY = (float)NesLineScrollY(hdScreenInfo->ScreenTiles[(size_t)line << 8]);
+			static bool logged = false;
+			if(!logged) {
+				logged = true;
+				char buf[320];
+				snprintf(buf, sizeof(buf), "[HD-DIORAMA] G4a extension de l'ecran : %u regle(s) active(s) sur %u, %u groupe(s) <DioramaDepth> defini(s)", active, (uint32_t)_hdData->DioramaExtendRules.size(), (uint32_t)_hdData->DioramaDepthGroups.size());
+				MessageManager::Log(buf);
+				uint32_t ri = 0;
+				for(const HdDioramaExtendRule& r : _hdData->DioramaExtendRules) {
+					ri++;
+					char lay[24];
+					if(r.Layer >= 4) snprintf(lay, sizeof(lay), "g%d", r.Layer - 3); else snprintf(lay, sizeof(lay), "L%d", r.Layer);
+					const char* state = "";
+					if(r.Layer >= 4) {
+						const int g = r.Layer - 4;
+						state = (g >= (int)_hdData->DioramaDepthGroups.size()) ? " : GROUPE INEXISTANT (numero trop grand)" : (scene.ExtraImg[g] && scene.ExtraRows[g] ? " : groupe present" : " : groupe VIDE a cette image (aucune tile dedans)");
+					}
+					snprintf(buf, sizeof(buf), "[HD-DIORAMA] G4a regle %u : couche %s, cotes %d (1 haut 2 bas 4 gauche 8 droite), mode %d, marge %d, bande %d, edge %d, plage %d-%d, brume %.2f sur %d%s", ri, lay, r.Side, r.Mode, r.Size, r.Band, r.Edge, r.RangeMin, r.RangeMax, r.Fog, r.FogDist > 0 ? r.FogDist : r.Size, state);
+					MessageManager::Log(buf);
+				}
+			}
+		}
+	}
+	// G3h : envoi reduit (L0 d'une seule couleur en 1 x 1 ; L1 et L3 : lignes modifiees seulement)
+	const bool linesOk = _dioLLines[0].size() == 240 && _dioLLines[1].size() == 240 && _dioLDirty[0].size() == 240 && _dioLDirty[1].size() == 240;
+	if(linesOk) {
+		for(int i = 0; i < 2; i++) {
+			for(int y = 0; y < 240; y++) if(_dioLLines[i][y]) _dioLDirty[i][y] = 1;
+		}
+		if(!_dioLFull) {
+			scene.RowDirty[1] = _dioLDirty[0].data();
+			scene.RowDirty[3] = _dioLDirty[1].data();
+			scene.RowY0 = yStart;
+			scene.RowScale = GetScale();
+		}
+	}
+	scene.L0Uniform = _dioL[0].size() >= pixels && pixels > 1 && scene.Thick[0] <= 0.0f &&
+		memcmp(_dioL[0].data(), _dioL[0].data() + 1, (pixels - 1) * sizeof(uint32_t)) == 0;
+	{ // diagnostic : etat de la L0 elargie, journalise a chaque changement
+		char b[256];
+		snprintf(b, sizeof(b), "[HD-DIORAMA] L0 elargie : bande=%zu HD, L0 unie=%d, fonds actifs par classe=%d/%d/%d/%d/%d, L0 transparente=%d", wsPadHd, scene.L0Uniform ? 1 : 0, _activeBgCount[0], _activeBgCount[1], _activeBgCount[2], _activeBgCount[3], _activeBgCount[4], _dioL0Clear ? 1 : 0);
+		if(_dioWideLog != b) { _dioWideLog = b; MessageManager::Log(b); }
+	}
+	// Fonds <background> de L0 prolonges au-dela de l'ecran (bandes widescreen et marges wide= / tall= pour la rotation de la camera) :
+	// L0 elargie, centre = L0, marges = les memes fonds.
+	{
+		float marginX = (float)wsPadNes, marginY = 0.0f;
+		bool anyL0Bg = false;
+		if(_activeBgCount[0] > 0) {
+			for(int pr = 0; pr < (int)HdPackData::BgLayerCount; pr++) {
+				for(const HdBackgroundInfo& bi : _hdData->BackgroundsByPriority[pr]) {
+					if(bi.DioTarget == -1 || bi.DioTarget == 0) {
+						anyL0Bg = true;
+						marginX = std::max(marginX, (float)bi.DioWideX);
+						marginY = std::max(marginY, (float)bi.DioWideY);
+					}
+				}
+			}
+		}
+		const size_t mxHd = (size_t)(marginX * (float)GetScale()), myHd = (size_t)(marginY * (float)GetScale());
+		if(anyL0Bg && (mxHd > 0 || myHd > 0) && !scene.L0Uniform && _dioL[0].size() >= pixels) {
+			const auto tWide0 = std::chrono::steady_clock::now();
+			const size_t wideW = (size_t)screenWidth + 2 * mxHd, wideH = (size_t)outHeight + 2 * myHd;
+			_dioL0Wide.assign(wideW * wideH, 0u);
+			const uint32_t bandBase = _dioL0Clear ? 0u : (_dioL[0][0] | 0xFF000000u);
+			const int sc_ = (int)GetScale();
+			const int linesAround = (int)((myHd + sc_ - 1) / sc_);
+			const int lnFirst = (int)yStart - linesAround, lnLast = (int)yEnd + linesAround;
+			auto wideLine = [&](int ln) {
+				HdBgConfig lc[50];
+				const uint32_t cl = (uint32_t)std::max(0, std::min(239, ln));
+				ComputeLineBgConfig(hdScreenInfo->ScreenTiles[cl << 8], (uint8_t)cl, lc);
+				std::vector<const HdBgConfig*> bgs;
+				for(int k = 0; k < _activeBgCount[0]; k++) {
+					const HdBgConfig& c = lc[k];
+					if(c.BackgroundIndex < 0) continue;
+					const int t = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex].DioTarget;
+					if(t == -1 || t == 0) bgs.push_back(&c);
+				}
+				for(int i = 0; i < sc_; i++) {
+					const int64_t r = (int64_t)(ln - (int)yStart) * sc_ + i; // ligne de L0 (negative au-dessus)
+					if(r < -(int64_t)myHd || r >= (int64_t)outHeight + (int64_t)myHd) continue;
+					uint32_t* row = _dioL0Wide.data() + (size_t)(r + (int64_t)myHd) * wideW;
+					const bool insideRows = r >= 0 && r < (int64_t)outHeight;
+					if(insideRows) memcpy(row + mxHd, _dioL[0].data() + (size_t)r * screenWidth, (size_t)screenWidth * sizeof(uint32_t));
+					const int64_t aRow = (int64_t)yStart * sc_ + r;
+					auto fillSpan = [&](size_t x0, size_t n) {
+						if(n == 0) return;
+						std::fill(row + x0, row + x0 + n, bandBase);
+						for(const HdBgConfig* c : bgs) DrawWidescreenBgSpan(*c, (int64_t)x0 - (int64_t)mxHd, aRow, n, row + x0);
+					};
+					if(insideRows) { fillSpan(0, mxHd); fillSpan(wideW - mxHd, mxHd); }
+					else fillSpan(0, wideW);
+				}
+			};
+			const int nT = _pool.Size();
+			const int nLines = lnLast - lnFirst;
+			if(nT <= 1 || nLines < 16) {
+				for(int ln = lnFirst; ln < lnLast; ln++) wideLine(ln);
+			} else {
+				_pool.Run(nT, [&](int t) { for(int ln = lnFirst + t; ln < lnLast; ln += nT) wideLine(ln); });
+			}
+			scene.L0Wide = _dioL0Wide.data();
+			scene.L0WideW = (uint32_t)wideW; scene.L0WideH = (uint32_t)wideH;
+			scene.L0WideMX = (float)mxHd / (float)GetScale(); scene.L0WideMY = (float)myHd / (float)GetScale();
+			_dioMsWide += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tWide0).count();
+			_dioWideBytes = (uint64_t)wideW * wideH * 4;
+		}
+	}
+	// G5 : skybox (doc 41). Seulement si L0 est unie : sa couleur est alors remplacee par le fond. La derniere regle vraie l'emporte.
+	if(!_hdData->DioramaSkyboxRules.empty() && (scene.L0Uniform || _dioL0Clear)) {
+		const HdDioramaSkyboxRule* chosen = nullptr;
+		for(const HdDioramaSkyboxRule& r : _hdData->DioramaSkyboxRules) {
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) {
+				if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; }
+			}
+			if(ok) chosen = &r;
+		}
+		if(chosen) {
+			auto rgb = [](uint32_t c, float* o) { o[0] = ((c >> 16) & 0xFF) / 255.0f; o[1] = ((c >> 8) & 0xFF) / 255.0f; o[2] = (c & 0xFF) / 255.0f; };
+			if(chosen->Mode == 1) {
+				scene.Sky.Mode = 1;
+				rgb(chosen->Top, scene.Sky.Top); rgb(chosen->Bottom, scene.Sky.Bottom);
+			} else if(chosen->Mode >= 3) {
+				// G5b : panorama ou cubemap ; la rotation propre du fond (deg / image) s'ajoute a la camera de la scene
+				const uint32_t* pix = nullptr; uint32_t sw = 0, sh = 0; int layout = 1;
+				if(chosen->Mode == 4 && chosen->Faces[0]) {
+					if(_dioSkyCubeKey != chosen) {
+						_dioSkyCubeKey = chosen; _dioSkyCube.clear(); _dioSkyCubeF = 0;
+						uint32_t f = 0; bool good = true;
+						for(int k = 0; k < 6 && good; k++) {
+							chosen->Faces[k]->Init();
+							const HdPackBitmapInfo* b = chosen->Faces[k];
+							if(b->Width == 0 || b->Width != b->Height || b->PixelData.size() < (size_t)b->Width * b->Height) good = false;
+							else if(f == 0) f = b->Width;
+							else if(f != b->Width) good = false;
+						}
+						if(good) {
+							_dioSkyCube.assign((size_t)f * 6 * f, 0u);
+							for(int k = 0; k < 6; k++) {
+								for(uint32_t y = 0; y < f; y++) {
+									memcpy(&_dioSkyCube[(size_t)y * f * 6 + (size_t)k * f], &chosen->Faces[k]->PixelData[(size_t)y * f], f * sizeof(uint32_t));
+								}
+							}
+							_dioSkyCubeF = f;
+						} else {
+							MessageManager::Log("[HD-DIORAMA] G5b skybox cube : les 6 faces doivent etre carrees et de meme taille, skybox ignoree.");
+						}
+					}
+					if(!_dioSkyCube.empty()) { pix = _dioSkyCube.data(); sw = _dioSkyCubeF * 6; sh = _dioSkyCubeF; layout = 3; }
+				} else if(chosen->Image) {
+					chosen->Image->Init();
+					const HdPackBitmapInfo* b = chosen->Image;
+					if(b->Width > 0 && b->Height > 0 && b->PixelData.size() >= (size_t)b->Width * b->Height) {
+						pix = b->PixelData.data(); sw = b->Width; sh = b->Height;
+						if(chosen->Mode == 4) {
+							if(sw * 3 == sh * 4) layout = 1;
+							else if(sw * 4 == sh * 3) layout = 2;
+							else if(sw == sh * 6) layout = 3;
+							else if(sh == sw * 6) layout = 4;
+							else { pix = nullptr; MessageManager::Log("[HD-DIORAMA] G5b skybox cube : taille d'image inattendue (croix 4:3 ou 3:4, bande 6:1 ou 1:6), skybox ignoree."); }
+						}
+					}
+				}
+				if(pix) {
+					_dioSkyX += chosen->SpeedX; _dioSkyY += chosen->SpeedY;
+					scene.Sky.Mode = chosen->Mode;
+					scene.Sky.Pix = pix; scene.Sky.W = sw; scene.Sky.H = sh;
+					scene.Sky.RotYaw = _dioSkyX; scene.Sky.RotPitch = _dioSkyY; scene.Sky.CubeLayout = layout;
+				}
+			} else if(chosen->Image) {
+				chosen->Image->Init();
+				if(chosen->Image->Width > 0 && chosen->Image->Height > 0 && chosen->Image->PixelData.size() >= (size_t)chosen->Image->Width * chosen->Image->Height) {
+					_dioSkyX += chosen->SpeedX; _dioSkyY += chosen->SpeedY;
+					scene.Sky.Mode = 2;
+					scene.Sky.Pix = chosen->Image->PixelData.data(); scene.Sky.W = chosen->Image->Width; scene.Sky.H = chosen->Image->Height;
+					scene.Sky.OffX = _dioSkyX; scene.Sky.OffY = _dioSkyY;
+				}
+			}
+			static bool skyLogged = false;
+			if(!skyLogged) {
+				skyLogged = true;
+				MessageManager::Log(std::string("[HD-DIORAMA] G5 skybox : ") + (chosen->Mode == 1 ? "degrade" : chosen->Mode == 2 ? "image" : chosen->Mode == 3 ? "panorama" : "cubemap") + ", " + std::to_string(_hdData->DioramaSkyboxRules.size()) + " regle(s) definie(s)");
+			}
+		}
+	} else if(!_hdData->DioramaSkyboxRules.empty()) {
+		static bool skyWarned = false;
+		if(!skyWarned) { skyWarned = true; MessageManager::Log("[HD-DIORAMA] G5 skybox : L0 n'est pas unie, skybox non affichee (elle remplace la couleur unie de L0)."); }
+	}
+	// G6a / G6b : lumieres de scene (doc 42) : regles dont les conditions sont vraies ; 8 lumieres au plus, derniere ambiante vraie.
+	// Une regle avec tile= donne une lumiere par tile de sprite reconnue a l'ecran.
+	if(!_hdData->DioramaLightRules.empty()) {
+		auto rgb = [](uint32_t c, float k, float* o) { o[0] = ((c >> 16) & 0xFF) / 255.0f * k; o[1] = ((c >> 8) & 0xFF) / 255.0f * k; o[2] = (c & 0xFF) / 255.0f * k; };
+		int n = 0;
+		bool any = false;
+		const float tSec = hdScreenInfo ? (float)hdScreenInfo->FrameNumber / 60.0f : 0.0f;
+		auto addLight = [&](const HdDioramaLightRule& r, float px, float py) {
+			if(n >= 8) return;
+			HdDioramaLight& l = scene.Lights.L[n++];
+			const float fk = r.Flicker > 0.0f ? 1.0f - r.Flicker * 0.5f * (1.0f + std::sin(r.FlickerSpeed * tSec)) : 1.0f;
+			l.Type = r.Type;
+			rgb(r.Color, r.Intensity * fk, l.Col);
+			if(r.Type == 2) {
+				l.Pos[0] = px; l.Pos[1] = py; l.Pos[2] = r.Z; l.Radius = r.Radius; l.Glow = r.Glow * fk; l.GlowRadius = r.GlowRadius;
+			} else {
+				const float len = std::sqrt(r.Dx * r.Dx + r.Dy * r.Dy + r.Dz * r.Dz);
+				l.Pos[0] = -r.Dx / len; l.Pos[1] = -r.Dy / len; l.Pos[2] = -r.Dz / len; // vers la lumiere
+			}
+		};
+		bool anyTile = false;
+		for(const HdDioramaLightRule& r : _hdData->DioramaLightRules) {
+			if(r.HasTile) { anyTile = true; continue; }
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) {
+				if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; }
+			}
+			if(!ok) continue;
+			any = true;
+			if(r.Type == 1) { rgb(r.Color, r.Intensity, scene.Lights.Ambient); continue; }
+			addLight(r, r.X, r.Y);
+		}
+		if(anyTile && hdScreenInfo) {
+			std::vector<uint32_t> seen; // (regle, origine x, origine y) deja ajoutes
+			const size_t nRules = _hdData->DioramaLightRules.size();
+			for(int y = 0; y < 240 && n < 8; y++) {
+				for(int x = 0; x < 256 && n < 8; x++) {
+					HdPpuPixelInfo& pi = hdScreenInfo->ScreenTiles[((size_t)y << 8) | (size_t)x];
+					for(int sp = 0; sp < pi.SpriteCount; sp++) {
+						HdPpuTileInfo& spr = pi.Sprite[sp];
+						for(size_t ri = 0; ri < nRules; ri++) {
+							const HdDioramaLightRule& r = _hdData->DioramaLightRules[ri];
+							if(!r.HasTile || !r.MatchesTile(spr)) continue;
+							const int ox = x - (spr.HorizontalMirroring ? 7 - (int)spr.OffsetX : (int)spr.OffsetX);
+							const int oy = y - (spr.VerticalMirroring ? 7 - (int)spr.OffsetY : (int)spr.OffsetY);
+							const uint32_t id = ((uint32_t)(ri & 0xFFF) << 20) | ((uint32_t)((ox + 16) & 0x3FF) << 10) | (uint32_t)((oy + 16) & 0x3FF);
+							if(std::find(seen.begin(), seen.end(), id) != seen.end()) continue;
+							seen.push_back(id);
+							bool ok = true;
+							for(HdPackCondition* c : r.Conditions) {
+								if(!c->CheckCondition(x, y, &spr)) { ok = false; break; }
+							}
+							if(!ok) continue;
+							any = true;
+							addLight(r, (float)ox + 4.0f + (spr.HorizontalMirroring ? -r.OffX : r.OffX), (float)oy + 4.0f - (float)yStart + (spr.VerticalMirroring ? -r.OffY : r.OffY));
+						}
+					}
+				}
+			}
+		}
+		scene.Lights.Active = any;
+		static bool lightLogged = false;
+		if(any && !lightLogged) {
+			lightLogged = true;
+			MessageManager::Log("[HD-DIORAMA] G6a lumieres de scene : " + std::to_string(n) + " lumiere(s) ponctuelle(s) ou solaire(s) active(s) (tiles de sprite comprises), " + std::to_string(_hdData->DioramaLightRules.size()) + " regle(s) definie(s)");
+		}
+	}
+	// H1 : objets 3D de decor (doc 45) : regles <DioramaObject> dont la condition est vraie (8 au plus)
+	scene.Objects.Count = 0;
+	if(!_hdData->DioramaObjectRules.empty()) {
+		const vector<HdDioramaObjectRule>& orules = _hdData->DioramaObjectRules;
+		if(_dioObjSpin.size() != orules.size()) _dioObjSpin.assign(orules.size(), 0.0f);
+		int on = 0;
+		vector<int32_t> wvals; // valeurs surveillees de cette image (INT32_MIN = adresse non lue), pour scrollx= / scrolly=
+		if(hdScreenInfo) {
+			for(const HdWatchedValue& w : _hdData->WatchedValues) {
+				uint32_t raw = 0;
+				bool okv = true;
+				for(uint32_t bi = 0; bi < w.Size; bi++) {
+					auto it = hdScreenInfo->WatchedAddressValues.find(w.Address + bi);
+					if(it == hdScreenInfo->WatchedAddressValues.end()) { okv = false; break; }
+					raw |= (uint32_t)it->second << (8 * bi);
+				}
+				int32_t v = INT32_MIN;
+				if(okv) v = w.Signed ? (w.Size == 1 ? (int32_t)(int8_t)raw : (int32_t)(int16_t)raw) : (int32_t)raw;
+				wvals.push_back(v);
+			}
+		}
+		for(size_t i = 0; i < orules.size() && on < 8; i++) {
+			const HdDioramaObjectRule& r = orules[i];
+			if(!r.Mesh || r.Mesh->size() < 24) continue;
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) {
+				if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; }
+			}
+			if(!ok) continue;
+			float scx = 0.0f, scy = 0.0f;
+			if(!r.ScrollX.Empty() && !r.ScrollX.Eval(wvals, scx)) continue; // valeur RAM pas encore lue : objet masque
+			if(!r.ScrollY.Empty() && !r.ScrollY.Eval(wvals, scy)) continue;
+			if(!r.ScrollX.Empty() && (r.X - scx + r.Radius < -256.0f - wsPadNes || r.X - scx - r.Radius > (float)scene.W + 256.0f + wsPadNes)) continue; // hors du niveau visible
+			_dioObjSpin[i] = std::fmod(_dioObjSpin[i] + r.Spin, 360.0f);
+			HdDioramaObject& o = scene.Objects.O[on++];
+			o.Verts = r.Mesh->data();
+			o.VertCount = (uint32_t)(r.Mesh->size() / 8);
+			o.TexPix = nullptr; o.TexW = 0; o.TexH = 0;
+			if(r.Tex) {
+				r.Tex->Init();
+				if(r.Tex->Width > 0 && r.Tex->Height > 0 && r.Tex->PixelData.size() >= (size_t)r.Tex->Width * r.Tex->Height) {
+					o.TexPix = r.Tex->PixelData.data(); o.TexW = r.Tex->Width; o.TexH = r.Tex->Height;
+				}
+			}
+			o.Color[0] = ((r.Color >> 16) & 0xFF) / 255.0f; o.Color[1] = ((r.Color >> 8) & 0xFF) / 255.0f; o.Color[2] = (r.Color & 0xFF) / 255.0f;
+			o.Pos[0] = r.X - scx; o.Pos[1] = r.Y - scy; o.Pos[2] = r.Z; o.RefZ = r.RefZ; o.Occlude = r.Occlude;
+			o.Scale = r.Scale;
+			o.Lit = r.Lit;
+			o.Shadow = r.Shadow;
+			o.WinOn = false;
+			if(r.HasWindow && !r.ScrollX.Empty()) { // fenetre sur le niveau : [defilement - marge, defilement + largeur + marge], convertie en x du modele
+				o.WinOn = true;
+				o.WinX0 = (scx - r.Window - wsPadNes - r.X) / r.Scale;
+				o.WinX1 = (scx + (float)scene.W + r.Window + wsPadNes - r.X) / r.Scale;
+			}
+			// R = Ry * Rx * Rz (degres) appliquee au modele avant le passage aux axes de la scene
+			const float kd = 0.017453292f;
+			const float ay = (r.RotY + _dioObjSpin[i]) * kd, ax = r.RotX * kd, az = r.RotZ * kd;
+			const float cy = std::cos(ay), sy = std::sin(ay), cx = std::cos(ax), sx = std::sin(ax), cz = std::cos(az), sz = std::sin(az);
+			const float Ry[9] = { cy, 0, sy, 0, 1, 0, -sy, 0, cy };
+			const float Rx[9] = { 1, 0, 0, 0, cx, -sx, 0, sx, cx };
+			const float Rz[9] = { cz, -sz, 0, sz, cz, 0, 0, 0, 1 };
+			auto mul = [](const float* a, const float* b, float* c) { for(int i = 0; i < 3; i++) for(int j = 0; j < 3; j++) c[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j]; };
+			float t1[9];
+			mul(Ry, Rx, t1);
+			mul(t1, Rz, o.Rot);
+		}
+		scene.Objects.Count = on;
+		static int objLast = -1; // journal a chaque changement du nombre d'objets actifs (ex. changement d'ecran)
+		if(on != objLast) {
+			objLast = on;
+			MessageManager::Log("[HD-DIORAMA] H1 objets 3D : " + std::to_string(on) + " objet(s) actif(s) sur " + std::to_string(orules.size()) + " regle(s) <DioramaObject>, frame " + std::to_string(hdScreenInfo ? hdScreenInfo->FrameNumber : 0));
+		}
+	}
+	// G6d : cartes de normales : bande de lignes de chaque tampon (L2, L3 : lignes touchees ; groupes : bande du groupe, choisie par le GPU)
+	if(!_hdData->DioramaNormalPairs.empty() && !_dioNrm[0].empty()) {
+		bool anyN = false;
+		for(int i = 0; i < 2 + DioGroups; i++) {
+			if(_dioNrmLines[i].size() != 240 || _dioNrm[i].empty()) continue;
+			int y0 = -1, y1 = -1;
+			for(int y = (int)yStart; y < (int)yEnd && y < 240; y++) {
+				if(!_dioNrmLines[i][y]) continue;
+				if(y0 < 0) y0 = y;
+				y1 = y;
+			}
+			if(y0 < 0) continue;
+			scene.Normals.Img[i] = _dioNrm[i].data();
+			scene.Normals.Y0[i] = (uint32_t)(y0 - (int)yStart) * GetScale();
+			scene.Normals.Rows[i] = (uint32_t)(y1 + 1 - (int)yStart) * GetScale() - scene.Normals.Y0[i];
+			anyN = true;
+		}
+		scene.Normals.Active = anyN;
+		scene.Normals.Strength = cfg.NormalStrength;
+		scene.Normals.FlipY = cfg.NormalFlipY;
+		static bool nrmLogged = false;
+		if(anyN && !nrmLogged) {
+			nrmLogged = true;
+			MessageManager::Log("[HD-DIORAMA] G6d normales : " + std::to_string(_hdData->DioramaNormalPairs.size()) + " paire(s) <DioramaNormal>, force " + std::to_string(cfg.NormalStrength) + (scene.Lights.Active ? "" : " (aucune lumiere <DioramaLight> active : les normales ne servent qu'avec une lumiere)"));
+		}
+	}
+	// G6c : ombres des sprites : bande de lignes du masque, style de la premiere regle utilisee
+	if(!_hdData->DioramaShadowRules.empty() && !_dioS.empty() && _dioSLines.size() == 240 && _dioSRule.size() == 240) {
+		int y0 = -1, y1 = -1, ruleId = -1;
+		for(int y = (int)yStart; y < (int)yEnd && y < 240; y++) {
+			if(!_dioSLines[y]) continue;
+			if(y0 < 0) y0 = y;
+			y1 = y;
+			if(_dioSRule[y] >= 0 && (ruleId < 0 || _dioSRule[y] < ruleId)) ruleId = _dioSRule[y];
+		}
+		if(y0 >= 0 && ruleId >= 0 && scene.Lights.Active) {
+			const HdDioramaShadowRule& sr = _hdData->DioramaShadowRules[ruleId];
+			const uint32_t r0 = (uint32_t)(y0 - (int)yStart) * GetScale();
+			const uint32_t r1 = (uint32_t)(y1 + 1 - (int)yStart) * GetScale();
+			scene.Shadow.Active = true;
+			scene.Shadow.Img = _dioS.data();
+			scene.Shadow.Y0 = r0; scene.Shadow.Rows = r1 > r0 ? r1 - r0 : 0;
+			scene.Shadow.Opacity = sr.Opacity; scene.Shadow.Soft = sr.Soft;
+			scene.Shadow.Color[0] = ((sr.Color >> 16) & 0xFF) / 255.0f; scene.Shadow.Color[1] = ((sr.Color >> 8) & 0xFF) / 255.0f; scene.Shadow.Color[2] = (sr.Color & 0xFF) / 255.0f;
+			scene.Shadow.OntoMask = sr.OntoMask;
+			scene.Shadow.Light = sr.Light - 1;
+			static bool shLogged = false;
+			if(!shLogged) {
+				shLogged = true;
+				MessageManager::Log("[HD-DIORAMA] G6c ombres des sprites : regle " + std::to_string(ruleId + 1) + " sur " + std::to_string(_hdData->DioramaShadowRules.size()) + ", opacite " + std::to_string(sr.Opacity) + ", couches (masque) " + std::to_string(sr.OntoMask) + ", lumiere " + std::to_string(sr.Light));
+			}
+		} else if(y0 >= 0 && !scene.Lights.Active) {
+			static bool shWarned = false;
+			if(!shWarned) { shWarned = true; MessageManager::Log("[HD-DIORAMA] G6c ombres des sprites : aucune lumiere <DioramaLight> active, pas d'ombre (il faut une lumiere ponctuelle ou solaire)."); }
+		}
+	}
+	// l'image relue n'est gardee a part que pour le controle d'identite ; sinon elle va droit dans la sortie (une seule passe)
+	const bool needImg = compare && neutral && wsPadNes <= 0.0f && cfg.Aa == 1 && scene.FixedThick <= 0.0f && zoom == 1.0f && scene.Sky.Mode == 0 && !scene.Lights.Active && !scene.Shadow.Active && !scene.Normals.Active && scene.Objects.Count == 0; // fixed3d epais : la plaque differe volontairement de la 2D
+	const bool ok = _dioL[0].size() >= pixels &&
+		gpu.SubmitScene(_dioL[0].data(), _dioL[1].data(), _dioL[2].data(), _dioL[3].data(), screenWidth, outHeight, scene) &&
+		(needImg ? (gpu.Fetch(_dioGpuImg) && _dioGpuImg.size() >= pixels)
+			: (wsPadNes > 0.0f ? (_dioWsImg.resize((size_t)(screenWidth + 2 * wsPadHd) * outHeight), _dioWsReady = gpu.FetchOpaque(_dioWsImg.data(), _dioWsImg.size()))
+				: gpu.FetchOpaque(outputBuffer, pixels)));
+	if(ok && linesOk) {
+		for(int i = 0; i < 2; i++) std::fill(_dioLDirty[i].begin(), _dioLDirty[i].end(), (uint8_t)0);
+		_dioLFull = false;
+	}
+	if(!ok) {
+		if(_dioFail++ < 3) MessageManager::Log("[HD-DIORAMA] G2b : envoi ou relecture GPU en echec, image du processeur conservee");
+		return;
+	}
+	if(compare && !neutral) {
+		char buf[160];
+		snprintf(buf, sizeof(buf), "[HD-DIORAMA] G3a vue f=%u : yaw %.1f, pitch %.1f (controle d'identite sans objet hors vue neutre)", hdScreenInfo->FrameNumber, yaw, pitch);
+		MessageManager::Log(buf);
+	}
+	if(needImg) { // avec aa > 1 le filtrage change les pixels : controle d'identite sans objet
+		uint32_t diff = 0, big = 0, shown = 0;
+		for(size_t p = 0; p < pixels; p++) {
+			const uint32_t g = _dioGpuImg[p], o = outputBuffer[p];
+			if(((g ^ o) & 0x00FFFFFFu) == 0) continue;
+			diff++;
+			int worst = 0;
+			for(int sh = 0; sh < 24; sh += 8) worst = std::max(worst, std::abs((int)((g >> sh) & 0xFF) - (int)((o >> sh) & 0xFF)));
+			if(worst > 2) big++;
+			if(shown < 3) {
+				shown++;
+				char buf[160];
+				snprintf(buf, sizeof(buf), "[HD-DIORAMA] G2b ecart hd=(%u,%u) processeur=%08X gpu=%08X", (uint32_t)(p % screenWidth), (uint32_t)(p / screenWidth), o, g);
+				MessageManager::Log(buf);
+			}
+		}
+		char buf[260];
+		snprintf(buf, sizeof(buf), "[HD-DIORAMA] G3b identite GPU (vue neutre, epaisseurs %.2f/%.2f/%.2f/%.2f tiles) f=%u : %u pixels HD, differents %u (dont ecart > 2 : %u)",
+			cfg.T[0], cfg.T[1], cfg.T[2], cfg.T[3], hdScreenInfo->FrameNumber, (uint32_t)pixels, diff, big);
+		MessageManager::Log(buf);
+	}
+	const auto tCopy0 = std::chrono::steady_clock::now();
+	if(needImg) {
+		for(size_t p = 0; p < pixels; p++) outputBuffer[p] = _dioGpuImg[p] | 0xFF000000u;
+	}
+	_dioMsCopy += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tCopy0).count();
+
+	_dioMsGpu += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	if(++_dioN >= 300) {
+		const HdGpuTimes gt = gpu.TakeLayerTimes();
+		const double n = (double)_dioN;
+		char buf[400];
+		snprintf(buf, sizeof(buf), "[HD-DIORAMA] G2b cout moyen sur %u images (aa=%d, groupes=%u) : couches %.2f ms ; GPU total %.2f ms = envoi textures %.2f + dessin %.2f + attente GPU %.2f + retournement %.2f + copie sortie %.2f ; dont L0 elargie (CPU) %.2f ms, image L0 %.1f Mo",
+			_dioN, cfg.Aa, (uint32_t)_hdData->DioramaDepthGroups.size(), _dioMsLayers / n, _dioMsGpu / n, gt.UploadMs / n, gt.DrawMs / n, gt.MapMs / n, gt.FlipMs / n, _dioMsCopy / n, _dioMsWide / n, (double)_dioWideBytes / 1048576.0);
+		MessageManager::Log(buf);
+		_dioN = 0; _dioMsLayers = 0; _dioMsGpu = 0; _dioMsCopy = 0; _dioMsWide = 0;
+	}
+}
+
 // Widescreen (voie 1) : un pixel de bande HD. aCol / aRow : position HD absolue dans l'image NES (0..255 x 0..239, x scale).
 // Meme calcul que DrawCustomBackground : pixel du PNG = (Left + scroll) * scale + position HD, modulo si tileX / tileY.
 template<uint32_t scale>
@@ -2577,6 +3794,40 @@ void HdNesPack<scale>::DrawWidescreenBgPixel(const HdBgConfig& cfg, int64_t aCol
 			break;
 		case HdPackBlendMode::Add: BlendColors<HdPackBlendMode::Add>((uint8_t*)dst, (uint8_t*)&c); break;
 		case HdPackBlendMode::Subtract: BlendColors<HdPackBlendMode::Subtract>((uint8_t*)dst, (uint8_t*)&c); break;
+	}
+}
+
+// Comme DrawWidescreenBgPixel, pour "count" colonnes consecutives : la ligne du PNG, le mode de fusion et la luminosite sont resolus une fois.
+template<uint32_t scale>
+void HdNesPack<scale>::DrawWidescreenBgSpan(const HdBgConfig& cfg, int64_t aCol, int64_t aRow, size_t count, uint32_t* dst)
+{
+	HdBackgroundInfo& bgInfo = _hdData->BackgroundsByPriority[cfg.BgPriority][cfg.BackgroundIndex];
+	if(!bgInfo.Data) return;
+	const int64_t width = (int64_t)bgInfo.Data->Width, height = (int64_t)bgInfo.Data->Height;
+	if(width <= 0 || height <= 0) return;
+	int64_t py = (int64_t)(bgInfo.Top + cfg.BgScrollY) * scale + aRow;
+	if(bgInfo.TileY) { py %= height; if(py < 0) py += height; }
+	if(py < 0 || py >= height) return;
+	int64_t px = (int64_t)(bgInfo.Left + cfg.BgScrollX) * scale + aCol;
+	if(bgInfo.TileX) { px %= width; if(px < 0) px += width; }
+	const uint32_t* src = bgInfo.data() + (size_t)py * (size_t)width;
+	const bool tileX = bgInfo.TileX;
+	const int bright = bgInfo.Brightness;
+	const HdPackBlendMode mode = bgInfo.BlendMode;
+	for(size_t k = 0; k < count; k++) {
+		if(!tileX && (px < 0 || px >= width)) { px++; continue; }
+		uint32_t c = src[px];
+		if(++px >= width && tileX) px = 0;
+		if(bright != 255) c = AdjustBrightness((uint8_t*)&c, bright);
+		uint32_t* d = dst + k;
+		switch(mode) {
+			case HdPackBlendMode::Alpha:
+				if(c >= 0xFF000000) *d = c;
+				else if(c >= 0x01000000) BlendColors<HdPackBlendMode::Alpha>((uint8_t*)d, (uint8_t*)&c);
+				break;
+			case HdPackBlendMode::Add: BlendColors<HdPackBlendMode::Add>((uint8_t*)d, (uint8_t*)&c); break;
+			case HdPackBlendMode::Subtract: BlendColors<HdPackBlendMode::Subtract>((uint8_t*)d, (uint8_t*)&c); break;
+		}
 	}
 }
 

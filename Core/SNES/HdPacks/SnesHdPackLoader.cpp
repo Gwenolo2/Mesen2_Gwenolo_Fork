@@ -2913,12 +2913,45 @@ else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dtexture>") {
 			}
 		}
 
+		else if(lineContent.size() >= 20 && StringUtilities::ToLower(lineContent.substr(0, 20)) == "<watchmemoryaddress>") {
+			// <watchMemoryAddress>nom,adresse[,taille][,signed][,vram|oam|cgram|aram] : valeur RAM nommee, lue a chaque image
+			std::vector<std::string> wtok = StringUtilities::Split(lineContent.substr(20), ',');
+			HdWatchVar wv;
+			std::string werr;
+			if(!currentConditions.empty()) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <watchMemoryAddress> : les conditions ne sont pas prises en charge, ligne ignoree.");
+			} else if(!HdWatchParseDecl(wtok, true, 0xFFFFFF, outData->WatchedVars, wv, werr)) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <watchMemoryAddress> : " + werr + ", ligne ignoree.");
+			} else {
+				for(uint32_t i = 0; i < wv.Size; i++) outData->WatchedMemoryAddresses.emplace((wv.Address + i) | wv.Space);
+				outData->WatchedVars.push_back(wv);
+			}
+		}
 		else if(lineContent.substr(0, 12) == "<background>") {
 			bool tileX = false;
 			bool tileY = false;
 
 			std::string data = lineContent.substr(12);
 			std::vector<std::string> tokens = StringUtilities::Split(data, ',');
+			// Options nommees ramx=expr / ramy=expr : retirees avant la lecture positionnelle
+			HdWatchExpr bgRamX, bgRamY;
+			for(size_t ti = 1; ti < tokens.size(); ) {
+				std::string tk = StringUtilities::Trim(tokens[ti]);
+				std::string low = StringUtilities::ToLower(tk);
+				bool isX = low.compare(0, 5, "ramx=") == 0;
+				bool isY = low.compare(0, 5, "ramy=") == 0;
+				if(isX || isY) {
+					std::string err;
+					HdWatchExpr& dst = isX ? bgRamX : bgRamY;
+					if(!HdWatchExpr::Parse(tk.substr(5), outData->WatchedVars, dst, err)) {
+						MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <background> : " + (isX ? "ramx" : "ramy") + " : " + err + ", option ignoree.");
+						dst.T.clear();
+					}
+					tokens.erase(tokens.begin() + ti);
+				} else {
+					ti++;
+				}
+			}
 
 			if(tokens.size() >= 1) {
 				auto bg = std::make_unique<SnesHdBackgroundInfo>();
@@ -3053,6 +3086,8 @@ else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dtexture>") {
 
 
 
+				bg->RamScrollX = bgRamX;
+				bg->RamScrollY = bgRamY;
 				bg->TileX = tileX;
 				if(tokens.size() > 14) {
 					std::string wsStr = StringUtilities::ToLower(StringUtilities::Trim(tokens[14]));

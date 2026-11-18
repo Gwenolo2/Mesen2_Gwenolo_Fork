@@ -3945,6 +3945,12 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			int bgWidth = bg->Bitmap->Width;
 			int bgHeight = bg->Bitmap->Height;
 			int bgIndex = bg->MasterScrollLayer - 1;
+			// ramx= / ramy= : defilement de base lu en RAM (remplace celui de la couche maitre)
+			float ramVal = 0.0f;
+			const bool useRamX = !bg->RamScrollX.Empty() && _framePack->EvalWatchExpr(bg->RamScrollX, ramVal);
+			const int ramX = (int)ramVal;
+			const bool useRamY = !bg->RamScrollY.Empty() && _framePack->EvalWatchExpr(bg->RamScrollY, ramVal);
+			const int ramY = (int)ramVal;
 
 			for(uint32_t hdY = bandY0; hdY < bandY1; hdY++) {
 				uint32_t sdY = hdY / scale;
@@ -3955,6 +3961,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					masterScrollX = screenInfo.ScanlineHScroll[sdY][bgIndex];
 					masterScrollY = screenInfo.ScanlineVScroll[sdY][bgIndex];
 				}
+				if(useRamX) masterScrollX = ramX;
+				if(useRamY) masterScrollY = ramY;
 
 				int calcScrollX = 0;
 				int calcScrollY = 0;

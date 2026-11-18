@@ -451,6 +451,30 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 			imgTags.push_back(FindOrAddImage(outData.Images, Trim(line.substr(5))));
 		} else if(line.compare(0, 9, "<spriteZ>") == 0) {
 			outData.SpriteZ = (int)strtol(line.c_str() + 9, nullptr, 10);
+		} else if(line.size() >= 20 && Lower(line.substr(0, 20)) == "<watchmemoryaddress>") {
+			// <watchMemoryAddress>nom,adresse[,taille][,signed] : valeur RAM nommee, lue a chaque image
+			std::vector<HdWatchVar> existing;
+			for(const GbHdWatchVar& v : outData.WatchedVars) { HdWatchVar e; e.Name = v.Name; existing.push_back(e); }
+			HdWatchVar wv;
+			std::string werr;
+			if(!HdWatchParseDecl(SplitTrim(line.substr(20), ','), false, 0xFFFF, existing, wv, werr)) {
+				MessageManager::Log("[HD-GB-LOAD] <watchMemoryAddress> : " + werr + " : " + line);
+				ignoredLines++;
+			} else {
+				GbHdWatchVar gv;
+				gv.Name = wv.Name;
+				gv.Size = wv.Size;
+				gv.Signed = wv.Signed;
+				for(uint32_t i = 0; i < wv.Size; i++) {
+					uint16_t a = (uint16_t)(wv.Address + i);
+					auto found = std::find(outData.WatchedAddresses.begin(), outData.WatchedAddresses.end(), a);
+					gv.Slot[i] = (uint32_t)(found - outData.WatchedAddresses.begin());
+					if(found == outData.WatchedAddresses.end()) {
+						outData.WatchedAddresses.push_back(a);
+					}
+				}
+				outData.WatchedVars.push_back(gv);
+			}
 		} else if(line.compare(0, 11, "<condition>") == 0) {
 			// nom,memoryCheckConstant,adresse,operateur,valeur[,masque]
 			std::vector<std::string> f = SplitTrim(line.substr(11), ',');
@@ -668,6 +692,24 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 			if(line.compare(0, 12, "<background>") == 0) {
 				// <background>fichier|dossier,luminosite,scrollX,scrollY,Z,offsetX,offsetY,coucheMaitre,tileX,tileY,framesParImage,inverse,alpha,operateur
 				std::vector<std::string> f = SplitTrim(line.substr(12), ',');
+				// Options nommees ramx=expr / ramy=expr : retirees avant la lecture positionnelle
+				HdWatchExpr bgRamX, bgRamY;
+				for(size_t ti = 1; ti < f.size(); ) {
+					std::string low = Lower(f[ti]);
+					bool isX = low.compare(0, 5, "ramx=") == 0;
+					bool isY = low.compare(0, 5, "ramy=") == 0;
+					if(isX || isY) {
+						std::string err;
+						HdWatchExpr& dst = isX ? bgRamX : bgRamY;
+						if(!HdWatchExpr::Parse(f[ti].substr(5), outData.WatchedVars, dst, err)) {
+							MessageManager::Log(std::string("[HD-GB-LOAD] <background> : ") + (isX ? "ramx" : "ramy") + " : " + err + ", option ignoree.");
+							dst.T.clear();
+						}
+						f.erase(f.begin() + ti);
+					} else {
+						ti++;
+					}
+				}
 				std::vector<std::string> files = f.empty() ? std::vector<std::string>() : ListBackgroundFiles(packFolder, f[0]);
 				if(files.empty()) {
 					ignoredLines++;
@@ -675,6 +717,8 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 				}
 				GbHdBackground bg;
 				bg.Terms = terms;
+				bg.RamX = bgRamX;
+				bg.RamY = bgRamY;
 				for(const std::string& rel : files) {
 					bg.Frames.push_back(FindOrAddImage(outData.Images, rel));
 				}

@@ -25,6 +25,8 @@ public:
 	virtual void DrawWidescreenBands(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
 	virtual void ProcessWidescreenDistortions(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
 	virtual void SetWidescreenMode(bool on, float widthNes) = 0;
+	// Widescreen + diorama : copie l'image large du GPU (bandes comprises) dans out ; false = pas d'image (le centre et les bandes de fonds restent a faire)
+	virtual bool TakeDioramaWide(uint32_t* out, size_t count) = 0;
 	virtual void ProcessWidescreenOverlays(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
 	virtual void ProcessWidescreenScreenLayers(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
 	virtual void ProcessWidescreenPerspectives(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) = 0;
@@ -136,6 +138,64 @@ private:
 	size_t _gpuTestThread = 0;
 	vector<uint32_t> _gpuTestImg;
 	uint32_t _gpuTestCamBad = 0;
+
+	// G2a : couches du diorama (doc 36). Actives seulement si le pack contient <Diorama>. L0 = couleur de fond PPU,
+	// L1 = sprites a priorite fond, L2 = tiles de fond, L3 = sprites de premier plan ; ARGB premultiplie, taille = image de sortie.
+	vector<uint32_t> _dioL[4];
+	// G3c : couche fixe "off camera" (doc 38). _dioOffMask : 1 par pixel NES ((y << 8) | x) dans une zone <DioramaOffCamera>.
+	// Dans ces zones, L1 a L3 sont dessinees dans _dioL4. _dioL4Y0 / _dioL4Rows : lignes HD concernees (0 ligne = aucune zone).
+	vector<uint32_t> _dioL4;
+	vector<uint8_t> _dioOffMask;
+	bool _dioOffReady = false;
+	// G3e : couches <DioramaDepth> (doc 38). _dioG[g] : tiles de fond du groupe g (0 a 3) ; _dioDepthMask : groupe (1 a 4) de chaque
+	// pixel NES pour les zones rect=, 0 = aucun ; _dioGLines[g][y] = 1 si la ligne NES y a recu un pixel du groupe.
+	static constexpr int DioGroups = 8; // groupes <DioramaDepth> (doit valoir HdDioMaxGroups de HdGpuCore.h)
+	vector<uint32_t> _dioG[8];
+	vector<uint8_t> _dioDepthMask;
+	vector<uint8_t> _dioGLines[8];
+	// G3h : lignes NES ou L1 ([0]) et L3 ([1]) ont recu un sprite a cette image, lignes a renvoyer au GPU, image entiere a renvoyer
+	vector<uint8_t> _dioLLines[2];
+	vector<uint8_t> _dioLDirty[2];
+	bool _dioLFull = true;
+	uint64_t _dioLKey = 0;
+	vector<float> _dioObjSpin;       // H1 : angle de rotation continue (degres) de chaque regle <DioramaObject>
+	vector<uint32_t> _dioNrm[10];       // G6d : normales (L2, L3, groupes 1 a 4), meme taille que les couches
+	vector<uint8_t> _dioNrmLines[10];  // G6d : 1 = la ligne NES a recu une normale
+	vector<uint32_t> _dioS;          // G6c : masque des silhouettes des sprites qui projettent une ombre (meme taille que les couches)
+	vector<uint8_t> _dioSLines;     // G6c : 1 = la ligne NES a recu un pixel du masque
+	vector<int> _dioSRule;          // G6c : plus petit numero de regle d'ombre vu sur la ligne NES (-1 = aucun)
+	vector<uint32_t> _dioSkyCube; // G5b : cubemap en 6 fichiers assemblee en une bande 6 x 1
+	const void* _dioSkyCubeKey = nullptr;
+	uint32_t _dioSkyCubeF = 0;
+	float _dioSkyX = 0.0f, _dioSkyY = 0.0f; // G5 : derive cumulee de la skybox image (pixels NES)
+	uint64_t _dioGKey = 0; // G3g : geometrie des tampons de groupes (effacement partiel)
+	bool _dioDepthReady = false;
+	uint32_t _dioWallLog = 0; // G3b2 : couches (bit 0 a 7) dont le motif de mur a deja ete signale au journal
+	uint32_t _dioL4Y0 = 0, _dioL4Rows = 0;
+	uint32_t _dioFrame = 0;
+	void DrawTileLayer(HdPpuTileInfo& tileInfo, HdPackTileInfo& hdPackTileInfo, uint32_t* outputBuffer, uint32_t screenWidth);
+	void DrawNormalLayer(HdPpuTileInfo& tileInfo, HdPackTileInfo& hdPackTileInfo, uint32_t* outputBuffer, uint32_t screenWidth); // G6d
+	void DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo& pixelInfo, size_t offset, uint32_t screenWidth, const HdBgConfig* lineCfg);
+	void RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32_t* outputBuffer, uint32_t screenWidth, uint32_t yStart, uint32_t yEnd, uint32_t xStart, uint32_t xEnd, bool compare);
+	// G2b : envoi des couches au GPU, composition a plat, relecture ; la sortie est remplacee par l'image GPU.
+	void DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outputBuffer, uint32_t screenWidth, uint32_t outHeight, uint32_t yStart, uint32_t yEnd, bool compare);
+	vector<uint32_t> _dioGpuImg;
+	bool _dioGpuTried = false, _dioGpuOk = false;
+	double _dioMsLayers = 0, _dioMsGpu = 0, _dioMsCopy = 0;
+	uint32_t _dioN = 0, _dioFail = 0;
+	std::string _dioWideLog;
+	std::vector<uint32_t> _dioL0Wide; // widescreen : L0 elargie
+	bool _dioL0Clear = false; // skybox active : L0 commence transparente (la couleur de fond PPU n'est pas dessinee), le ciel apparait derriere les fonds
+	uint32_t _dioOrbit = 0; // compteur d'images de l'orbite (G3a)
+	// Cameras du diorama (doc 49) : camera par defaut, camera choisie au clavier, deplacement lisse entre deux reglages
+	bool _camInit = false;
+	int _camDefault = -1, _camManual = -1;
+	float _camFrom[4] = { 0, 0, 0, 1 }, _camTo[4] = { 0, 0, 0, 1 }, _camCur[4] = { 0, 0, 0, 1 };
+	float _camT = 0.0f, _camDur = 1.0f;
+	vector<uint8_t> _camKeyDown;
+	bool _camKeyWarned = false;
+	void DioramaCameraStep(const HdDioramaConfig& cfg, float& yaw, float& pitch, float& dist, float& zoom);
+	float _padYaw = 0.0f, _padPitch = 0.0f, _padZoom = 0.0f; // camera pilotee a la manette (lissee) : degres, degres, log2 du facteur de zoom
 	void GpuTestG0(uint32_t* outputBuffer, uint32_t screenWidth, uint32_t outHeight, uint32_t yStart, uint32_t yEnd);
 	void ComputeLineBgConfig(HdPpuPixelInfo &lineFirstPixel, uint8_t y, HdBgConfig* lineCfg);
 	void ProcessVideos(uint32_t* outputBuffer, uint32_t screenWidth, const OverscanDimensions& overscan);
@@ -151,6 +211,14 @@ private:
 	void DrawWidescreenBands(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
 	void ProcessWidescreenDistortions(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
 	void SetWidescreenMode(bool on, float widthNes) override { _wsMode = on; _simFieldNes = widthNes; }
+	bool TakeDioramaWide(uint32_t* out, size_t count) override
+	{
+		if(!_dioWsReady || _dioWsImg.size() != count) return false;
+		memcpy(out, _dioWsImg.data(), count * sizeof(uint32_t));
+		return true;
+	}
+	vector<uint32_t> _dioWsImg; // widescreen + diorama : image GPU large
+	bool _dioWsReady = false;
 	float _simFieldNes = 256.0f; // largeur du champ des particules (NES) : 256, ou largeur elargie en widescreen
 	bool _wsMode = false; // vrai en widescreen : overlays et distorsions sont faits apres les bandes
 	void ProcessWidescreenOverlays(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
@@ -159,6 +227,8 @@ private:
 	void ProcessScreenLayersLayout(uint32_t* outputBuffer, uint32_t screenWidth, float originNes, uint32_t oTop, uint32_t oBottom);
 	std::vector<uint8_t> _wsZ; // z des bandes (priorite du dernier fond ecrit), indexe comme le buffer de sortie
 	void DrawWidescreenBgPixel(const HdBgConfig& cfg, int64_t aCol, int64_t aRow, uint32_t* dst);
+	void DrawWidescreenBgSpan(const HdBgConfig& cfg, int64_t aCol, int64_t aRow, size_t count, uint32_t* dst); // memes pixels, une suite de colonnes (ligne calculee une fois)
+	double _dioMsWide = 0; uint64_t _dioWideBytes = 0;
 	void DrawWidescreenLiquidPixel(uint32_t hb, uint32_t outWidth, float xN, float yN, size_t pixIdx, uint32_t* dst);
 	void PrepareWidescreenBubbles(uint32_t outWidth, uint32_t padHd, uint32_t visRows);
 	std::vector<std::vector<uint8_t>> _wsBubbleMap; // alpha des bulles par liquide, indexe comme le buffer de sortie (ligne visible x outWidth)

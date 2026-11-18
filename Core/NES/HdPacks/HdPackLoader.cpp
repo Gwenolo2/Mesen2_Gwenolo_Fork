@@ -1,4 +1,6 @@
 #include "pch.h"
+#include <sstream>
+#include <map>
 #include <algorithm>
 #include <filesystem>
 #include <unordered_map>
@@ -297,17 +299,86 @@ bool HdPackLoader::LoadPack()
 			{
 				string trimmed = StringUtilities::Trim(lineContent);
 				if(trimmed == "}") {
-					if(_ign2dBlockStack.empty()) {
-						logError("'}' closing without any corresponding <Ignore2DOverlays>{ block.");
+					if(_blockKinds.empty()) {
+						logError("'}' closing without any corresponding <Ignore2DOverlays>{ or <DioramaOffCamera>{ block.");
 					} else {
-						_ign2dBlockStack.pop_back();
+						const char kind = _blockKinds.back();
+						_blockKinds.pop_back();
+						if(kind == 'i' && !_ign2dBlockStack.empty()) _ign2dBlockStack.pop_back();
+						else if(kind == 'o' && _dioOffDepth > 0) _dioOffDepth--;
+						else if(kind == 'g' && _dioIgnoreDepth > 0) _dioIgnoreDepth--;
+						else if(kind == 'd' && !_dioDepthStack.empty()) _dioDepthStack.pop_back();
+						else if(kind == 's' && !_dioShadowStack.empty()) _dioShadowStack.pop_back();
 					}
+					continue;
+				}
+				// Bloc <DioramaDepth>z=..,t=..{ ... } (doc 38) : les <tile> du bloc vont dans un groupe de profondeur
+				if(trimmed.size() >= 15 && trimmed.back() == '{' && StringUtilities::ToLower(trimmed.substr(0, 14)) == "<dioramadepth>") {
+					vector<string> depthTokens = StringUtilities::Split(trimmed.substr(14, trimmed.size() - 15), ',');
+					HdDioramaDepthGroup depthGroup;
+					bool depthOk = ParseDioramaDepthOptions(depthTokens, depthGroup);
+					if(depthOk && depthGroup.HasRect) {
+						logError("DioramaDepth : rect= n'est pas pris en charge avec un bloc { }, bloc ignore.");
+						depthOk = false;
+					}
+					if(!conditions.empty()) {
+						logError("DioramaDepth : les conditions sur le bloc sont ignorees (mettre les conditions sur les <tile>).");
+					}
+					// Le bloc est toujours empile pour que son '}' soit apparie ; groupe 0 = les tiles ne sont pas marquees
+					_blockKinds.push_back('d');
+					_dioDepthStack.push_back(depthOk ? AddDioramaDepthGroup(depthGroup) : 0);
+					continue;
+				}
+				// Bloc <DioramaShadow>options{ ... } (doc 42, G6c) : les sprites des <tile> du bloc projettent une ombre
+				if(trimmed.size() >= 16 && trimmed.back() == '{' && StringUtilities::ToLower(trimmed.substr(0, 15)) == "<dioramashadow>") {
+					vector<string> shTokens = StringUtilities::Split(trimmed.substr(15, trimmed.size() - 16), ',');
+					HdDioramaShadowRule shRule;
+					bool shOk = ParseDioramaShadowOptions(shTokens, shRule, false);
+					if(!conditions.empty()) {
+						logError("DioramaShadow : les conditions sur le bloc sont ignorees (mettre les conditions sur les <tile>).");
+					}
+					int shId = 0;
+					if(shOk) {
+						if(_data->DioramaShadowRules.size() >= 200) {
+							logError("DioramaShadow : 200 regles au plus, bloc ignore.");
+						} else {
+							_data->DioramaShadowRules.push_back(shRule);
+							shId = (int)_data->DioramaShadowRules.size();
+						}
+					}
+					_blockKinds.push_back('s'); // toujours empile pour que son '}' soit apparie
+					_dioShadowStack.push_back(shId);
+					continue;
+				}
+				// Bloc <DioramaIgnore>{ ... } (doc 38) : les <tile> du bloc ne sont dessinees dans aucune couche du diorama
+				if(trimmed.size() >= 16 && StringUtilities::ToLower(trimmed.substr(0, 15)) == "<dioramaignore>" && StringUtilities::Trim(trimmed.substr(15)) == "{") {
+					if(!conditions.empty()) {
+						logError("DioramaIgnore : les conditions sur le bloc sont ignorees (mettre les conditions sur les <tile>).");
+					}
+					_blockKinds.push_back('g');
+					_dioIgnoreDepth++;
+					continue;
+				}
+				// Bloc <DioramaOffCamera>mode{ ... } (doc 38) : les <tile> du bloc restent a leur position 2D dans le diorama
+				if(trimmed.size() >= 19 && trimmed.back() == '{' && StringUtilities::ToLower(trimmed.substr(0, 18)) == "<dioramaoffcamera>") {
+					const string mode = StringUtilities::ToLower(StringUtilities::Trim(trimmed.substr(18, trimmed.size() - 19)));
+					if(mode == "fixed3d") {
+						_data->DioramaFixed3d = true;
+					} else if(!mode.empty() && mode != "flat") {
+						logError("DioramaOffCamera : mode inconnu (flat ou fixed3d) : " + mode + ", bloc traite en flat.");
+					}
+					if(!conditions.empty()) {
+						logError("DioramaOffCamera : les conditions sur le bloc sont ignorees (mettre les conditions sur les <tile>).");
+					}
+					_blockKinds.push_back('o');
+					_dioOffDepth++;
 					continue;
 				}
 				if(trimmed.size() >= 18 && StringUtilities::ToLower(trimmed.substr(0, 18)) == "<ignore2doverlays>" && StringUtilities::Trim(trimmed.substr(18)).substr(0, 1) == "{") {
 					vector<HdPackCondition*> merged = _ign2dBlockStack.empty() ? vector<HdPackCondition*>() : _ign2dBlockStack.back();
 					merged.insert(merged.end(), conditions.begin(), conditions.end());
 					_ign2dBlockStack.push_back(merged);
+					_blockKinds.push_back('i');
 					_data->HasIgnore2D = true;
 					continue;
 				}
@@ -374,6 +445,45 @@ bool HdPackLoader::LoadPack()
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dtexture>") {
 				tokens = StringUtilities::Split(lineContent.substr(11), ',');
 				ProcessTexture2DTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 14)) == "<dioramadepth>") {
+				tokens = StringUtilities::Split(lineContent.substr(14), ',');
+				ProcessDioramaDepthTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 18)) == "<dioramaoffcamera>") {
+				tokens = StringUtilities::Split(lineContent.substr(18), ',');
+				ProcessDioramaOffCameraTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<dioramaobject>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				ProcessDioramaObjectTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<dioramanormal>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				ProcessDioramaNormalTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<dioramashadow>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				ProcessDioramaShadowTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 14)) == "<dioramalight>") {
+				tokens = StringUtilities::Split(lineContent.substr(14), ',');
+				ProcessDioramaLightTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<dioramacamera>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				ProcessDioramaCameraTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 22)) == "<dioramacameradefault>") {
+				tokens = StringUtilities::Split(lineContent.substr(22), ',');
+				ProcessDioramaCameraDefaultTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 19)) == "<dioramacamerakeys>") {
+				tokens = StringUtilities::Split(lineContent.substr(19), ',');
+				ProcessDioramaCameraKeysTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 12)) == "<dioramapad>") {
+				tokens = StringUtilities::Split(lineContent.substr(12), ',');
+				ProcessDioramaPadTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<dioramaskybox>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				ProcessDioramaSkyboxTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<dioramaextend>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				ProcessDioramaExtendTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 9)) == "<diorama>") {
+				tokens = StringUtilities::Split(lineContent.substr(9), ',');
+				ProcessDioramaTag(tokens, conditions);
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 20)) == "<watchmemoryaddress>") {
 				tokens = StringUtilities::Split(lineContent.substr(20), ',');
 				ProcessWatchMemoryAddressTag(tokens, conditions);
@@ -742,6 +852,8 @@ void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition
 			if(!_ign2dBlockStack.empty()) {
 				tileInfo->Ignore2DSets.push_back(_ign2dBlockStack.back());
 			}
+			if(_dioOffDepth > 0) { tileInfo->DioOffCamera = true; _data->DioramaOffTiles = true; }
+			if(_dioIgnoreDepth > 0) tileInfo->DioIgnore = true;
 			// Desactive le cache : la tuile depend des conditions, et une tuile vide ne doit pas etre mise en cache a tort
 			tileInfo->ForceDisableCache = true;
 			tileInfo->Brightness = 255;
@@ -778,6 +890,10 @@ void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition
 	if(!_ign2dBlockStack.empty()) {
 		tileInfo->Ignore2DSets.push_back(_ign2dBlockStack.back());
 	}
+	if(_dioOffDepth > 0) { tileInfo->DioOffCamera = true; _data->DioramaOffTiles = true; }
+	if(_dioIgnoreDepth > 0) tileInfo->DioIgnore = true;
+	if(!_dioDepthStack.empty() && _dioDepthStack.back() > 0) tileInfo->DioDepthGroup = (uint8_t)_dioDepthStack.back();
+	if(!_dioShadowStack.empty() && _dioShadowStack.back() > 0) tileInfo->DioShadow = (uint8_t)_dioShadowStack.back(); // G6c
 	tileInfo->ForceDisableCache = false;
 	for(HdPackCondition* condition : conditions) {
 		HdPackConditionType type = condition->GetConditionType();
@@ -836,6 +952,9 @@ void HdPackLoader::ProcessTileTag(vector<string> &tokens, vector<HdPackCondition
 	tileInfo->Bitmap = _data->ImageFileData[tileInfo->BitmapIndex].get();
 	tileInfo->Width = 8 * _data->Scale;
 	tileInfo->Height = 8 * _data->Scale;
+	for(const HdDioramaNormalPair& np : _data->DioramaNormalPairs) { // G6d : carte de normales du PNG de cette tile
+		if(np.AlbedoName == tileInfo->Bitmap->PngName) tileInfo->NormalBitmap = np.Normal;
+	}
 
 	_data->Tiles.push_back(unique_ptr<HdPackTileInfo>(tileInfo));
 }
@@ -1143,6 +1262,60 @@ HdPackConditionOperator HdPackLoader::ParseConditionOperator(string& opString)
 
 void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCondition*> conditions)
 {
+	// Options nommees ramx=expr / ramy=expr (valeurs $nom de <watchMemoryAddress>) : retirees avant la lecture positionnelle
+	HdWatchExpr bgExprX, bgExprY;
+	for(size_t ti = 1; ti < tokens.size(); ) {
+		string tk = StringUtilities::Trim(tokens[ti]);
+		string low = StringUtilities::ToLower(tk);
+		bool isX = low.compare(0, 5, "ramx=") == 0;
+		bool isY = low.compare(0, 5, "ramy=") == 0;
+		if(isX || isY) {
+			string err;
+			HdWatchExpr& dst = isX ? bgExprX : bgExprY;
+			if(!HdWatchExpr::Parse(tk.substr(5), _data->WatchedValues, dst, err)) {
+				logError(string("Background : ") + (isX ? "ramx" : "ramy") + " : " + err + ", option ignoree.");
+				dst.T.clear();
+			}
+			tokens.erase(tokens.begin() + ti);
+		} else {
+			ti++;
+		}
+	}
+	// Option nommee dio=off|l0..l3|g1..g4 : cible du fond dans le diorama (doc 50), retiree avant la lecture positionnelle
+	int bgDio = -1;
+	int bgWideX = 0, bgWideY = 0;
+	for(size_t ti = 1; ti < tokens.size(); ) {
+		string tk = StringUtilities::Trim(tokens[ti]);
+		string low = StringUtilities::ToLower(tk);
+		if(low.compare(0, 5, "wide=") == 0 || low.compare(0, 5, "tall=") == 0) {
+			try {
+				const int n = std::max(0, std::min(1024, std::stoi(low.substr(5))));
+				if(low[0] == 'w') bgWideX = n; else bgWideY = n;
+			} catch(...) { logError("Background : " + low.substr(0, 4) + "= attend un nombre de pixels NES, option ignoree."); }
+			tokens.erase(tokens.begin() + ti);
+		} else if(low.compare(0, 4, "dio=") == 0) {
+			const string v = low.substr(4);
+			if(v == "off") bgDio = -2;
+			else if(v == "l0") bgDio = 0;
+			else if(v == "l1") bgDio = 1;
+			else if(v == "l2") bgDio = 2;
+			else if(v == "l3") bgDio = 3;
+			else if(v == "g1") bgDio = 4;
+			else if(v == "g2") bgDio = 5;
+			else if(v == "g3") bgDio = 6;
+			else if(v == "g4") bgDio = 7;
+			else if(v == "g5") bgDio = 8;
+			else if(v == "g6") bgDio = 9;
+			else if(v == "g7") bgDio = 10;
+			else if(v == "g8") bgDio = 11;
+			else logError("Background : dio= doit valoir off, l0 a l3 ou g1 a g8 : " + v + ", option ignoree.");
+			tokens.erase(tokens.begin() + ti);
+		} else {
+			ti++;
+		}
+	}
+	if(bgDio == -1 && _dioIgnoreDepth > 0) bgDio = -2;
+	if(bgDio == -1 && !_dioDepthStack.empty() && _dioDepthStack.back() > 0) bgDio = 3 + _dioDepthStack.back();
 	checkConstraint(tokens.size() >= 2, "Background tag should contain at least 2 parameters");
 	checkConstraintEx(tokens.size() < 14, "Background tag contains too many parameters");
 	HdPackBitmapInfo* bgFileData = nullptr;
@@ -1215,6 +1388,10 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 		backgroundInfo.Left = 0;
 		backgroundInfo.Top = 0;
 		backgroundInfo.Conditions.reserve(conditions.size());
+		backgroundInfo.ScrollXExpr = bgExprX;
+		backgroundInfo.ScrollYExpr = bgExprY;
+		backgroundInfo.DioTarget = bgDio;
+		backgroundInfo.DioWideX = bgWideX; backgroundInfo.DioWideY = bgWideY;
 		backgroundInfo.BlendMode = HdPackBlendMode::Alpha;
 		if(!_ign2dBlockStack.empty()) {
 			backgroundInfo.Ignore2DSets.push_back(_ign2dBlockStack.back());
@@ -1738,10 +1915,13 @@ vector<HdPackCondition*> HdPackLoader::ParseConditionString(string conditionStri
 
 bool HdPackLoader::ParseBooleanValue(string value)
 {
-	if(value != "Y" && value != "N") {
-		logError("Invalid boolean value: " + value);
-	}
-	return value == "Y";
+	// Y / N (historique) ; true / false, on / off, yes / no, 1 / 0 acceptes aussi (sans tenir compte de la casse)
+	string v = value;
+	std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+	if(v == "y" || v == "yes" || v == "true" || v == "on" || v == "1") return true;
+	if(v == "n" || v == "no" || v == "false" || v == "off" || v == "0") return false;
+	logError("Invalid boolean value: " + value);
+	return false;
 }
 
 void HdPackLoader::LoadCustomPalette()
@@ -1929,6 +2109,1212 @@ void HdPackLoader::ProcessWatchMemoryAddressTag(vector<string>& tokens, vector<H
 	}
 	_data->WatchedValues.push_back(w);
 	_data->PackFolder = _hdPackFolder;
+}
+
+// Charge (ou retrouve) un PNG de motif de mur du diorama (G3b2). Les pixels sont decodes plus tard (HdPackBitmapInfo::Init).
+HdPackBitmapInfo* HdPackLoader::LoadDioramaTexture(const string& filename)
+{
+	const string name = StringUtilities::Trim(filename);
+	if(name.empty()) {
+		logError("Diorama : nom de fichier de texture vide.");
+		return nullptr;
+	}
+	auto found = _backgroundsByName.find(name);
+	if(found != _backgroundsByName.end()) {
+		return found->second;
+	}
+	_data->BackgroundFileData.push_back(unique_ptr<HdPackBitmapInfo>(new HdPackBitmapInfo()));
+	HdPackBitmapInfo* bitmap = _data->BackgroundFileData.back().get();
+	bitmap->PngName = name;
+	if(!LoadFile(name, bitmap->FileData)) {
+		_data->BackgroundFileData.pop_back();
+		logError("Diorama : texture introuvable : " + name);
+		return nullptr;
+	}
+	_backgroundsByName[name] = bitmap;
+	return bitmap;
+}
+
+// <DioramaDepth>z=..,t=..[,rect=x,y,l,h] (doc 38) : groupe de profondeur. Cles : z (pixels NES, positif = derriere, defaut 0),
+// t (epaisseur en tiles, 0 a 8, defaut 0), rect=x,y,largeur,hauteur (zone d'ecran en pixels NES, 4 valeurs separees par des
+// virgules). Forme bloc : <DioramaDepth>z=..,t=..{ <tile>... } (voir LoadPack). Les tiles de fond du groupe quittent la couche
+// L2 et vont dans une couche a part ; les sprites ne sont pas concernes par rect=. 4 groupes au plus.
+static bool DioParseFloat(const string& s, float& out)
+{
+	try {
+		size_t used = 0;
+		const float v = std::stof(s, &used);
+		if(used != s.size()) return false;
+		out = v;
+		return true;
+	} catch(...) {
+		return false;
+	}
+}
+
+static bool DioParseInt(const string& s, int& out)
+{
+	try {
+		size_t used = 0;
+		const int v = std::stoi(s, &used);
+		if(used != s.size()) return false;
+		out = v;
+		return true;
+	} catch(...) {
+		return false;
+	}
+}
+
+// Cle de mur sans indice de couche : side, top (PNG), stretchx / stretchy (dessus et flancs), topstretchx, topstretchy,
+// sidestretchx, sidestretchy. Etirement de 0.01 a 100, 1 = un pixel du PNG pour un pixel HD. Renvoie faux si la cle n'est pas
+// une cle de mur.
+bool HdPackLoader::ParseDioramaWallOption(const string& base, const string& val, HdDioramaWallTex& wall)
+{
+	if(base == "side") {
+		// G3b3 : side=volume.png:N = bande de N images empilees de haut en bas (image 0 en surface, N-1 au fond)
+		string name = val;
+		int n = 0;
+		const size_t colon = val.rfind(':');
+		int parsed = 0;
+		int mode = 0;
+		string numPart = colon != string::npos ? StringUtilities::Trim(val.substr(colon + 1)) : string();
+		if(!numPart.empty() && (numPart.back() == 'h' || numPart.back() == 'H' || numPart.back() == 'v' || numPart.back() == 'V')) {
+			mode = (numPart.back() == 'h' || numPart.back() == 'H') ? 1 : 2;
+			numPart.pop_back();
+		}
+		if(colon != string::npos && !numPart.empty() && DioParseInt(numPart, parsed)) {
+			if(parsed < 1 || parsed > 64) {
+				logError("Diorama : side=fichier:N, N doit etre de 1 a 64 : " + val);
+				return true;
+			}
+			n = parsed;
+			name = val.substr(0, colon);
+		}
+		wall.Side = LoadDioramaTexture(name);
+		wall.SideVol = (wall.Side && n > 1) ? n : 0;
+		wall.SideVolMode = mode;
+		return true;
+	}
+	if(base == "top") {
+		wall.Top = LoadDioramaTexture(val);
+		return true;
+	}
+	float* targets[2] = { nullptr, nullptr };
+	if(base == "stretchx") { targets[0] = &wall.TopStretchX; targets[1] = &wall.SideStretchX; }
+	else if(base == "stretchy") { targets[0] = &wall.TopStretchY; targets[1] = &wall.SideStretchY; }
+	else if(base == "topstretchx") { targets[0] = &wall.TopStretchX; }
+	else if(base == "topstretchy") { targets[0] = &wall.TopStretchY; }
+	else if(base == "sidestretchx") { targets[0] = &wall.SideStretchX; }
+	else if(base == "sidestretchy") { targets[0] = &wall.SideStretchY; }
+	else {
+		return false;
+	}
+	float s = 1.0f;
+	if(StringUtilities::ToLower(val) == "adapt") {
+		s = -1.0f; // la texture couvre exactement la zone (voir HdDioramaWallTex)
+	} else if(!DioParseFloat(val, s) || s < 0.01f || s > 100.0f) {
+		logError("Diorama : " + base + " doit etre adapt ou un nombre de 0.01 a 100 : " + val);
+		return true;
+	}
+	for(float* t : targets) {
+		if(t) *t = s;
+	}
+	return true;
+}
+
+bool HdPackLoader::ParseDioramaDepthOptions(vector<string>& tokens, HdDioramaDepthGroup& group)
+{
+	for(size_t i = 0; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) {
+			continue;
+		}
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) {
+			logError("DioramaDepth : option sans '=' : " + opt);
+			return false;
+		}
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string val = StringUtilities::Trim(opt.substr(eq + 1));
+		if(key == "z") {
+			if(!DioParseFloat(val, group.Z)) {
+				logError("DioramaDepth : valeur invalide pour z : " + val);
+				return false;
+			}
+		} else if(key == "t") {
+			if(!DioParseFloat(val, group.T)) {
+				logError("DioramaDepth : valeur invalide pour t : " + val);
+				return false;
+			}
+		} else if(ParseDioramaWallOption(key, val, group.Wall)) {
+			// cle de mur reconnue : side, top, stretchx, stretchy, topstretchx, topstretchy, sidestretchx, sidestretchy
+		} else if(key == "rect") {
+			int v[4] = {};
+			bool ok = DioParseInt(val, v[0]) && i + 3 < tokens.size();
+			for(size_t k = 1; ok && k < 4; k++) {
+				ok = DioParseInt(StringUtilities::Trim(tokens[i + k]), v[k]);
+			}
+			if(!ok) {
+				logError("DioramaDepth : syntaxe rect=x,y,largeur,hauteur (4 entiers).");
+				return false;
+			}
+			i += 3;
+			const int x0 = std::max(0, v[0]), y0 = std::max(0, v[1]);
+			const int x1 = std::min(256, v[0] + v[2]), y1 = std::min(240, v[1] + v[3]);
+			if(v[2] <= 0 || v[3] <= 0 || x1 <= x0 || y1 <= y0) {
+				logError("DioramaDepth : rect vide ou hors de l'ecran (256 x 240).");
+				return false;
+			}
+			group.HasRect = true;
+			group.X = x0; group.Y = y0; group.W = x1 - x0; group.H = y1 - y0;
+		} else {
+			logError("DioramaDepth : option inconnue : " + key);
+			return false;
+		}
+	}
+	if(group.T < 0.0f || group.T > 16.0f) {
+		logError("DioramaDepth : t limite a 0..16 tiles.");
+		group.T = group.T < 0.0f ? 0.0f : 16.0f;
+	}
+	if(group.Z < -230.0f) {
+		logError("DioramaDepth : z trop proche de la camera, limite a -230.");
+		group.Z = -230.0f;
+	}
+	return true;
+}
+
+// Ajoute le groupe, renvoie son numero (1 a 4) ou 0 s'il y en a deja 4.
+int HdPackLoader::AddDioramaDepthGroup(const HdDioramaDepthGroup& group)
+{
+	if(_data->DioramaDepthGroups.size() >= 8) {
+		logError("DioramaDepth : 8 groupes au maximum, groupe ignore.");
+		return 0;
+	}
+	_data->DioramaDepthGroups.push_back(group);
+	return (int)_data->DioramaDepthGroups.size();
+}
+
+// Forme ligne seule : <DioramaDepth>z=..,t=..,rect=x,y,l,h (la forme bloc est lue dans LoadPack).
+void HdPackLoader::ProcessDioramaDepthTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(!conditions.empty()) {
+		logError("DioramaDepth : les conditions ne sont pas prises en charge sur cette ligne, ligne ignoree.");
+		return;
+	}
+	HdDioramaDepthGroup group;
+	if(!ParseDioramaDepthOptions(tokens, group)) {
+		return;
+	}
+	if(!group.HasRect) {
+		logError("DioramaDepth : sans bloc { }, rect=x,y,largeur,hauteur est obligatoire, ligne ignoree.");
+		return;
+	}
+	AddDioramaDepthGroup(group);
+}
+
+// <DioramaExtend>side=..,layer=..,mode=..,size=..,band=.. (doc 40, G4a). side : top, bottom, left, right, liste avec +, ou all ;
+// layer : 0 a 3 (L0..L3, defaut 2) ou g1 a g4 (groupes <DioramaDepth>) ; edge : debut reel du contenu (pixels NES), un seul cote ; mode : stretch (ou clamp), repeat, mirror, wrap ; size : marge en pixels NES (1 a 512, defaut
+// 128) ; band : nombre de tiles NES repetees pour repeat (1 a 16, defaut 1). Les conditions [ ] sont evaluees a chaque image.
+// rows=a-b (cotes left / right) ou cols=a-b (cotes top / bottom) : plage de l'ecran ou l'extension s'applique. fog=0..1 (force de la brume au bout de fogdist), fogdist=pixels NES (defaut : la marge), color=RRGGBB (couleur de la brume ; sans color la brume rend transparent) ; mode=color = aplat de la couleur color.
+void HdPackLoader::ProcessDioramaExtendTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	HdDioramaExtendRule rule;
+	rule.Conditions = conditions;
+	bool hasMode = false;
+	for(size_t i = 0; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) {
+			continue;
+		}
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) {
+			logError("DioramaExtend : option sans '=' : " + opt + ", ligne ignoree.");
+			return;
+		}
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string val = StringUtilities::Trim(opt.substr(eq + 1));
+		const string lval = StringUtilities::ToLower(val);
+		int n = 0;
+		if(key == "side") {
+			rule.Side = 0;
+			size_t start = 0;
+			while(start <= lval.size()) {
+				size_t plus = lval.find('+', start);
+				const string part = StringUtilities::Trim(lval.substr(start, plus == string::npos ? string::npos : plus - start));
+				if(part == "top") rule.Side |= 1;
+				else if(part == "bottom") rule.Side |= 2;
+				else if(part == "left") rule.Side |= 4;
+				else if(part == "right") rule.Side |= 8;
+				else if(part == "all") rule.Side |= 15;
+				else {
+					logError("DioramaExtend : side inconnu (top, bottom, left, right, all) : " + part + ", ligne ignoree.");
+					return;
+				}
+				if(plus == string::npos) break;
+				start = plus + 1;
+			}
+		} else if(key == "layer") {
+			if(lval.size() == 2 && lval[0] == 'g' && lval[1] >= '1' && lval[1] <= '8') {
+				rule.Layer = 4 + (lval[1] - '1'); // groupe <DioramaDepth> numero 1 a 8 (cotes gauche et droit seulement)
+			} else if(DioParseInt(lval, n) && n >= 0 && n <= 3) {
+				rule.Layer = n;
+			} else {
+				logError("DioramaExtend : layer doit etre de 0 a 3 ou g1 a g8 : " + val + ", ligne ignoree.");
+				return;
+			}
+		} else if(key == "mode") {
+			if(lval == "stretch" || lval == "clamp") rule.Mode = 1;
+			else if(lval == "repeat") rule.Mode = 2;
+			else if(lval == "mirror") rule.Mode = 3;
+			else if(lval == "wrap") rule.Mode = 4;
+			else if(lval == "color") rule.Mode = 5;
+			else {
+				logError("DioramaExtend : mode inconnu (stretch, repeat, mirror, wrap, color) : " + val + ", ligne ignoree.");
+				return;
+			}
+			hasMode = true;
+		} else if(key == "size") {
+			if(!DioParseInt(lval, n) || n < 1 || n > 512) {
+				logError("DioramaExtend : size doit etre de 1 a 512 pixels NES : " + val + ", ligne ignoree.");
+				return;
+			}
+			rule.Size = n;
+		} else if(key == "band") {
+			if(!DioParseInt(lval, n) || n < 1 || n > 16) {
+				logError("DioramaExtend : band doit etre de 1 a 16 tiles : " + val + ", ligne ignoree.");
+				return;
+			}
+			rule.Band = n;
+		} else if(key == "edge") {
+			if(!DioParseInt(lval, n) || n < 0 || n > 512) {
+				logError("DioramaExtend : edge doit etre une position de 0 a 512 pixels NES : " + val + ", ligne ignoree.");
+				return;
+			}
+			rule.Edge = n;
+		} else if(key == "rows" || key == "cols") {
+			// plage a-b (ou a,b : le lecteur de ligne coupe sur la virgule, le nombre suivant est repris)
+			int a = 0, b = 0;
+			bool okRange = false;
+			const size_t dash = lval.find('-', 1);
+			if(dash != string::npos) {
+				okRange = DioParseInt(StringUtilities::Trim(lval.substr(0, dash)), a) && DioParseInt(StringUtilities::Trim(lval.substr(dash + 1)), b);
+			} else if(DioParseInt(lval, a) && i + 1 < tokens.size() && DioParseInt(StringUtilities::Trim(tokens[i + 1]), b)) {
+				okRange = true;
+				i++;
+			}
+			if(!okRange || a < 0 || b > 512 || a >= b) {
+				logError("DioramaExtend : " + key + " doit etre une plage a-b de pixels NES (0 a 512, a < b) : " + val + ", ligne ignoree.");
+				return;
+			}
+			rule.RangeMin = a;
+			rule.RangeMax = b;
+			rule.RangeIsRows = (key == "rows");
+		} else if(key == "fog") {
+			char* endp = nullptr;
+			const double v = strtod(lval.c_str(), &endp);
+			if(lval.empty() || endp == lval.c_str() || *endp != 0 || v < 0.0 || v > 1.0) {
+				logError("DioramaExtend : fog doit etre un nombre de 0 a 1 : " + val + ", ligne ignoree.");
+				return;
+			}
+			rule.Fog = (float)v;
+		} else if(key == "fogdist") {
+			if(!DioParseInt(lval, n) || n < 1 || n > 512) {
+				logError("DioramaExtend : fogdist doit etre de 1 a 512 pixels NES : " + val + ", ligne ignoree.");
+				return;
+			}
+			rule.FogDist = n;
+		} else if(key == "color") {
+			string hex = lval;
+			if(!hex.empty() && hex[0] == '#') hex = hex.substr(1);
+			char* endp = nullptr;
+			const unsigned long v = hex.size() == 6 ? strtoul(hex.c_str(), &endp, 16) : 0;
+			if(hex.size() != 6 || endp == hex.c_str() || *endp != 0) {
+				logError("DioramaExtend : color doit etre RRGGBB (6 chiffres hexadecimaux) : " + val + ", ligne ignoree.");
+				return;
+			}
+			rule.Color = (uint32_t)v;
+			rule.HasColor = true;
+		} else {
+			logError("DioramaExtend : option inconnue : " + key + ", ligne ignoree.");
+			return;
+		}
+	}
+	if(rule.Mode == 5 && !rule.HasColor) {
+		logError("DioramaExtend : mode=color demande color=RRGGBB, ligne ignoree.");
+		return;
+	}
+	if(rule.Side == 0 || !hasMode) {
+		logError("DioramaExtend : side= et mode= sont obligatoires, ligne ignoree.");
+		return;
+	}
+	if(rule.RangeMin >= 0) {
+		if(rule.RangeIsRows && (rule.Side & 3)) {
+			logError("DioramaExtend : rows= ne vaut que pour les cotes left et right (cols= pour top et bottom), ligne ignoree.");
+			return;
+		}
+		if(!rule.RangeIsRows && (rule.Side & 12)) {
+			logError("DioramaExtend : cols= ne vaut que pour les cotes top et bottom (rows= pour left et right), ligne ignoree.");
+			return;
+		}
+	}
+	if(rule.Edge >= 0 && rule.Side != 1 && rule.Side != 2 && rule.Side != 4 && rule.Side != 8) {
+		logError("DioramaExtend : edge= demande un seul cote dans side= (top, bottom, left ou right), ligne ignoree.");
+		return;
+	}
+	if(_data->DioramaExtendRules.size() >= 16) {
+		logError("DioramaExtend : 16 regles au plus, ligne ignoree.");
+		return;
+	}
+	_data->DioramaExtendRules.push_back(rule);
+}
+
+static bool LightParseFloat(const string& v, float& out);
+
+// PNG charge a part : il ne doit pas entrer dans ImageFileData, dont l'ordre (les <img>) numerote les images des <tile>.
+HdPackBitmapInfo* HdPackLoader::LoadAuxBitmap(string name)
+{
+	string resolved;
+	if(!ResolveRandomPath(name, resolved)) {
+		return nullptr;
+	}
+	for(auto& b : _data->ImageFileData) {
+		if(b->PngName == resolved) return b.get();
+	}
+	for(auto& b : _data->AuxBitmaps) {
+		if(b->PngName == resolved) return b.get();
+	}
+	unique_ptr<HdPackBitmapInfo> bi(new HdPackBitmapInfo());
+	if(!LoadFile(resolved, bi->FileData)) {
+		logError("Error loading HDPack: PNG file " + resolved + " could not be read.");
+		return nullptr;
+	}
+	bi->PngName = resolved;
+	HdPackBitmapInfo* ptr = bi.get();
+	_data->AuxBitmaps.push_back(std::move(bi));
+	return ptr;
+}
+
+// H1 : lecture d'un .obj (v, vt, vn, f ; polygones triangules en eventail, indices negatifs acceptes). Y vers le haut, v de texture
+// retourne (v = 1 - v dans le fichier). Sans normales dans le fichier : normale de la face. Le .mtl est ignore.
+static std::shared_ptr<vector<float>> HdLoadObjMesh(const vector<uint8_t>& raw, string& err)
+{
+	vector<float> vp, vn, vt;
+	auto out = std::make_shared<vector<float>>();
+	std::istringstream in(string(raw.begin(), raw.end()));
+	string line;
+	auto resolve = [](long i, size_t count) -> long { return i > 0 ? i - 1 : (long)count + i; };
+	while(std::getline(in, line)) {
+		if(!line.empty() && line.back() == '\r') line.pop_back();
+		std::istringstream ls(line);
+		string k;
+		ls >> k;
+		if(k == "v") { float a = 0, b = 0, c = 0; ls >> a >> b >> c; vp.push_back(a); vp.push_back(b); vp.push_back(c); }
+		else if(k == "vn") { float a = 0, b = 0, c = 0; ls >> a >> b >> c; vn.push_back(a); vn.push_back(b); vn.push_back(c); }
+		else if(k == "vt") { float a = 0, b = 0; ls >> a >> b; vt.push_back(a); vt.push_back(1.0f - b); }
+		else if(k == "f") {
+			struct Idx { long v = -1, t = -1, n = -1; };
+			vector<Idx> face;
+			string tk;
+			while(ls >> tk) {
+				Idx ix;
+				const size_t s1 = tk.find('/');
+				ix.v = resolve(std::strtol(tk.c_str(), nullptr, 10), vp.size() / 3);
+				if(s1 != string::npos) {
+					const size_t s2 = tk.find('/', s1 + 1);
+					const string ts = tk.substr(s1 + 1, s2 == string::npos ? string::npos : s2 - s1 - 1);
+					if(!ts.empty()) ix.t = resolve(std::strtol(ts.c_str(), nullptr, 10), vt.size() / 2);
+					if(s2 != string::npos && s2 + 1 < tk.size()) ix.n = resolve(std::strtol(tk.c_str() + s2 + 1, nullptr, 10), vn.size() / 3);
+				}
+				if(ix.v < 0 || (size_t)ix.v >= vp.size() / 3) { err = "indice de sommet hors limites dans une face"; return nullptr; }
+				face.push_back(ix);
+			}
+			for(size_t i = 1; i + 1 < face.size(); i++) {
+				const Idx tri[3] = { face[0], face[i], face[i + 1] };
+				float fn[3] = { 0, 0, 1 };
+				{ // normale de la face
+					const float* a = &vp[tri[0].v * 3]; const float* b = &vp[tri[1].v * 3]; const float* c = &vp[tri[2].v * 3];
+					const float ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], wx = c[0] - a[0], wy = c[1] - a[1], wz = c[2] - a[2];
+					float nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+					const float l = std::sqrt(nx * nx + ny * ny + nz * nz);
+					if(l > 1e-12f) { fn[0] = nx / l; fn[1] = ny / l; fn[2] = nz / l; }
+				}
+				for(int c = 0; c < 3; c++) {
+					const Idx& ix = tri[c];
+					out->push_back(vp[ix.v * 3]); out->push_back(vp[ix.v * 3 + 1]); out->push_back(vp[ix.v * 3 + 2]);
+					if(ix.n >= 0 && (size_t)ix.n < vn.size() / 3) { out->push_back(vn[ix.n * 3]); out->push_back(vn[ix.n * 3 + 1]); out->push_back(vn[ix.n * 3 + 2]); }
+					else { out->push_back(fn[0]); out->push_back(fn[1]); out->push_back(fn[2]); }
+					if(ix.t >= 0 && (size_t)ix.t < vt.size() / 2) { out->push_back(vt[ix.t * 2]); out->push_back(vt[ix.t * 2 + 1]); }
+					else { out->push_back(0.0f); out->push_back(0.0f); }
+				}
+				if(out->size() / 8 > 300000) { err = "modele trop gros (300000 sommets au plus)"; return nullptr; }
+			}
+		}
+	}
+	if(out->size() < 24) { err = "aucune face lue"; return nullptr; }
+	return out;
+}
+
+// H1 : expression de position "$page*256+$x" -> HdDioramaExpr (les valeurs $nom viennent de <watchMemoryAddress>, declare avant)
+static bool HdParseDioramaExpr(const string& text, const vector<HdWatchedValue>& watched, HdDioramaExpr& out, string& err)
+{
+	string e;
+	for(char c : text) if(c != ' ' && c != '\t') e += c;
+	if(e.empty()) { err = "expression vide"; return false; }
+	size_t i = 0;
+	while(i < e.size()) {
+		HdDioramaExpr::Term term;
+		if(e[i] == '+') i++;
+		else if(e[i] == '-') { term.Sign = -1.0f; i++; }
+		size_t j = i;
+		while(j < e.size() && e[j] != '+' && e[j] != '-') j++;
+		const string t = e.substr(i, j - i);
+		if(t.empty()) { err = "terme vide"; return false; }
+		size_t a = 0;
+		while(a <= t.size()) {
+			size_t b = t.find('*', a);
+			if(b == string::npos) b = t.size();
+			const string f = t.substr(a, b - a);
+			if(f.empty()) { err = "facteur vide"; return false; }
+			HdDioramaExpr::Factor fac;
+			if(f[0] == '$') {
+				const string nm = f.substr(1);
+				int idx = -1;
+				for(size_t k = 0; k < watched.size(); k++) if(watched[k].Name == nm) { idx = (int)k; break; }
+				if(idx < 0) { err = "valeur $" + nm + " inconnue (declarer <watchMemoryAddress>" + nm + ",adresse,taille avant cette ligne)"; return false; }
+				fac.Var = idx;
+			} else {
+				char* endp = nullptr;
+				fac.Val = std::strtof(f.c_str(), &endp);
+				if(endp == f.c_str() || *endp != 0) { err = "nombre ou $nom attendu : " + f; return false; }
+			}
+			term.F.push_back(fac);
+			a = b + 1;
+		}
+		out.T.push_back(term);
+		i = j;
+	}
+	return true;
+}
+
+// <DioramaObject>fichier.obj,tex=image.png,x=,y=,z=,scale=,rotx=,roty=,rotz=,spin=,color= (doc 45, H1) : objet 3D de decor, soumis a [cond].
+void HdPackLoader::ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) {
+		logError("DioramaObject : fichier .obj attendu en premier, ligne ignoree.");
+		return;
+	}
+	HdDioramaObjectRule r;
+	r.Conditions = conditions;
+	const string file = StringUtilities::Trim(tokens[0]);
+	string texName;
+	for(size_t i = 1; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) { logError("DioramaObject : option sans '=' : " + opt + ", ligne ignoree."); return; }
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string raw = StringUtilities::Trim(opt.substr(eq + 1));
+		const string val = StringUtilities::ToLower(raw);
+		float f = 0.0f;
+		if(key == "tex") { texName = raw; }
+		else if(key == "lit") { r.Lit = !(val == "off" || val == "0" || val == "false"); }
+		else if(key == "shadow") { r.Shadow = !(val == "off" || val == "0" || val == "false"); }
+		else if(key == "occlude") { r.Occlude = (val == "on" || val == "1" || val == "true"); }
+		else if(key == "scrollx" || key == "scrolly") {
+			string err;
+			if(!HdParseDioramaExpr(raw, _data->WatchedValues, key == "scrollx" ? r.ScrollX : r.ScrollY, err)) { logError("DioramaObject : " + key + " : " + err + ", ligne ignoree."); return; }
+		}
+		else if(key == "color") {
+			string h = val;
+			if(!h.empty() && h[0] == '#') h = h.substr(1);
+			char* endp = nullptr;
+			const unsigned long v = h.size() == 6 ? strtoul(h.c_str(), &endp, 16) : 0;
+			if(h.size() != 6 || endp == h.c_str() || *endp != 0) { logError("DioramaObject : color doit etre RRGGBB : " + val + ", ligne ignoree."); return; }
+			r.Color = (uint32_t)v;
+		}
+		else {
+			if(!LightParseFloat(val, f)) { logError("DioramaObject : valeur numerique attendue pour " + key + " : " + val + ", ligne ignoree."); return; }
+			if(key == "x") r.X = f;
+			else if(key == "y") r.Y = f;
+			else if(key == "z") r.Z = f;
+			else if(key == "refz") { if(f < -4096.0f || f > 4096.0f) { logError("DioramaObject : refz doit etre de -4096 a 4096 pixels NES : " + val + ", ligne ignoree."); return; } r.RefZ = f; }
+			else if(key == "scale") { if(f <= 0.0f || f > 4096.0f) { logError("DioramaObject : scale doit etre de 0 a 4096 : " + val + ", ligne ignoree."); return; } r.Scale = f; }
+			else if(key == "rotx") r.RotX = f;
+			else if(key == "roty") r.RotY = f;
+			else if(key == "rotz") r.RotZ = f;
+			else if(key == "spin") r.Spin = f;
+			else if(key == "window") { if(f < 0.0f || f > 4096.0f) { logError("DioramaObject : window doit etre de 0 a 4096 pixels NES : " + val + ", ligne ignoree."); return; } r.HasWindow = true; r.Window = f; }
+			else { logError("DioramaObject : option inconnue : " + key + ", ligne ignoree."); return; }
+		}
+	}
+	auto cached = _dioObjCache.find(file);
+	if(cached != _dioObjCache.end()) {
+		r.Mesh = cached->second;
+	} else {
+		vector<uint8_t> raw;
+		if(!LoadFile(file, raw)) { logError("DioramaObject : fichier introuvable : " + file + ", ligne ignoree."); return; }
+		string err;
+		r.Mesh = HdLoadObjMesh(raw, err);
+		if(!r.Mesh) { logError("DioramaObject : " + file + " : " + err + ", ligne ignoree."); return; }
+		_dioObjCache[file] = r.Mesh;
+		MessageManager::Log("[HDPack] <DioramaObject> " + file + " : " + std::to_string(r.Mesh->size() / 24) + " triangle(s)");
+	}
+	{
+		float m2 = 0.0f; // rayon du modele autour de son origine
+		for(size_t i = 0; i + 7 < r.Mesh->size(); i += 8) {
+			const float* v = r.Mesh->data() + i;
+			m2 = std::max(m2, v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+		}
+		r.Radius = std::sqrt(m2) * r.Scale;
+	}
+	if(!texName.empty()) {
+		r.Tex = LoadAuxBitmap(texName);
+		if(!r.Tex) return; // erreur deja journalisee
+	}
+	_data->DioramaObjectRules.push_back(r);
+}
+
+// <DioramaNormal>albedo.png,normal.png (doc 44, G6d) : carte de normales. Les tiles dont l'image est albedo.png (les <tile> de ce PNG) recoivent
+// leur relief dans normal.png, a la meme position et a la meme taille (un PNG de normales parallele au PNG de couleurs). Le RGB code la normale
+// ((R, G, B) = (0.5, 0.5, 1) : face a l'ecran ; G vers le haut, sinon <Diorama>nflipy=on). Pas de conditions. Force : <Diorama>nstrength=.
+void HdPackLoader::ProcessDioramaNormalTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(!conditions.empty()) {
+		logError("DioramaNormal : les conditions ne sont pas prises en charge, ligne ignoree.");
+		return;
+	}
+	if(tokens.size() != 2 || StringUtilities::Trim(tokens[0]).empty() || StringUtilities::Trim(tokens[1]).empty()) {
+		logError("DioramaNormal : albedo.png,normal.png attendus, ligne ignoree.");
+		return;
+	}
+	string albedoResolved;
+	if(!ResolveRandomPath(StringUtilities::Trim(tokens[0]), albedoResolved)) {
+		return; // l'erreur est deja journalisee
+	}
+	HdPackBitmapInfo* nb = LoadAuxBitmap(StringUtilities::Trim(tokens[1]));
+	if(!nb) {
+		return;
+	}
+	HdDioramaNormalPair np;
+	np.AlbedoName = albedoResolved;
+	np.Normal = nb;
+	_data->DioramaNormalPairs.push_back(np);
+	size_t n = 0;
+	for(auto& t : _data->Tiles) { // tiles deja chargees
+		if(t->Bitmap && t->Bitmap->PngName == np.AlbedoName) { t->NormalBitmap = np.Normal; n++; }
+	}
+	MessageManager::Log("[HDPack] <DioramaNormal> " + StringUtilities::Trim(tokens[0]) + " -> " + StringUtilities::Trim(tokens[1]) + " (" + std::to_string(n) + " tile(s) deja chargee(s))");
+}
+
+// <DioramaShadow> (doc 42, G6c) : ombre des sprites. Forme ligne : [cond]<DioramaShadow>tile=HASH (ou tile=* : tous les sprites)[,palette=..|*][,opacity=0.5][,color=000000]
+// [,soft=0][,onto=2][,light=1] ; forme bloc : <DioramaShadow>opacity=..,onto=..{ <tile>... } (les sprites des <tile> du bloc projettent une ombre).
+// onto : couches qui recoivent l'ombre : 0 a 3 (L0..L3) ou g1 a g4, separees par + (defaut 2) ; light : numero de la lumiere ponctuelle / solaire
+// (1 = la premiere active) ; soft : adoucissement en pixels NES (0 a 8) ; opacity 0..1.
+bool HdPackLoader::ParseDioramaShadowOptions(vector<string>& tokens, HdDioramaShadowRule& rule, bool allowTile)
+{
+	string tileStr, palStr = "*";
+	for(size_t i = 0; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) {
+			logError("DioramaShadow : option sans '=' : " + opt);
+			return false;
+		}
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string val = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(eq + 1)));
+		float f = 0.0f;
+		if(key == "opacity") {
+			if(!LightParseFloat(val, f) || f < 0.0f || f > 1.0f) { logError("DioramaShadow : opacity doit etre de 0 a 1 : " + val); return false; }
+			rule.Opacity = f;
+		} else if(key == "soft") {
+			if(!LightParseFloat(val, f) || f < 0.0f || f > 8.0f) { logError("DioramaShadow : soft doit etre de 0 a 8 pixels NES : " + val); return false; }
+			rule.Soft = f;
+		} else if(key == "color") {
+			string h = val;
+			if(!h.empty() && h[0] == '#') h = h.substr(1);
+			char* endp = nullptr;
+			const unsigned long v = h.size() == 6 ? strtoul(h.c_str(), &endp, 16) : 0;
+			if(h.size() != 6 || endp == h.c_str() || *endp != 0) { logError("DioramaShadow : color doit etre RRGGBB : " + val); return false; }
+			rule.Color = (uint32_t)v;
+		} else if(key == "light") {
+			int n = 0;
+			if(!DioParseInt(val, n) || n < 1 || n > 8) { logError("DioramaShadow : light doit etre de 1 a 8 : " + val); return false; }
+			rule.Light = n;
+		} else if(key == "onto") {
+			uint32_t mask = 0;
+			size_t start = 0;
+			while(start <= val.size()) {
+				size_t plus = val.find('+', start);
+				const string part = StringUtilities::Trim(val.substr(start, plus == string::npos ? string::npos : plus - start));
+				int n = 0;
+				if(part.size() == 2 && part[0] == 'g' && part[1] >= '1' && part[1] <= '8') mask |= 1u << (4 + (part[1] - '1'));
+				else if(DioParseInt(part, n) && n >= 0 && n <= 3) mask |= 1u << n;
+				else { logError("DioramaShadow : onto = couches 0 a 3 ou g1 a g8 separees par + : " + val); return false; }
+				if(plus == string::npos) break;
+				start = plus + 1;
+			}
+			rule.OntoMask = mask;
+		} else if(key == "tile") {
+			if(!allowTile) { logError("DioramaShadow : tile= n'est pas permis dans la forme bloc (mettre des <tile> dans le bloc)."); return false; }
+			tileStr = StringUtilities::Trim(opt.substr(eq + 1));
+			rule.HasTile = !tileStr.empty();
+		} else if(key == "palette") {
+			palStr = val;
+		} else {
+			logError("DioramaShadow : option inconnue : " + key);
+			return false;
+		}
+	}
+	if(allowTile) {
+		if(!rule.HasTile) { logError("DioramaShadow : tile= est obligatoire (ou utiliser la forme bloc)."); return false; }
+		rule.AnyPalette = (palStr == "*" || palStr == "all");
+		string pd = rule.AnyPalette ? string("0") : palStr;
+		if(tileStr == "*") {
+			rule.AnyTile = true; // tous les sprites
+		} else {
+			try {
+				ReadTileData(rule.Key, tileStr, pd);
+			} catch(...) {
+				logError("DioramaShadow : tile invalide : " + tileStr);
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+void HdPackLoader::ProcessDioramaShadowTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	HdDioramaShadowRule rule;
+	rule.Conditions = conditions;
+	if(!ParseDioramaShadowOptions(tokens, rule, true)) {
+		logError("DioramaShadow : ligne ignoree.");
+		return;
+	}
+	if(_data->DioramaShadowRules.size() >= 200) {
+		logError("DioramaShadow : 200 regles au plus, ligne ignoree.");
+		return;
+	}
+	_data->DioramaShadowRules.push_back(rule);
+}
+
+// <DioramaLight>type=ambient|point|sun,color=RRGGBB,intensity=..,x=..,y=..,z=..,radius=..,dx=..,dy=..,dz=.. (doc 42) : lumiere de la scene.
+// ambient : color, intensity. point : position x, y, z (pixels NES de la scene, z negatif = devant), radius (portee, defaut 256).
+// sun : direction de propagation dx, dy, dz (defaut 0.3, 0.5, 1). Conditions [ ] : jusqu'a 4 lumieres ponctuelles / solaires vraies, la derniere
+// lumiere ambiante vraie l'emporte (defaut blanc : sans ambiante, les lumieres ne font qu'ajouter). point : glow=0..8, glowradius=pixels NES = halo visible. G6b : point + tile=HASH[,palette=..|*][,flicker=0..1][,speed=..][,offx=..][,offy=..] = lumiere attachee a une tile de sprite (8 lumieres au plus en tout).
+static bool LightParseFloat(const string& v, float& out)
+{
+	char* endp = nullptr;
+	const double d = strtod(v.c_str(), &endp);
+	if(v.empty() || endp == v.c_str() || *endp != 0) return false;
+	out = (float)d;
+	return true;
+}
+
+// <DioramaCamera>nom[,yaw=,pitch=,dist=,zoom=,time=,key=,default=on] (doc 49) : declare une camera, ou (avec [cond]) change ses reglages.
+// Les reglages non cites viennent de <Diorama> (ou de la declaration sans condition).
+void HdPackLoader::ProcessDioramaCameraTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty() || tokens[0].find('=') != string::npos) {
+		logError("DioramaCamera : syntaxe <DioramaCamera>nom[,options], ligne ignoree.");
+		return;
+	}
+	HdDioramaCameraLine L;
+	L.Conditions = conditions;
+	const string name = StringUtilities::ToLower(StringUtilities::Trim(tokens[0]));
+	for(size_t i = 1; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) { logError("DioramaCamera : option sans '=' : " + opt + ", ligne ignoree."); return; }
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string rawVal = StringUtilities::Trim(opt.substr(eq + 1));
+		const string val = StringUtilities::ToLower(rawVal);
+		float f = 0.0f;
+		auto num = [&](float lo, float hi, float& out) {
+			if(!LightParseFloat(val, f) || f < lo || f > hi) { logError("DioramaCamera : " + key + " doit etre de " + std::to_string(lo) + " a " + std::to_string(hi) + " : " + val + ", ligne ignoree."); return false; }
+			out = f; return true;
+		};
+		if(key == "yaw") { if(!num(-70, 70, L.V[0])) return; L.Has[0] = true; }
+		else if(key == "pitch") { if(!num(-70, 70, L.V[1])) return; L.Has[1] = true; }
+		else if(key == "dist") { if(!num(16, 100000, L.V[2])) return; L.Has[2] = true; }
+		else if(key == "zoom") { if(!num(0.1f, 4, L.V[3])) return; L.Has[3] = true; }
+		else if(key == "time") { if(!num(0, 1000, L.Time)) return; L.HasTime = true; }
+		else if(key == "key") L.Key = rawVal;
+		else if(key == "default") L.IsDefault = (val == "on" || val == "1" || val == "true");
+		else { logError("DioramaCamera : option inconnue : " + key + ", ligne ignoree."); return; }
+	}
+	int idx = -1;
+	for(size_t k = 0; k < _data->DioramaCameraNames.size(); k++) if(_data->DioramaCameraNames[k] == name) idx = (int)k;
+	if(idx < 0) {
+		if(_data->DioramaCameraNames.size() >= 16) { logError("DioramaCamera : 16 cameras au plus, ligne ignoree."); return; }
+		_data->DioramaCameraNames.push_back(name);
+		idx = (int)_data->DioramaCameraNames.size() - 1;
+	}
+	L.Index = idx;
+	_data->DioramaCameraLines.push_back(L);
+}
+
+// [cond]<DioramaCameraDefault>nom : camera par defaut tant que la condition est vraie (la derniere regle vraie l'emporte).
+void HdPackLoader::ProcessDioramaCameraDefaultTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.size() != 1 || StringUtilities::Trim(tokens[0]).empty()) { logError("DioramaCameraDefault : syntaxe <DioramaCameraDefault>nom, ligne ignoree."); return; }
+	const string name = StringUtilities::ToLower(StringUtilities::Trim(tokens[0]));
+	for(size_t k = 0; k < _data->DioramaCameraNames.size(); k++) {
+		if(_data->DioramaCameraNames[k] == name) {
+			HdDioramaCameraDefaultRule r;
+			r.Conditions = conditions; r.Index = (int)k;
+			_data->DioramaCameraDefaults.push_back(r);
+			return;
+		}
+	}
+	logError("DioramaCameraDefault : camera inconnue (a declarer avant avec <DioramaCamera>) : " + name + ", ligne ignoree.");
+}
+
+// <DioramaCameraKeys>next=F9,prev=F8,default=F7 : touches (noms Mesen, clavier ou manette) pour changer de camera.
+void HdPackLoader::ProcessDioramaCameraKeysTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(!conditions.empty()) { logError("DioramaCameraKeys : les conditions ne sont pas prises en charge, ligne ignoree."); return; }
+	for(size_t i = 0; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) { logError("DioramaCameraKeys : option sans '=' : " + opt + ", ligne ignoree."); return; }
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string val = StringUtilities::Trim(opt.substr(eq + 1));
+		if(key == "next") _data->DioramaCameraKeys.Next = val;
+		else if(key == "prev") _data->DioramaCameraKeys.Prev = val;
+		else if(key == "default") _data->DioramaCameraKeys.Default = val;
+		else { logError("DioramaCameraKeys : option inconnue : " + key + ", ligne ignoree."); return; }
+	}
+}
+
+// <DioramaPad>left=rot,right=zoom,port=1,yawmax=35,pitchmax=25,zoomrange=2,dead=0.2,smooth=0.2,invx=off,invy=off
+// La manette pilote la camera du diorama (stick analogique). left= / right= : rot (yaw+pitch), zoom ou off. Accepte [cond].
+void HdPackLoader::ProcessDioramaPadTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	HdDioramaPadRule r;
+	r.Conditions = conditions;
+	for(size_t i = 0; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) { logError("DioramaPad : option sans '=' : " + opt + ", ligne ignoree."); return; }
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string val = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(eq + 1)));
+		float f = 0.0f;
+		auto fn = [&](float lo, float hi, float& out) {
+			if(!LightParseFloat(val, f) || f < lo || f > hi) { logError("DioramaPad : " + key + " doit etre de " + std::to_string(lo) + " a " + std::to_string(hi) + " : " + val + ", ligne ignoree."); return false; }
+			out = f; return true;
+		};
+		auto fnc = [&](int& out) {
+			if(val == "rot" || val == "rotation") out = 1;
+			else if(val == "zoom") out = 2;
+			else if(val == "off" || val == "none") out = 0;
+			else { logError("DioramaPad : " + key + " = rot, zoom ou off : " + val + ", ligne ignoree."); return false; }
+			return true;
+		};
+		if(key == "left") { if(!fnc(r.Left)) return; }
+		else if(key == "right") { if(!fnc(r.Right)) return; }
+		else if(key == "port") { float p = 1; if(!fn(1, 4, p)) return; r.Port = (int)p; }
+		else if(key == "yawmax") { if(!fn(0, 70, r.YawMax)) return; }
+		else if(key == "pitchmax") { if(!fn(0, 70, r.PitchMax)) return; }
+		else if(key == "zoomrange") { if(!fn(1, 4, r.ZoomRange)) return; }
+		else if(key == "dead") { if(!fn(0, 0.9f, r.Dead)) return; }
+		else if(key == "smooth") { if(!fn(0.01f, 1, r.Smooth)) return; }
+		else if(key == "invx") r.InvX = (val == "on" || val == "1" || val == "true");
+		else if(key == "invy") r.InvY = (val == "on" || val == "1" || val == "true");
+		else { logError("DioramaPad : option inconnue : " + key + ", ligne ignoree."); return; }
+	}
+	if(_data->DioramaPadRules.size() >= 16) { logError("DioramaPad : 16 regles au plus, ligne ignoree."); return; }
+	_data->DioramaPadRules.push_back(r);
+}
+
+void HdPackLoader::ProcessDioramaLightTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	HdDioramaLightRule r;
+	r.Conditions = conditions;
+	string tileStr, palStr = "*";
+	for(size_t i = 0; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) {
+			logError("DioramaLight : option sans '=' : " + opt + ", ligne ignoree.");
+			return;
+		}
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string val = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(eq + 1)));
+		float f = 0.0f;
+		if(key == "type") {
+			if(val == "ambient") r.Type = 1;
+			else if(val == "point") r.Type = 2;
+			else if(val == "sun") r.Type = 3;
+			else { logError("DioramaLight : type inconnu (ambient, point, sun) : " + val + ", ligne ignoree."); return; }
+		} else if(key == "color") {
+			string h = val;
+			if(!h.empty() && h[0] == '#') h = h.substr(1);
+			char* endp = nullptr;
+			const unsigned long v = h.size() == 6 ? strtoul(h.c_str(), &endp, 16) : 0;
+			if(h.size() != 6 || endp == h.c_str() || *endp != 0) { logError("DioramaLight : color doit etre RRGGBB : " + val + ", ligne ignoree."); return; }
+			r.Color = (uint32_t)v;
+		} else if(key == "intensity") {
+			if(!LightParseFloat(val, f) || f < 0.0f || f > 16.0f) { logError("DioramaLight : intensity doit etre de 0 a 16 : " + val + ", ligne ignoree."); return; }
+			r.Intensity = f;
+		} else if(key == "radius") {
+			if(!LightParseFloat(val, f) || f < 1.0f || f > 4096.0f) { logError("DioramaLight : radius doit etre de 1 a 4096 pixels NES : " + val + ", ligne ignoree."); return; }
+			r.Radius = f;
+		} else if(key == "tile") {
+			tileStr = StringUtilities::Trim(opt.substr(eq + 1)); // casse conservee (hash hexadecimal)
+			r.HasTile = !tileStr.empty();
+		} else if(key == "palette") {
+			palStr = val;
+		} else if(key == "flicker") {
+			if(!LightParseFloat(val, f) || f < 0.0f || f > 1.0f) { logError("DioramaLight : flicker doit etre de 0 a 1 : " + val + ", ligne ignoree."); return; }
+			r.Flicker = f;
+		} else if(key == "speed") {
+			if(!LightParseFloat(val, f) || f < 0.0f || f > 100.0f) { logError("DioramaLight : speed doit etre de 0 a 100 : " + val + ", ligne ignoree."); return; }
+			r.FlickerSpeed = f;
+		} else if(key == "offx" || key == "offy") {
+			if(!LightParseFloat(val, f) || f < -256.0f || f > 256.0f) { logError("DioramaLight : " + key + " doit etre de -256 a 256 : " + val + ", ligne ignoree."); return; }
+			if(key == "offx") r.OffX = f; else r.OffY = f;
+		} else if(key == "glow") {
+			if(!LightParseFloat(val, f) || f < 0.0f || f > 8.0f) { logError("DioramaLight : glow doit etre de 0 a 8 : " + val + ", ligne ignoree."); return; }
+			r.Glow = f;
+		} else if(key == "glowradius") {
+			if(!LightParseFloat(val, f) || f < 1.0f || f > 1024.0f) { logError("DioramaLight : glowradius doit etre de 1 a 1024 pixels NES : " + val + ", ligne ignoree."); return; }
+			r.GlowRadius = f;
+		} else if(key == "x" || key == "y" || key == "z" || key == "dx" || key == "dy" || key == "dz") {
+			if(!LightParseFloat(val, f) || f < -4096.0f || f > 4096.0f) { logError("DioramaLight : " + key + " doit etre un nombre de -4096 a 4096 : " + val + ", ligne ignoree."); return; }
+			if(key == "x") r.X = f; else if(key == "y") r.Y = f; else if(key == "z") r.Z = f;
+			else if(key == "dx") r.Dx = f; else if(key == "dy") r.Dy = f; else r.Dz = f;
+		} else {
+			logError("DioramaLight : option inconnue : " + key + ", ligne ignoree.");
+			return;
+		}
+	}
+	if(r.Type == 0) {
+		logError("DioramaLight : type= est obligatoire (ambient, point, sun), ligne ignoree.");
+		return;
+	}
+	if(r.HasTile) {
+		if(r.Type != 2) {
+			logError("DioramaLight : tile= ne vaut que pour type=point, ligne ignoree.");
+			return;
+		}
+		r.AnyPalette = (palStr == "*" || palStr == "all");
+		string pd = r.AnyPalette ? string("0") : palStr;
+		try {
+			ReadTileData(r.Key, tileStr, pd);
+		} catch(...) {
+			logError("DioramaLight : tile invalide : " + tileStr + ", ligne ignoree.");
+			return;
+		}
+	}
+	if(r.Type == 3 && r.Dx == 0.0f && r.Dy == 0.0f && r.Dz == 0.0f) {
+		logError("DioramaLight : la direction du soleil ne peut pas etre nulle, ligne ignoree.");
+		return;
+	}
+	if(_data->DioramaLightRules.size() >= 32) {
+		logError("DioramaLight : 32 regles au plus, ligne ignoree.");
+		return;
+	}
+	_data->DioramaLightRules.push_back(r);
+}
+
+// <DioramaSkybox>color,skytop=RRGGBB,skybottom=RRGGBB : degrade vertical derriere les plans.
+// <DioramaSkybox>pano,fichier.png[,yaw,pitch] : panorama equirectangulaire (2:1) qui tourne avec la camera ; cube,fichier.png : cubemap
+// (croix 4 x 3 ou 3 x 4, bande 6 x 1 ou 1 x 6) ; cube,left=a.png,front=b.png,right=..,back=..,top=..,bottom=.. : 6 fichiers. Vitesses en degres par image.
+// <DioramaSkybox>fichier.png,vitesseX,vitesseY : image (un pixel du PNG = un pixel HD, repetee) qui derive de vitesseX / vitesseY
+// pixels NES par image (0 = fixe). Conditions [ ] : la derniere regle vraie l'emporte. Visible la ou L0 est unie (la couleur de L0
+// est remplacee) ; pas de skybox si L0 n'est pas unie.
+static bool SkyParseHex(const string& v, uint32_t& out)
+{
+	string h = v;
+	if(!h.empty() && h[0] == '#') h = h.substr(1);
+	if(h.size() != 6) return false;
+	char* endp = nullptr;
+	const unsigned long x = strtoul(h.c_str(), &endp, 16);
+	if(endp == h.c_str() || *endp != 0) return false;
+	out = (uint32_t)x;
+	return true;
+}
+
+void HdPackLoader::ProcessDioramaSkyboxTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) {
+		logError("DioramaSkybox : color,skytop=..,skybottom=.. ou fichier.png,vitesseX,vitesseY attendu, ligne ignoree.");
+		return;
+	}
+	HdDioramaSkyboxRule rule;
+	rule.Conditions = conditions;
+	const string first = StringUtilities::Trim(tokens[0]);
+	if(StringUtilities::ToLower(first) == "color") {
+		rule.Mode = 1;
+		bool hasTop = false, hasBottom = false;
+		for(size_t i = 1; i < tokens.size(); i++) {
+			const string opt = StringUtilities::Trim(tokens[i]);
+			const size_t eq = opt.find('=');
+			if(eq == string::npos) {
+				logError("DioramaSkybox : option sans '=' : " + opt + ", ligne ignoree.");
+				return;
+			}
+			const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+			const string val = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(eq + 1)));
+			uint32_t c = 0;
+			if(key == "skytop") {
+				if(!SkyParseHex(val, c)) { logError("DioramaSkybox : skytop doit etre RRGGBB : " + val + ", ligne ignoree."); return; }
+				rule.Top = c; hasTop = true;
+			} else if(key == "skybottom" || key == "skybotom") {
+				if(!SkyParseHex(val, c)) { logError("DioramaSkybox : skybottom doit etre RRGGBB : " + val + ", ligne ignoree."); return; }
+				rule.Bottom = c; hasBottom = true;
+			} else {
+				logError("DioramaSkybox : option inconnue (skytop, skybottom) : " + key + ", ligne ignoree.");
+				return;
+			}
+		}
+		if(!hasTop && !hasBottom) {
+			logError("DioramaSkybox : color demande skytop= et / ou skybottom=, ligne ignoree.");
+			return;
+		}
+		if(!hasTop) rule.Top = rule.Bottom;
+		if(!hasBottom) rule.Bottom = rule.Top;
+	} else {
+		const string lfirst = StringUtilities::ToLower(first);
+		size_t speedFrom = 1;
+		if(lfirst == "pano" || lfirst == "cube") {
+			// G5b : pano,fichier[,yaw,pitch] ; cube,fichier[,yaw,pitch] (croix ou bande) ; cube,left=..,front=..,right=..,back=..,top=..,bottom=..[,yaw,pitch]
+			rule.Mode = (lfirst == "pano") ? 3 : 4;
+			if(tokens.size() < 2 || StringUtilities::Trim(tokens[1]).empty()) {
+				logError("DioramaSkybox : " + lfirst + " demande un fichier, ligne ignoree.");
+				return;
+			}
+			const string second = StringUtilities::Trim(tokens[1]);
+			if(rule.Mode == 4 && second.find('=') != string::npos) {
+				const char* names[6] = { "left", "front", "right", "back", "top", "bottom" };
+				size_t i = 1;
+				for(; i < tokens.size(); i++) {
+					const string opt = StringUtilities::Trim(tokens[i]);
+					const size_t eq = opt.find('=');
+					if(eq == string::npos) break;
+					const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+					int f = -1;
+					for(int k = 0; k < 6; k++) if(key == names[k]) f = k;
+					if(key == "up") f = 4;
+					if(key == "down") f = 5;
+					if(f < 0) {
+						logError("DioramaSkybox : face inconnue (left, front, right, back, top, bottom) : " + key + ", ligne ignoree.");
+						return;
+					}
+					rule.Faces[f] = LoadDioramaTexture(StringUtilities::Trim(opt.substr(eq + 1)));
+					if(!rule.Faces[f]) return;
+				}
+				for(int k = 0; k < 6; k++) {
+					if(!rule.Faces[k]) {
+						logError(string("DioramaSkybox : cube en 6 fichiers : la face ") + names[k] + " manque, ligne ignoree.");
+						return;
+					}
+				}
+				speedFrom = i;
+			} else {
+				rule.Image = LoadDioramaTexture(second);
+				if(!rule.Image) return;
+				speedFrom = 2;
+			}
+		} else {
+			rule.Mode = 2;
+			rule.Image = LoadDioramaTexture(first);
+			if(!rule.Image) return; // l'erreur est deja journalisee
+		}
+		float* speeds[2] = { &rule.SpeedX, &rule.SpeedY };
+		for(size_t i = speedFrom; i < tokens.size() && i < speedFrom + 2; i++) {
+			string v = StringUtilities::Trim(tokens[i]);
+			const size_t eq = v.find('=');
+			if(eq != string::npos) v = StringUtilities::Trim(v.substr(eq + 1));
+			char* endp = nullptr;
+			const double d = strtod(v.c_str(), &endp);
+			if(v.empty() || endp == v.c_str() || *endp != 0 || d < -64.0 || d > 64.0) {
+				logError("DioramaSkybox : la vitesse doit etre un nombre de -64 a 64 (pixels NES par image) : " + v + ", ligne ignoree.");
+				return;
+			}
+			*speeds[i - speedFrom] = (float)d;
+		}
+	}
+	if(_data->DioramaSkyboxRules.size() >= 16) {
+		logError("DioramaSkybox : 16 regles au plus, ligne ignoree.");
+		return;
+	}
+	_data->DioramaSkyboxRules.push_back(rule);
+}
+
+// <DioramaOffCamera>x,y,largeur,hauteur,mode (doc 38) : zone d'ecran en pixels NES ; ses tiles et ses sprites restent a leur
+// position 2D d'origine, a plat devant la scene (mode flat). Balise repetable. Pas encore : mode fixed3d.
+// Forme bloc <DioramaOffCamera>mode{ <tile>... } : traitee dans LoadPack (marque DioOffCamera sur les tiles du bloc).
+void HdPackLoader::ProcessDioramaOffCameraTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(!conditions.empty()) {
+		logError("DioramaOffCamera : les conditions ne sont pas prises en charge, ligne ignoree.");
+		return;
+	}
+	if(!tokens.empty() && tokens.back().find('{') != string::npos) {
+		logError("DioramaOffCamera : la forme bloc { } n'est pas encore prise en charge, ligne ignoree.");
+		return;
+	}
+	if(tokens.size() < 4 || tokens.size() > 5) {
+		logError("DioramaOffCamera : syntaxe <DioramaOffCamera>x,y,largeur,hauteur,mode, ligne ignoree.");
+		return;
+	}
+	int v[4] = {};
+	try {
+		for(int i = 0; i < 4; i++) {
+			const string s = StringUtilities::Trim(tokens[i]);
+			size_t used = 0;
+			v[i] = std::stoi(s, &used);
+			if(used != s.size()) throw std::invalid_argument("suite");
+		}
+	} catch(...) {
+		logError("DioramaOffCamera : x, y, largeur et hauteur doivent etre des entiers, ligne ignoree.");
+		return;
+	}
+	if(tokens.size() == 5) {
+		const string mode = StringUtilities::ToLower(StringUtilities::Trim(tokens[4]));
+		if(mode == "fixed3d") {
+			_data->DioramaFixed3d = true;
+		} else if(mode != "flat") {
+			logError("DioramaOffCamera : mode inconnu (flat ou fixed3d) : " + mode + ", ligne ignoree.");
+			return;
+		}
+	}
+	// Decoupe a l'ecran NES (256 x 240)
+	int x0 = std::max(0, v[0]), y0 = std::max(0, v[1]);
+	int x1 = std::min(256, v[0] + v[2]), y1 = std::min(240, v[1] + v[3]);
+	if(v[2] <= 0 || v[3] <= 0 || x1 <= x0 || y1 <= y0) {
+		logError("DioramaOffCamera : zone vide ou hors de l'ecran (256 x 240), ligne ignoree.");
+		return;
+	}
+	HdDioramaOffRect r;
+	r.X = x0; r.Y = y0; r.W = x1 - x0; r.H = y1 - y0;
+	_data->DioramaOffRects.push_back(r);
+}
+
+// <Diorama>mode[,options] (doc 32, 36, 37) : scene diorama. Mode plainTiles seulement. Options (cle=valeur) : z0..z3
+// (profondeur des 4 couches), t0..t3 (epaisseur des 4 couches en tiles, 0 a 16, fractions permises ; doc 38),
+// side0..side3 / top0..top3 (PNG des flancs / du dessus et du dessous des couches epaisses), stretchx0..3 / stretchy0..3 (et
+// topstretchx0..3, topstretchy0..3, sidestretchx0..3, sidestretchy0..3 : etirement des motifs, 1 = taille normale, 0.01 a 100),
+// yaw, pitch, dist, orbit=on|off, orbitamp, orbitperiod.
+// Sans cette balise, le filtre reste strictement inchange.
+void HdPackLoader::ProcessDioramaTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(!conditions.empty()) {
+		logError("Diorama : les conditions ne sont pas prises en charge, ligne ignoree.");
+		return;
+	}
+	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) {
+		logError("Diorama : syntaxe <Diorama>mode[,options], ligne ignoree.");
+		return;
+	}
+	const string mode = StringUtilities::ToLower(StringUtilities::Trim(tokens[0]));
+	if(mode != "plaintiles") {
+		logError("Diorama : mode inconnu (seul plainTiles existe pour l'instant) : " + StringUtilities::Trim(tokens[0]) + ", ligne ignoree.");
+		return;
+	}
+	HdDioramaConfig cfg;
+	for(size_t i = 1; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) {
+			logError("Diorama : option sans '=' ignoree : " + opt);
+			continue;
+		}
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string val = StringUtilities::Trim(opt.substr(eq + 1));
+		try {
+			auto num = [&](float& out) {
+				size_t used = 0;
+				const float v = std::stof(val, &used);
+				if(used != val.size()) throw std::invalid_argument("suite");
+				out = v;
+			};
+			if(key == "z0") num(cfg.Z[0]);
+			else if(key == "z1") num(cfg.Z[1]);
+			else if(key == "z2") num(cfg.Z[2]);
+			else if(key == "z3") num(cfg.Z[3]);
+			else if(key.size() >= 2 && key.back() >= '0' && key.back() <= '3' && ParseDioramaWallOption(key.substr(0, key.size() - 1), val, cfg.Wall[key.back() - '0'])) {
+				// cle de mur indexee par couche (side2, top2, stretchx2, topstretchy0, ...)
+			}
+			else if(key == "t0") num(cfg.T[0]);
+			else if(key == "t1") num(cfg.T[1]);
+			else if(key == "t2") num(cfg.T[2]);
+			else if(key == "t3") num(cfg.T[3]);
+			else if(key == "aa") {
+				float aaValue = 1.0f;
+				num(aaValue);
+				if(aaValue < 1.0f || aaValue > 3.0f || aaValue != std::floor(aaValue)) {
+					logError("Diorama : aa doit valoir 1, 2 ou 3 (surechantillonnage), remis a 1.");
+					aaValue = 1.0f;
+				}
+				cfg.Aa = (int)aaValue;
+			}
+			else if(key == "yaw") num(cfg.Yaw);
+			else if(key == "pitch") num(cfg.Pitch);
+			else if(key == "dist") num(cfg.Dist);
+			else if(key == "orbitamp") num(cfg.OrbitAmp);
+			else if(key == "orbitperiod") num(cfg.OrbitPeriod);
+			else if(key == "fixedt") {
+				num(cfg.FixedT);
+				if(cfg.FixedT < 0.0f || cfg.FixedT > 16.0f) { logError("Diorama : fixedt doit etre de 0 a 16 tiles, remis a 1."); cfg.FixedT = 1.0f; }
+			}
+			else if(key == "zoom") {
+				num(cfg.Zoom);
+				if(cfg.Zoom < 0.1f || cfg.Zoom > 4.0f) { logError("Diorama : zoom doit etre de 0.1 a 4, remis a 1."); cfg.Zoom = 1.0f; }
+			}
+			else if(key == "nstrength") { num(cfg.NormalStrength); if(cfg.NormalStrength < 0.0f || cfg.NormalStrength > 4.0f) { logError("Diorama : nstrength doit etre de 0 a 4, remis a 1."); cfg.NormalStrength = 1.0f; } }
+			else if(key == "nflipy") { const string v = StringUtilities::ToLower(val); cfg.NormalFlipY = (v == "on" || v == "1" || v == "true"); }
+			else if(key == "extdebug") {
+				const string v = StringUtilities::ToLower(val);
+				cfg.ExtDebug = (v == "on" || v == "1" || v == "true");
+			}
+			else if(key == "fixedz") num(cfg.FixedZ);
+			else if(key == "fixeddark") {
+				num(cfg.FixedDark);
+				if(cfg.FixedDark < 0.0f || cfg.FixedDark > 1.0f) { logError("Diorama : fixeddark doit etre de 0 a 1, remis a 0.5."); cfg.FixedDark = 0.5f; }
+			}
+			else if(key == "fixedpersp") {
+				num(cfg.FixedPersp);
+				if(cfg.FixedPersp < 0.0f || cfg.FixedPersp > 4.0f) { logError("Diorama : fixedpersp doit etre de 0 a 4, remis a 1."); cfg.FixedPersp = 1.0f; }
+			}
+			else if(key == "orbit") {
+				const string v = StringUtilities::ToLower(val);
+				if(v == "on" || v == "1" || v == "true") cfg.Orbit = true;
+				else if(v == "off" || v == "0" || v == "false") cfg.Orbit = false;
+				else logError("Diorama : orbit=on ou orbit=off, valeur ignoree : " + val);
+			} else {
+				logError("Diorama : option inconnue, ignoree : " + key);
+			}
+		} catch(...) {
+			logError("Diorama : valeur invalide pour " + key + " : " + val);
+		}
+	}
+	// Bornes : la camera ne coupe pas les plans qui passent derriere elle (pas de decoupage proche), donc on reste loin de ce cas.
+	if(cfg.Dist < 16.0f) { logError("Diorama : dist doit etre >= 16, remis a 256."); cfg.Dist = 256.0f; }
+	if(cfg.Yaw < -70.0f || cfg.Yaw > 70.0f) { logError("Diorama : yaw limite a +-70 degres."); cfg.Yaw = cfg.Yaw < 0 ? -70.0f : 70.0f; }
+	if(cfg.Pitch < -70.0f || cfg.Pitch > 70.0f) { logError("Diorama : pitch limite a +-70 degres."); cfg.Pitch = cfg.Pitch < 0 ? -70.0f : 70.0f; }
+	if(cfg.OrbitAmp < 0.0f || cfg.OrbitAmp > 70.0f) { logError("Diorama : orbitamp limite a 0..70 degres."); cfg.OrbitAmp = cfg.OrbitAmp < 0 ? 0.0f : 70.0f; }
+	if(cfg.OrbitPeriod < 30.0f) { logError("Diorama : orbitperiod doit etre >= 30 images, remis a 600."); cfg.OrbitPeriod = 600.0f; }
+	for(int k = 0; k < 4; k++) {
+		if(cfg.Z[k] < -0.9f * cfg.Dist) {
+			logError("Diorama : z" + std::to_string(k) + " trop proche de la camera, limite a -0.9 x dist.");
+			cfg.Z[k] = -0.9f * cfg.Dist;
+		}
+		if(cfg.T[k] < 0.0f || cfg.T[k] > 16.0f) {
+			logError("Diorama : t" + std::to_string(k) + " limite a 0..16 tiles.");
+			cfg.T[k] = cfg.T[k] < 0.0f ? 0.0f : 16.0f;
+		}
+	}
+	_data->DioramaEnabled = true;
+	_data->DioramaMode = "plainTiles";
+	_data->Diorama = cfg;
 }
 
 // <2DPerspective> (NES) : sol incline. Syntaxe : [cond]<2DPerspective>fichier.png,Z,tileX,tileY,alpha,speedX,speedY,horizon=..,depth=..,repeat=..,limit=+N,fog=RRGGBB,fogrange=N

@@ -7,6 +7,7 @@
 #include "Shared/HdLoadingScreen.h"
 #include "Utilities/PNGHelper.h"
 #include "Utilities/HexUtilities.h"
+#include "Shared/HdWatchExpr.h"
 #include "Utilities/SimpleLock.h"
 #include "Utilities/Timer.h"
 #include "Utilities/VirtualFile.h"
@@ -304,6 +305,9 @@ public:
 	bool TransparencyRequired;
 	bool IsFullyTransparent;
 	vector<uint32_t> HdTileData;
+	// G6d : carte de normales (<DioramaNormal>) : PNG de relief associe au PNG de la tile ; meme region (X, Y, Width, Height)
+	HdPackBitmapInfo* NormalBitmap = nullptr;
+	vector<uint32_t> NormalTileData;
 	uint32_t ChrBankId;
 
 	vector<HdPackCondition*> Conditions;
@@ -312,6 +316,15 @@ public:
 	// Variante miroir (<tile_hflip>, <tile_vflip>, <tile_hvflip>) : l'image du pack est deja retournee, pas de miroir a l'affichage
 	bool IsHFlip = false;
 	bool IsVFlip = false;
+
+	// <DioramaOffCamera>{ ... } (doc 38) : tile declaree dans un bloc off camera, dessinee dans la couche fixe du diorama
+	bool DioOffCamera = false;
+	// <DioramaIgnore>{ ... } (doc 38) : tile declaree dans un bloc ignore, jamais dessinee dans les couches du diorama
+	bool DioIgnore = false;
+	// <DioramaDepth>z=..,t=..{ ... } (doc 38) : groupe de profondeur de la tile (1 a 4, 0 = aucun)
+	uint8_t DioDepthGroup = 0;
+	// <DioramaShadow>...{ ... } (doc 42, G6c) : numero (regle + 1, 0 = aucun) du bloc dont la tile de sprite projette une ombre
+	uint8_t DioShadow = 0;
 
 	// <Ignore2DOverlays> : ensembles de conditions (un par bloc / ligne) ; la tile reste nette pendant la distorsion si l'un est vrai
 	vector<vector<HdPackCondition*>> Ignore2DSets;
@@ -409,6 +422,19 @@ public:
 			}
 		}
 
+		if(NormalBitmap) {
+			NormalBitmap->Init();
+			const uint32_t nOffset0 = Y * NormalBitmap->Width + X;
+			if(NormalBitmap->PixelData.size() >= nOffset0 + ((Height - 1) * NormalBitmap->Width) + Width) {
+				NormalTileData.resize(Width * Height);
+				uint32_t nOffset = nOffset0;
+				for(uint32_t y = 0; y < Height; y++) {
+					memcpy(NormalTileData.data() + (y * Width), NormalBitmap->PixelData.data() + nOffset, Width * sizeof(uint32_t));
+					nOffset += NormalBitmap->Width;
+				}
+			}
+		}
+
 		UpdateFlags();
 	}
 
@@ -489,6 +515,17 @@ struct HdBackgroundInfo
 	uint32_t Top;
 
 	HdPackBlendMode BlendMode;
+
+	// ramx= / ramy= : defilement pilote par la RAM ($nom de <watchMemoryAddress>) a la place du defilement PPU
+	HdWatchExpr ScrollXExpr;
+	HdWatchExpr ScrollYExpr;
+	bool ExprXOk = false;   // mis a jour a chaque image (OnBeforeApplyFilter)
+	bool ExprYOk = false;
+	int32_t ExprX = 0;
+	int32_t ExprY = 0;
+	// Diorama : cible du fond. -1 = selon la priorite (0 a 9 -> L0, 10 a 19 -> L1, 20 a 29 -> au-dessus de la tile, 30 a 49 -> L3), -2 = ignore, 0 a 3 = L0..L3, 4 a 7 = groupe <DioramaDepth> 1 a 4 (bloc { } ou option dio=)
+	int DioTarget = -1;
+	int DioWideX = 0, DioWideY = 0; // diorama, fond sur L0 : marge (pixels NES) dessinee au-dela de l'ecran a gauche / droite (wide=) et en haut / en bas (tall=)
 
 	// <background> etendu (NES) : repetition, animation par dossier, operateur de defilement
 	bool TileX = false;
@@ -876,6 +913,235 @@ struct HdWatchedValue
 	bool Signed = false;
 };
 
+// Reglages de <Diorama>plainTiles,options (doc 36, 37). Z : profondeur de chaque couche (pixels NES, positif = derriere le
+// plan du jeu) : L0 fond, L1 sprites derriere, L2 tiles, L3 sprites devant. Yaw / Pitch en degres ; Dist = distance de la camera.
+// Textures des murs d'une couche epaisse (G3b2, doc 38) : Top = dessus et dessous, Side = flancs. Top retombe sur Side quand il
+// est absent (avec les etirements de Side) ; Side absent = mur d'origine (extrusion). Etirements : 1 = taille normale (un pixel
+// du PNG = un pixel HD), 2 = deux fois plus grand ; X le long du bord, Y en profondeur ; de 0.01 a 100. Valeur negative (-1) =
+// "adapt" : la texture couvre exactement la zone (X : largeur de la zone pour le dessus, hauteur pour les flancs ; Y : epaisseur).
+struct HdDioramaWallTex
+{
+	HdPackBitmapInfo* Top = nullptr;
+	HdPackBitmapInfo* Side = nullptr;
+	int SideVol = 0;   // G3b3 : side=volume.png:N, bande de N images (0 = motif simple)
+	int SideVolMode = 0; // orientation : 0 = automatique (plus haut que large = verticale), 1 = cote a cote (h), 2 = de haut en bas (v)
+	float TopStretchX = 1.0f, TopStretchY = 1.0f;
+	float SideStretchX = 1.0f, SideStretchY = 1.0f;
+};
+
+struct HdDioramaConfig
+{
+	float Z[4] = { 200.0f, 24.0f, 0.0f, -24.0f };
+	HdDioramaWallTex Wall[4];                 // G3b2 : murs des couches L0..L3 (options side0..3, top0..3, stretchx0..3, stretchy0..3...)
+	float T[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // G3b1 : epaisseur de chaque couche en tiles (8 pixels NES), vers l'arriere. 0 = feuille
+	float Yaw = 0.0f, Pitch = 0.0f;
+	float Dist = 256.0f;
+	bool Orbit = false;
+	// G3c3 : mode fixed3d de <DioramaOffCamera> : la couche fixe devient une plaque epaisse (FixedT tiles), face avant a la
+	// profondeur FixedZ (pixels NES, negatif = devant le jeu ; taille apparente inchangee), perspective reelle x FixedPersp
+	float FixedT = 1.0f, FixedZ = 0.0f, FixedPersp = 1.0f;
+	float Zoom = 1.0f;           // G4 : zoom de la vue (0.1 a 4), 1 = normal ; < 1 recule pour voir tout le plan et ses marges
+	float NormalStrength = 1.0f; // G6d : force du relief des cartes de normales (0 a 4), 1 = tel quel
+	bool NormalFlipY = false;    // G6d : nflipy=on : le vert des normales pointe vers le bas (convention DirectX)
+	bool ExtDebug = false;       // G4 : extdebug=on teinte en magenta les pixels venus d'une extension (controle)
+	float FixedDark = 0.5f; // assombrissement des tranches vers le fond (0 = aucun, 1 = noir au fond)
+	int Aa = 1;                  // G3f : surechantillonnage (aa=1 a 3), 1 = aucun
+	float OrbitAmp = 25.0f;     // degres
+	float OrbitPeriod = 600.0f; // images
+};
+
+// <DioramaOffCamera>x,y,largeur,hauteur,mode (doc 38) : zone d'ecran (pixels NES) dont les tiles et les sprites restent
+// a leur position 2D quand la camera du diorama bouge.
+struct HdDioramaOffRect
+{
+	int X = 0, Y = 0, W = 0, H = 0;
+};
+
+// <DioramaDepth>z=..,t=..[,rect=x,y,l,h] ou bloc <DioramaDepth>z=..,t=..{ ... } (doc 38) : groupe de tiles de fond ayant sa
+// propre profondeur (Z, pixels NES, positif = derriere) et son epaisseur (T, tiles). 4 groupes au plus.
+struct HdDioramaDepthGroup
+{
+	float Z = 0.0f;
+	float T = 0.0f;
+	bool HasRect = false;
+	int X = 0, Y = 0, W = 0, H = 0;
+	HdDioramaWallTex Wall;  // G3b2 : options side=, top=, stretchx=, stretchy=...
+};
+
+// <DioramaExtend>side=..,layer=..,mode=..,size=..,band=.. (doc 40) : complete l'ecran au-dela de ses bords (marge de Size pixels NES)
+// sur un ou plusieurs cotes d'une couche. Side : bits 1 haut, 2 bas, 4 gauche, 8 droite. Mode : 1 stretch, 2 repeat (Band tiles NES
+// du bord, alignees sur la grille du monde), 3 mirror, 4 wrap, 5 color (aplat). Conditions evaluees une fois par image.
+struct HdDioramaExtendRule
+{
+	int Side = 0;
+	int Layer = 2;
+	int Mode = 0;
+	int Size = 128;
+	int Band = 1;
+	int RangeMin = -1, RangeMax = -1; // rows (cotes gauche / droit) ou cols (haut / bas) : plage de l'ecran, pixels NES ; -1 = tout
+	bool RangeIsRows = true;
+	float Fog = 0.0f;     // G4c : force de brume (0..1) atteinte a FogDist pixels du bord
+	int FogDist = -1;     // G4c : distance de la brume (pixels NES) ; -1 = la marge
+	uint32_t Color = 0;   // G4c : couleur RRGGBB
+	bool HasColor = false;
+	int Edge = -1;   // debut reel du contenu (pixels NES, y pour haut / bas, x pour gauche / droite) ; -1 = bord de l'ecran
+	vector<HdPackCondition*> Conditions;
+};
+
+// <DioramaLight>type=ambient|point|sun,... (doc 42) : lumieres de la scene diorama, sur conditions [ ].
+struct HdDioramaLightRule
+{
+	int Type = 0;            // 1 ambiante, 2 ponctuelle, 3 soleil
+	float X = 128, Y = 60, Z = -60;   // ponctuelle : position (pixels NES de la scene)
+	float Dx = 0.3f, Dy = 0.5f, Dz = 1.0f; // soleil : direction de propagation de la lumiere
+	uint32_t Color = 0xFFFFFF;
+	float Intensity = 1.0f;
+	float Radius = 256.0f;
+	float Glow = 0.0f, GlowRadius = 48.0f; // halo visible (ponctuelle)
+	// G6b : lumiere attachee a une tile de sprite (tile=HASH[,palette=..]) : suit la tile tant qu'elle est a l'ecran
+	bool HasTile = false;
+	HdTileKey Key;
+	bool AnyPalette = true;
+	float Flicker = 0.0f, FlickerSpeed = 9.0f;
+	float OffX = 0.0f, OffY = 0.0f;   // decalage du centre de la tile (pixels NES, inverse si la tile est retournee)
+	vector<HdPackCondition*> Conditions;
+
+	bool MatchesTile(const HdPpuTileInfo& t) const
+	{
+		if(Key.IsChrRamTile) {
+			if(memcmp(Key.TileData, t.TileData, sizeof(Key.TileData)) != 0) return false;
+		} else if(Key.TileIndex != t.TileIndex) {
+			return false;
+		}
+		return AnyPalette || Key.PaletteColors == t.PaletteColors;
+	}
+};
+
+// <DioramaNormal>albedo.png,normal.png (doc 44, G6d) : les tiles prises dans albedo.png recoivent leurs normales dans normal.png (meme region).
+struct HdDioramaNormalPair
+{
+	string AlbedoName;                // nom resolu du PNG de couleurs (comme HdPackBitmapInfo::PngName)
+	HdPackBitmapInfo* Normal = nullptr;
+};
+
+// H1 : expression de position (somme de produits de nombres et de valeurs $nom de <watchMemoryAddress>), ex. $page*256+$x
+struct HdDioramaExpr
+{
+	struct Factor { int Var = -1; float Val = 1.0f; };   // Var >= 0 : indice dans HdPackData::WatchedValues
+	struct Term { float Sign = 1.0f; vector<Factor> F; };
+	vector<Term> T;
+	bool Empty() const { return T.empty(); }
+	// false si une valeur surveillee n'est pas encore lue
+	bool Eval(const vector<int32_t>& vals, float& out) const
+	{
+		float sum = 0.0f;
+		for(const Term& t : T) {
+			float p = t.Sign;
+			for(const Factor& f : t.F) {
+				if(f.Var >= 0) {
+					if((size_t)f.Var >= vals.size() || vals[f.Var] == INT32_MIN) return false;
+					p *= (float)vals[f.Var];
+				} else {
+					p *= f.Val;
+				}
+			}
+			sum += p;
+		}
+		out = sum;
+		return true;
+	}
+};
+
+// <DioramaObject>fichier.obj,tex=...,x=,y=,z=,scale=,rotx=,roty=,rotz=,spin= (doc 45, H1) : objet 3D de decor, une regle par objet.
+// <DioramaPad> : la manette pilote la camera du diorama. Les axes analogiques s'ajoutent a la vue de <Diorama> (rotation yaw/pitch ou zoom).
+struct HdDioramaPadRule
+{
+	vector<HdPackCondition*> Conditions;
+	int Port = 1;                 // manette 1 a 4
+	int Left = 1, Right = 2;      // fonction du stick : 0 = aucune, 1 = rotation (yaw/pitch), 2 = zoom
+	float YawMax = 35.0f, PitchMax = 25.0f; // degres atteints a fond de course
+	float ZoomRange = 2.0f;       // facteur de zoom a fond de course (>= 1) : zoom x ZoomRange vers le haut, / ZoomRange vers le bas
+	float Dead = 0.2f;            // zone morte (0 a 0.9)
+	float Smooth = 0.2f;          // lissage par image (0.01 a 1, 1 = instantane)
+	bool InvX = false, InvY = false;
+};
+
+// Cameras du diorama (doc 49). <DioramaCamera>nom,yaw=,pitch=,dist=,zoom=,time=,key=,default=on : une ligne declare une camera (la premiere
+// pour ce nom) ou, avec [cond], modifie ses reglages tant que la condition est vraie (les lignes vraies s'appliquent dans l'ordre du fichier).
+struct HdDioramaCameraLine
+{
+	vector<HdPackCondition*> Conditions;
+	int Index = 0;                 // numero de la camera (ordre de premiere declaration)
+	bool Has[4] = { false, false, false, false }; // yaw, pitch, dist, zoom
+	float V[4] = { 0, 0, 0, 1 };
+	bool HasTime = false; float Time = 40.0f;     // duree du deplacement vers cette camera, en images
+	string Key;                    // touche (nom Mesen : F5, Pad1 R3...) qui selectionne cette camera
+	bool IsDefault = false;        // default=on : camera par defaut si aucune regle <DioramaCameraDefault> n'est vraie
+};
+struct HdDioramaCameraDefaultRule
+{
+	vector<HdPackCondition*> Conditions;
+	int Index = 0;
+};
+struct HdDioramaCameraKeys { string Next, Prev, Default; };
+
+struct HdDioramaObjectRule
+{
+	std::shared_ptr<vector<float>> Mesh; // 8 flottants par sommet (position, normale, uv), triangles deplies
+	HdPackBitmapInfo* Tex = nullptr;     // texture PNG (optionnelle)
+	uint32_t Color = 0xFFFFFF;           // couleur multipliee a la texture (sans texture : couleur de l'objet)
+	float X = 128, Y = 120, Z = 0;       // position (pixels NES de la scene, comme <DioramaLight>)
+	float RefZ = 0;                      // refz= : profondeur (derriere la face avant, pixels NES) ou le modele colle exactement a la vue 2D en vue neutre
+	bool Occlude = false;                // occlude=on : objet dessine en premier, les sprites et tiles sont testes contre sa profondeur
+	float Scale = 16.0f;                 // pixels NES par unite du .obj
+	float RotX = 0, RotY = 0, RotZ = 0;  // rotation fixe (degres)
+	float Spin = 0;                      // rotation continue autour de Y (degres par image)
+	bool Shadow = true;                  // shadow=off : l'objet ne recoit pas les ombres des sprites (<DioramaShadow>)
+	bool Lit = true;                     // lit=off : l'objet n'est pas eclaire par <DioramaLight> (couleur de la texture telle quelle)
+	bool HasWindow = false; float Window = 0.0f; // window=N : seuls les triangles a moins de N pixels NES de l'ecran (dans le niveau, avec scrollx=) sont dessines
+	float Radius = 0.0f;                 // distance maximale d'un sommet a l'origine du modele x scale (pixels NES), pour ne pas dessiner un objet hors ecran
+	HdDioramaExpr ScrollX, ScrollY;      // scrollx= / scrolly= : defilement du niveau (pixels) ; position a l'ecran = x - scrollx
+	vector<HdPackCondition*> Conditions;
+};
+
+// <DioramaShadow>tile=HASH,... ou <DioramaShadow>...{ <tile>... } (doc 42, G6c) : les sprites reconnus projettent une ombre (silhouette) sur les
+// couches OntoMask, dans la direction de la lumiere numero Light. Un seul style par image (celui de la premiere regle utilisee).
+struct HdDioramaShadowRule
+{
+	float Opacity = 0.5f, Soft = 0.0f;
+	uint32_t Color = 0x000000;
+	uint32_t OntoMask = 4;   // bits 0..3 = L0..L3, 4..7 = groupes g1..g4 ; defaut L2
+	int Light = 1;           // 1 = premiere lumiere ponctuelle / solaire active
+	bool HasTile = false;    // forme ligne : tile=HASH
+	bool AnyTile = false;    // tile=* : tous les sprites de la couche L3
+	HdTileKey Key;
+	bool AnyPalette = true;
+	vector<HdPackCondition*> Conditions;
+
+	bool MatchesTile(const HdPpuTileInfo& t) const
+	{
+		if(AnyTile) return true;
+		if(Key.IsChrRamTile) {
+			if(memcmp(Key.TileData, t.TileData, sizeof(Key.TileData)) != 0) return false;
+		} else if(Key.TileIndex != t.TileIndex) {
+			return false;
+		}
+		return AnyPalette || Key.PaletteColors == t.PaletteColors;
+	}
+};
+
+// <DioramaSkybox>color,skytop=RRGGBB,skybottom=RRGGBB  ou  <DioramaSkybox>fichier.png,vitesseX,vitesseY (doc 41) : fond du diorama
+// derriere les plans, sur conditions [ ]. Vitesses : pixels NES par image (derive automatique de l'image) ; pour pano / cube : degres par image (yaw, pitch).
+struct HdDioramaSkyboxRule
+{
+	int Mode = 0;  // 1 degrade, 2 image repetee, 3 panorama equirectangulaire, 4 cubemap (image unique ou 6 faces)
+	HdPackBitmapInfo* Faces[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr }; // cubemap en 6 fichiers : gauche, devant, droite, derriere, haut, bas
+	uint32_t Top = 0, Bottom = 0;
+	HdPackBitmapInfo* Image = nullptr;
+	float SpeedX = 0.0f, SpeedY = 0.0f;
+	vector<HdPackCondition*> Conditions;
+};
+
 struct HdPackData
 {
 private:
@@ -887,6 +1153,7 @@ public:
 	vector<HdBackgroundInfo> BackgroundsByPriority[HdPackData::BgLayerCount];
 	vector<unique_ptr<HdPackBitmapInfo>> BackgroundFileData;
 	vector<unique_ptr<HdPackBitmapInfo>> ImageFileData;
+	vector<unique_ptr<HdPackBitmapInfo>> AuxBitmaps; // G6d / H1 : PNG des normales et des objets 3D, hors de la liste des <img> (dont l'ordre numerote les images des tiles)
 	vector<unique_ptr<HdPackTileInfo>> Tiles;
 	vector<unique_ptr<HdPackCondition>> Conditions;
 	vector<unique_ptr<NesHdVideoInfo>> Videos;
@@ -912,6 +1179,24 @@ public:
 	unordered_set<uint32_t> WatchedMemoryAddresses;
 	vector<HdWatchedValue> WatchedValues; // <watchMemoryAddress>
 	string PackFolder;                    // dossier du pack (declencheur du journal [HD-DIORAMA])
+	bool DioramaEnabled = false;          // <Diorama> present (doc 32)
+	string DioramaMode;                   // "plainTiles"
+	HdDioramaConfig Diorama;              // options de <Diorama>
+	vector<HdDioramaOffRect> DioramaOffRects; // <DioramaOffCamera> (forme rectangle, mode flat)
+	vector<HdDioramaExtendRule> DioramaExtendRules; // G4a : <DioramaExtend>
+	vector<HdDioramaSkyboxRule> DioramaSkyboxRules; // G5
+	vector<HdDioramaLightRule> DioramaLightRules;   // G6a
+	vector<HdDioramaShadowRule> DioramaShadowRules; // G6c
+	vector<HdDioramaNormalPair> DioramaNormalPairs; // G6d
+	vector<HdDioramaObjectRule> DioramaObjectRules; // H1
+	vector<HdDioramaPadRule> DioramaPadRules;       // manette -> camera
+	vector<string> DioramaCameraNames;              // cameras declarees (minuscules), 16 au plus
+	vector<HdDioramaCameraLine> DioramaCameraLines;
+	vector<HdDioramaCameraDefaultRule> DioramaCameraDefaults;
+	HdDioramaCameraKeys DioramaCameraKeys;
+	bool DioramaFixed3d = false;          // G3c3 : au moins une zone ou un bloc <DioramaOffCamera> en mode fixed3d
+	bool DioramaOffTiles = false;         // au moins une <tile> declaree dans un bloc <DioramaOffCamera>{ }
+	vector<HdDioramaDepthGroup> DioramaDepthGroups; // <DioramaDepth> (G3e), 4 au plus
 	unordered_map<HdTileKey, vector<HdPackTileInfo*>> TileByKey;
 	unordered_map<string, string> PatchesByHash;
 	unordered_map<int, BgmTrackInfo> BgmFilesById;

@@ -53,9 +53,9 @@ namespace {
 	}
 
 	// Scroll selon l'operateur (comme NES / SNES). scroll = SCX ou SCY (pixels SD), frame = compteur d'images
-	double ScrollValue(GbHdBgOperator op, uint8_t scroll, double ratio, uint64_t frame)
+	double ScrollValue(GbHdBgOperator op, double scroll, double ratio, uint64_t frame)
 	{
-		double s = (double)scroll;
+		double s = scroll;
 		switch(op) {
 			case GbHdBgOperator::Multiply: return s * ratio;
 			case GbHdBgOperator::Divide: return ratio == 0.0 ? s : s / ratio;
@@ -510,8 +510,25 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			if(b->Reverse) {
 				idx = count - 1 - idx;
 			}
-			double sx = ScrollValue(b->Operator, frameData->ScrollX, b->RatioX, _bgFrame) + b->OffsetX;
-			double sy = ScrollValue(b->Operator, frameData->ScrollY, b->RatioY, _bgFrame) + b->OffsetY;
+			// ramx= / ramy= : defilement de base lu en RAM a la place de SCX / SCY
+			double baseX = frameData->ScrollX, baseY = frameData->ScrollY;
+			if(!b->RamX.Empty() || !b->RamY.Empty()) {
+				std::vector<int32_t> wv;
+				for(const GbHdWatchVar& w : _pack.WatchedVars) {
+					uint32_t raw = 0;
+					bool ok = mem != nullptr;
+					for(uint32_t i = 0; ok && i < w.Size; i++) {
+						if(w.Slot[i] >= mem->size()) { ok = false; break; }
+						raw |= (uint32_t)(*mem)[w.Slot[i]] << (8 * i);
+					}
+					wv.push_back(ok ? HdWatchCompose(raw, w.Size, w.Signed) : INT32_MIN);
+				}
+				float rv = 0.0f;
+				if(!b->RamX.Empty() && b->RamX.Eval(wv, rv)) baseX = rv;
+				if(!b->RamY.Empty() && b->RamY.Eval(wv, rv)) baseY = rv;
+			}
+			double sx = ScrollValue(b->Operator, baseX, b->RatioX, _bgFrame) + b->OffsetX;
+			double sy = ScrollValue(b->Operator, baseY, b->RatioY, _bgFrame) + b->OffsetY;
 			layers.push_back({ b, b->Frames[idx], std::llround(sx * _scale), std::llround(sy * _scale) });
 		}
 		// Ordre du peintre : Z croissant ; a Z egal, ordre du fichier

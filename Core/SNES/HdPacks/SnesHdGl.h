@@ -152,4 +152,6 @@ struct SnesHdGlApi
 	void (SNESHD_GLAPI* Flush)();
 	void* (SNESHD_GLAPI* MapBufferRange)(GLenum, GLintptr, GLsizeiptr, GLbitfield);
 	GLboolean (SNESHD_GLAPI* UnmapBuffer)(GLenum);
+	// G3h : envoi partiel d'une texture (charge seulement par HdGpuCore)
+	void (SNESHD_GLAPI* TexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*);
 };
