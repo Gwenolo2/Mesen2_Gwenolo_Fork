@@ -3102,6 +3102,7 @@ void HdNesPack<scale>::DioramaCameraStep(const HdDioramaConfig& cfg, float& yaw,
 	vector<string> keyNames((size_t)n + 3);
 	for(const HdDioramaCameraLine& L : _hdData->DioramaCameraLines) { if(!L.Key.empty() && keyNames[(size_t)L.Index].empty()) keyNames[(size_t)L.Index] = L.Key; }
 	keyNames[(size_t)n] = ks.Next; keyNames[(size_t)n + 1] = ks.Prev; keyNames[(size_t)n + 2] = ks.Default;
+	if(n == 0) keyNames.clear(); // sans camera declaree : pas de touches (evite le modulo par zero)
 	if(_camKeyDown.size() != keyNames.size()) _camKeyDown.assign(keyNames.size(), 0);
 	int active = _camManual >= 0 ? _camManual : _camDefault;
 	for(size_t k = 0; k < keyNames.size(); k++) {
@@ -3128,6 +3129,14 @@ void HdNesPack<scale>::DioramaCameraStep(const HdDioramaConfig& cfg, float& yaw,
 		if(L.Index != active || !condsOk(L.Conditions)) continue;
 		for(int i = 0; i < 4; i++) { if(L.Has[i]) v[i] = L.V[i]; }
 		if(L.HasTime) time = L.Time;
+	}
+	// <DioramaView> (doc 53) : reglages de vue selon [cond] ; la derniere regle vraie l'emporte (pitch, zoom, time)
+	_dioTopDown = false;
+	for(const HdDioramaViewRule& r : _hdData->DioramaViews) {
+		if(!condsOk(r.Conditions)) continue;
+		_dioTopDown = true; // doc 53 : vue topDown active (sol a plat)
+		for(int i = 0; i < 4; i++) { if(r.Has[i]) v[i] = r.V[i]; }
+		if(r.HasTime) time = r.Time;
 	}
 	// la distance ne doit pas amener un plan derriere la camera (meme borne que le chargeur : z >= -0,9 x dist)
 	float minZ = 0.0f;
@@ -3175,7 +3184,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 	// G3a : vue du diorama. Options de <Diorama> (yaw, pitch, dist, z0..z3) + orbite automatique si orbit=on.
 	const HdDioramaConfig& cfg = _hdData->Diorama;
 	float yaw = cfg.Yaw, pitch = cfg.Pitch, dist = cfg.Dist, baseZoom = cfg.Zoom;
-	if(!_hdData->DioramaCameraNames.empty()) DioramaCameraStep(cfg, yaw, pitch, dist, baseZoom); // cameras multiples
+	if(!_hdData->DioramaCameraNames.empty() || !_hdData->DioramaViews.empty()) DioramaCameraStep(cfg, yaw, pitch, dist, baseZoom); // cameras multiples et vues (doc 53)
 	if(cfg.Orbit) {
 		const double ph = 6.283185307179586 * (double)(_dioOrbit++) / (double)cfg.OrbitPeriod;
 		yaw += cfg.OrbitAmp * (float)std::sin(ph);
@@ -3238,6 +3247,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 	for(int k = 0; k < 4; k++) { scene.PlaneZ[k] = cfg.Z[k]; scene.Thick[k] = cfg.T[k] * 8.0f; } // G3b1 : tiles -> pixels NES
 	scene.Scale = (float)GetScale();
 	scene.Aa = cfg.Aa; // G3f
+	scene.FlatMask = _dioTopDown ? (1u << 2) : 0u; // doc 53 : sol a plat = decor L2 seul pour ce test
 	scene.Clear = _dioL[0].empty() ? 0xFF000000u : (_dioL[0][0] | 0xFF000000u);
 	if(_dioL4Rows && _dioL4.size() >= pixels) { scene.Fixed = _dioL4.data(); scene.FixedY0 = _dioL4Y0; scene.FixedRows = _dioL4Rows; } // G3c
 	if(scene.Fixed && _hdData->DioramaFixed3d) { // G3c3 : plaque epaisse

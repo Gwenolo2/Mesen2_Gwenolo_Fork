@@ -429,14 +429,15 @@ uniform float uScale;   // pixels HD par pixel NES
 uniform vec2 uOut;      // taille de l'image (pixels HD)
 uniform vec4 uR;        // G3c : partie du plan couverte (origine xy, taille zw, en fraction) ; (0,0,1,1) = tout le plan
 uniform int uZb;        // occlude=on : ecrit la profondeur (meme formule que les objets 3D) pour le test contre eux
+uniform int uFlat;     // doc 53 (topDown) : 1 = couche posee a plat (sol) : uZ = hauteur, l'axe vertical de l'image devient la profondeur
 out vec2 vUV;
 void main()
 {
 	vec2 q[6] = vec2[6](vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
 	vec2 uv = q[gl_VertexID];
-	float k = uKFix > 0.0 ? uKFix : (uD + uZ) / uD;
+	float k = uFlat != 0 ? 1.0 : (uKFix > 0.0 ? uKFix : (uD + uZ) / uD);
 	vec2 pv = uR.xy + uv * uR.zw;
-	vec3 P = vec3((pv.x - 0.5) * uSize.x * k, (pv.y - 0.5) * uSize.y * k, uZ);
+	vec3 P = uFlat != 0 ? vec3((pv.x - 0.5) * uSize.x * k, uZ, -(pv.y - 0.5) * uSize.y * k) : vec3((pv.x - 0.5) * uSize.x * k, (pv.y - 0.5) * uSize.y * k, uZ);
 	vec3 c = vec3(dot(uRt0, P), dot(uRt1, P), dot(uRt2, P)) + vec3(0.0, 0.0, uD);
 	float dpt = max(c.z, 1.0);
 	vec2 s = uO + c.xy * (uD / dpt) * uZoom;
@@ -1580,6 +1581,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			G.Uniform4f(locVol, std::max(wl.VolPerX, 0.01f), std::max(wl.VolPerY, 0.01f), wl.VolOriginX, wl.VolOriginY);
 			G.Uniform1f(locVolThick, wl.VolThick);
 			G.Uniform1i(locShOn, (shadowOn && ((sc.Shadow.OntoMask >> lay) & 1u)) ? 1 : 0);
+			G.Uniform1i(U("uFlat"), ((sc.FlatMask >> lay) & 1u) ? 1 : 0); // doc 53 : couche a plat (sol topDown)
 			{ // G6d : carte de normales de la couche (L2 -> 0, L3 -> 1, groupes 4 a 7 -> 2 a 5)
 				const int ni = lay == 2 ? 0 : (lay == 3 ? 1 : (lay >= 4 ? lay - 2 : -1));
 				if(ni >= 0 && nrmOk[ni]) {

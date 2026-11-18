@@ -1085,6 +1085,15 @@ struct HdDioramaCameraDefaultRule
 };
 struct HdDioramaCameraKeys { string Next, Prev, Default; };
 
+// <DioramaView>topDown,pitch=,zoom=,time= (doc 53) : reglages de vue tant que la condition est vraie (la derniere regle vraie l'emporte).
+struct HdDioramaViewRule
+{
+	vector<HdPackCondition*> Conditions;
+	bool Has[4] = { false, false, false, false }; // yaw, pitch, dist, zoom (seuls pitch et zoom sont lus pour l'instant)
+	float V[4] = { 0, 0, 0, 1 };
+	bool HasTime = false; float Time = 40.0f;     // duree de la transition vers cette vue, en images
+};
+
 struct HdDioramaObjectRule
 {
 	std::shared_ptr<vector<float>> Mesh; // 8 flottants par sommet (position, normale, uv), triangles deplies
@@ -1194,6 +1203,7 @@ public:
 	vector<HdDioramaCameraLine> DioramaCameraLines;
 	vector<HdDioramaCameraDefaultRule> DioramaCameraDefaults;
 	HdDioramaCameraKeys DioramaCameraKeys;
+	vector<HdDioramaViewRule> DioramaViews;         // <DioramaView> : vues conditionnelles (doc 53)
 	bool DioramaFixed3d = false;          // G3c3 : au moins une zone ou un bloc <DioramaOffCamera> en mode fixed3d
 	bool DioramaOffTiles = false;         // au moins une <tile> declaree dans un bloc <DioramaOffCamera>{ }
 	vector<HdDioramaDepthGroup> DioramaDepthGroups; // <DioramaDepth> (G3e), 4 au plus

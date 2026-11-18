@@ -194,6 +194,7 @@ private:
 	uint32_t _dioOrbit = 0; // compteur d'images de l'orbite (G3a)
 	// Cameras du diorama (doc 49) : camera par defaut, camera choisie au clavier, deplacement lisse entre deux reglages
 	bool _camInit = false;
+	bool _dioTopDown = false; // doc 53 : une regle <DioramaView>topDown est vraie (ce tour)
 	int _camDefault = -1, _camManual = -1;
 	float _camFrom[4] = { 0, 0, 0, 1 }, _camTo[4] = { 0, 0, 0, 1 }, _camCur[4] = { 0, 0, 0, 1 };
 	float _camT = 0.0f, _camDur = 1.0f;

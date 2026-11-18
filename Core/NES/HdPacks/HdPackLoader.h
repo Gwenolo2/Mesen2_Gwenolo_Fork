@@ -95,6 +95,7 @@ private:
 	void ProcessDioramaCameraTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessDioramaCameraDefaultTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessDioramaCameraKeysTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaViewTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	bool ParseDioramaShadowOptions(vector<string>& tokens, HdDioramaShadowRule& rule, bool allowTile);
 	void ProcessDioramaShadowTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessDioramaNormalTag(vector<string>& tokens, vector<HdPackCondition*> conditions);

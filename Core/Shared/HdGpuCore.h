@@ -172,6 +172,7 @@ struct HdDioramaScene
 	float Scale = 1;            // pixels HD par pixel NES
 	uint32_t Clear = 0xFF000000; // couleur hors des plans (ARGB opaque)
 	int Aa = 1;                  // G3f : surechantillonnage 1 a 4 (scene dessinee a Aa fois la taille, puis moyenne par blocs Aa x Aa)
+	uint32_t FlatMask = 0;      // doc 53 (topDown) : couches posees a plat (bit n = couche n : 0..3 = L0..L3, 4..11 = groupes 1..8)
 	// G3c : couche fixe "off camera" (doc 38), dessinee a plat apres la scene. Fixed = image complete (meme taille que les
 	// couches) ; seules les lignes HD FixedY0 .. FixedY0 + FixedRows - 1 sont envoyees et dessinees. nullptr = aucune.
 	const uint32_t* Fixed = nullptr;

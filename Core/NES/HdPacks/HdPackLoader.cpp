@@ -472,6 +472,9 @@ bool HdPackLoader::LoadPack()
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 19)) == "<dioramacamerakeys>") {
 				tokens = StringUtilities::Split(lineContent.substr(19), ',');
 				ProcessDioramaCameraKeysTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 13)) == "<dioramaview>") {
+				tokens = StringUtilities::Split(lineContent.substr(13), ',');
+				ProcessDioramaViewTag(tokens, conditions);
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 12)) == "<dioramapad>") {
 				tokens = StringUtilities::Split(lineContent.substr(12), ',');
 				ProcessDioramaPadTag(tokens, conditions);
@@ -2888,6 +2891,39 @@ void HdPackLoader::ProcessDioramaCameraKeysTag(vector<string>& tokens, vector<Hd
 		else if(key == "default") _data->DioramaCameraKeys.Default = val;
 		else { logError("DioramaCameraKeys : option inconnue : " + key + ", ligne ignoree."); return; }
 	}
+}
+
+// <DioramaView>topDown[,pitch=,zoom=,time=] (doc 53) : reglages de vue tant que la condition est vraie (la derniere regle vraie l'emporte).
+// Seule la vue topDown est reconnue pour l'instant. Sans regle vraie, la vue reste celle de <Diorama> / <DioramaCamera>.
+void HdPackLoader::ProcessDioramaViewTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty() || tokens[0].find('=') != string::npos) {
+		logError("DioramaView : syntaxe <DioramaView>topDown[,pitch=,zoom=,time=], ligne ignoree.");
+		return;
+	}
+	const string name = StringUtilities::ToLower(StringUtilities::Trim(tokens[0]));
+	if(name != "topdown") { logError("DioramaView : vue inconnue : " + name + " (seule topDown existe), ligne ignoree."); return; }
+	HdDioramaViewRule r;
+	r.Conditions = conditions;
+	for(size_t i = 1; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) { logError("DioramaView : option sans '=' : " + opt + ", ligne ignoree."); return; }
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string val = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(eq + 1)));
+		float f = 0.0f;
+		auto num = [&](float lo, float hi, float& out) {
+			if(!LightParseFloat(val, f) || f < lo || f > hi) { logError("DioramaView : " + key + " doit etre de " + std::to_string(lo) + " a " + std::to_string(hi) + " : " + val + ", ligne ignoree."); return false; }
+			out = f; return true;
+		};
+		if(key == "pitch") { if(!num(-70, 70, r.V[1])) return; r.Has[1] = true; }
+		else if(key == "zoom") { if(!num(0.1f, 4, r.V[3])) return; r.Has[3] = true; }
+		else if(key == "time") { if(!num(0, 1000, r.Time)) return; r.HasTime = true; }
+		else { logError("DioramaView : option inconnue : " + key + ", ligne ignoree."); return; }
+	}
+	if(_data->DioramaViews.size() >= 16) { logError("DioramaView : 16 regles au plus, ligne ignoree."); return; }
+	_data->DioramaViews.push_back(r);
 }
 
 // <DioramaPad>left=rot,right=zoom,port=1,yawmax=35,pitchmax=25,zoomrange=2,dead=0.2,smooth=0.2,invx=off,invy=off
