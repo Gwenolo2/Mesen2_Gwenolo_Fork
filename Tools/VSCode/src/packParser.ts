@@ -18,29 +18,6 @@ export interface PackLine {
     refs: PackRef[];
 }
 
-/**
- * Index (0-based) du champ fichier dans la liste séparée par des virgules, pour chaque balise.
- * Clés en minuscules : le loader compare certaines balises en minuscules et d'autres exactement.
- * Source : schemas/29_schema_balises_snes.json et SnesHdPackLoader.cpp.
- */
-export const FILE_FIELD: Record<string, number> = {
-    'img': 0,
-    'tile': 2,
-    'tile_hflip': 2,
-    'tile_vflip': 2,
-    'tile_hvflip': 2,
-    'background': 0,
-    'm7img': 0,
-    'm7tiles': 0,
-    '2doverlay': 0,
-    '2dperspective': 0,
-    'msutoogg': 1,
-    'video': 0,
-    'loadingscreen': 0,
-    'm7model': 0,
-    'patch': 0,
-};
-
 const TAG = /<([A-Za-z][A-Za-z0-9_]*)>/;
 const FILE_EXT = /\.(png|ogg|json|obj|mtl|gltf|glb|mpg|mp4)$/i;
 const RANDOM_SEGMENT = /^random(ize)?$/i;
@@ -50,7 +27,7 @@ const RANDOM_SEGMENT = /^random(ize)?$/i;
  * trouve la balise et renvoie les références à des fichiers situées dans le champ attendu.
  * Ne gère pas encore <include> ni les alias @Nom (étape 3).
  */
-export function parseLine(line: string): PackLine | undefined {
+export function parseLine(line: string, fileField: Record<string, number>): PackLine | undefined {
     const hash = line.indexOf('#');
     const content = hash >= 0 ? line.slice(0, hash) : line;
     const prefix = /^\s*\[[^\]]*\]/.exec(content);
@@ -61,7 +38,7 @@ export function parseLine(line: string): PackLine | undefined {
     const tag = tagMatch[1];
     const tagEnd = from + tagMatch.index + tagMatch[0].length;
 
-    const fieldIndex = FILE_FIELD[tag.toLowerCase()];
+    const fieldIndex = fileField[tag.toLowerCase()];
     if (fieldIndex === undefined) return { tag, refs: [] };
 
     // Repère le champ voulu sans modifier les autres : offset de début de chaque champ.

@@ -183,6 +183,11 @@ private:
 	bool _dioGpuTried = false, _dioGpuOk = false;
 	double _dioMsLayers = 0, _dioMsGpu = 0, _dioMsCopy = 0;
 	uint32_t _dioN = 0, _dioFail = 0;
+	// Fonds de L0 dessines par le GPU (doc 52) : identifiants (priorite, index) et parametres du plan
+	struct DioGpuBg { int Prio = 0, Index = 0; const uint32_t* Pix = nullptr; uint32_t W = 0, H = 0; float OffX = 0, OffY = 0, Bright = 1.0f; bool TileX = false, TileY = false; };
+	DioGpuBg _dioGpuBg[4];
+	int _dioGpuBgN = 0;
+	bool IsDioGpuBg(int prio, int index) const { for(int i = 0; i < _dioGpuBgN; i++) { if(_dioGpuBg[i].Prio == prio && _dioGpuBg[i].Index == index) return true; } return false; }
 	std::string _dioWideLog;
 	std::vector<uint32_t> _dioL0Wide; // widescreen : L0 elargie
 	bool _dioL0Clear = false; // skybox active : L0 commence transparente (la couleur de fond PPU n'est pas dessinee), le ciel apparait derriere les fonds

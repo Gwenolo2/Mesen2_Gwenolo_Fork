@@ -144,8 +144,20 @@ struct HdDioramaObjects
 	HdDioramaObject O[8];
 };
 
+// Fond <background> dessine par le GPU a la place de L0 (doc 52) : texture du PNG repetee sur un grand plan a la profondeur de L0
+struct HdDioramaBgPlane
+{
+	const uint32_t* Pix = nullptr; uint32_t W = 0, H = 0;   // image du fond (premultipliee), pixels HD
+	float OffX = 0, OffY = 0;                               // (left + defilement) x echelle, (top + defilement) x echelle
+	float Bright = 1.0f;                                    // luminosite 0..1
+	bool TileX = false, TileY = false;
+};
+
 struct HdDioramaScene
 {
+	HdDioramaBgPlane Bg[4]; int BgCount = 0;  // fonds de L0 dessines par le GPU, du plus loin au plus pres
+	float BgYStart = 0;                       // premiere ligne NES de l'image des couches (position absolue du fond)
+	float BgMargin = 1024.0f;                 // demi-marge du plan (pixels NES) autour de l'ecran
 	HdDioramaSky Sky;
 	HdDioramaLights Lights;               // G6a : lumieres de scene
 	HdDioramaShadow Shadow;               // G6c : ombres des sprites
@@ -275,6 +287,9 @@ private:
 	// G3b2 : textures de murs envoyees une fois (cle = adresse des pixels, taille et signature de quelques pixels)
 	struct WallTex { const uint32_t* Pix; uint32_t W, H, Sig; unsigned int Tex; };
 	std::vector<WallTex> _wallTex;
+	struct BgTex { const uint32_t* Pix; uint32_t W, H, Sig; unsigned int Tex; };
+	std::vector<BgTex> _bgTex;
+	unsigned int BgTexture(const uint32_t* pix, uint32_t w, uint32_t h, bool tileX, bool tileY);
 	unsigned int WallTexture(const uint32_t* pix, uint32_t w, uint32_t h);
 	uint32_t _layerW = 0, _layerH = 0;
 	HdGpuTimes _times;

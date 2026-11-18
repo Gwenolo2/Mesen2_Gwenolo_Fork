@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as vscode from 'vscode';
+import { ConsoleProfile } from './consoles';
 import { parseLine, resolveRef } from './packParser';
 import { packRoot } from './resolver';
 
@@ -8,13 +9,15 @@ import { packRoot } from './resolver';
  * Les fichiers ne sont plus signalés par un bouton : le lien cliquable (Ctrl+clic) suffit.
  */
 export class PackCodeLensProvider implements vscode.CodeLensProvider {
+    constructor(private readonly profile: ConsoleProfile) {}
+
     provideCodeLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
         const lenses: vscode.CodeLens[] = [];
         const root = packRoot(doc.uri.fsPath);
         for (let i = 0; i < doc.lineCount; i++) {
             const text = doc.lineAt(i).text;
             if (text.includes('@')) continue;
-            const parsed = parseLine(text);
+            const parsed = parseLine(text, this.profile.fileField);
             for (const ref of parsed?.refs ?? []) {
                 if (ref.kind !== 'folder') continue;
                 const target = resolveRef(root, ref);

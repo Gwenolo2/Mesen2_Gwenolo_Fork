@@ -28,7 +28,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v145</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
@@ -121,6 +121,7 @@
       <AdditionalLibraryDirectories>$(OutDir);$(SolutionDir)ThirdParty\SDL2\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <DelayLoadDLLs>SDL2.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <AdditionalOptions>/ignore:4099 %(AdditionalOptions)</AdditionalOptions>
+      <LinkTimeCodeGeneration>Default</LinkTimeCodeGeneration>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -175,8 +176,12 @@
       <DelayLoadDLLs>SDL2.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <AdditionalOptions>/ignore:4099 /GENPROFILE %(AdditionalOptions)</AdditionalOptions>
     </Link>
-      <PostBuildEvent>
-      <Command>xcopy /y /q "$(TargetDir)$(TargetName).dll" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"&#xD;&#xA;xcopy /y /q "$(TargetDir)$(TargetName).pdb" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"&#xD;&#xA;xcopy /y /q "$(VCToolsInstallDir)bin\Hostx64\x64\pgort140.dll" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"&#xD;&#xA;xcopy /y /q "$(VCToolsInstallDir)bin\Hostx64\x64\pgort140.dll" "$(SolutionDir)UI\Dependencies\"&#xD;&#xA;powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$dirs='$(OutDir)',(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Mesen2'),'$(SolutionDir)bin\win-$(PlatformTarget)\Release'; foreach($d in $dirs){ Get-ChildItem -LiteralPath $d -Filter 'MesenCore!*.pgc' -ErrorAction SilentlyContinue | Remove-Item -Force; }; $bak='$(SolutionDir)bin\win-$(PlatformTarget)\PGO_Data'; if(Test-Path -LiteralPath $bak){ Remove-Item -LiteralPath $bak -Recurse -Force }; Write-Host 'PGO : anciennes mesures supprimees, jouez puis fermez Mesen normalement'&quot;</Command>
+    <PostBuildEvent>
+      <Command>xcopy /y /q "$(TargetDir)$(TargetName).dll" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"
+xcopy /y /q "$(TargetDir)$(TargetName).pdb" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"
+xcopy /y /q "$(VCToolsInstallDir)bin\Hostx64\x64\pgort140.dll" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"
+xcopy /y /q "$(VCToolsInstallDir)bin\Hostx64\x64\pgort140.dll" "$(SolutionDir)UI\Dependencies\"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$dirs='$(OutDir)',(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Mesen2'),'$(SolutionDir)bin\win-$(PlatformTarget)\Release'; foreach($d in $dirs){ Get-ChildItem -LiteralPath $d -Filter 'MesenCore!*.pgc' -ErrorAction SilentlyContinue | Remove-Item -Force; }; $bak='$(SolutionDir)bin\win-$(PlatformTarget)\PGO_Data'; if(Test-Path -LiteralPath $bak){ Remove-Item -LiteralPath $bak -Recurse -Force }; Write-Host 'PGO : anciennes mesures supprimees, jouez puis fermez Mesen normalement'"</Command>
       <Message>PGO Profile : copie de MesenCore.dll (instrumentee) + pgort140.dll vers bin\win-x64\Release pour Mesen.exe</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
@@ -205,12 +210,14 @@
       <DelayLoadDLLs>SDL2.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <AdditionalOptions>/ignore:4099 /USEPROFILE %(AdditionalOptions)</AdditionalOptions>
     </Link>
-      <PostBuildEvent>
-      <Command>xcopy /y /q "$(TargetDir)$(TargetName).dll" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"&#xD;&#xA;xcopy /y /q "$(TargetDir)$(TargetName).pdb" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"&#xD;&#xA;if exist "$(SolutionDir)UI\Dependencies\pgort140.dll" del /q "$(SolutionDir)UI\Dependencies\pgort140.dll"</Command>
+    <PostBuildEvent>
+      <Command>xcopy /y /q "$(TargetDir)$(TargetName).dll" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"
+xcopy /y /q "$(TargetDir)$(TargetName).pdb" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"
+if exist "$(SolutionDir)UI\Dependencies\pgort140.dll" del /q "$(SolutionDir)UI\Dependencies\pgort140.dll"</Command>
       <Message>PGO Optimize : copie de MesenCore.dll (optimisee) vers bin\win-x64\Release pour Mesen.exe</Message>
     </PostBuildEvent>
-      <PreLinkEvent>
-      <Command>powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$out='$(OutDir)'; $bak='$(SolutionDir)bin\win-$(PlatformTarget)\PGO_Data'; if(-not (Test-Path -LiteralPath (Join-Path $out 'MesenCore.pgd')) -and (Test-Path -LiteralPath (Join-Path $bak 'MesenCore.pgd'))){ Copy-Item -Path (Join-Path $bak '*') -Destination $out -Force; Write-Host 'PGO : MesenCore.pgd absent (nettoyage ?) - mesures restaurees depuis bin\win-x64\PGO_Data' }; $dirs=(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Mesen2'),'$(SolutionDir)bin\win-$(PlatformTarget)\Release'; foreach($d in $dirs){ Get-ChildItem -LiteralPath $d -Filter 'MesenCore!*.pgc' -ErrorAction SilentlyContinue | ForEach-Object { $i=1; while(Test-Path -LiteralPath (Join-Path $out ('MesenCore!'+$i+'.pgc'))){$i++}; $t=Join-Path $out ('MesenCore!'+$i+'.pgc'); Move-Item -LiteralPath $_.FullName -Destination $t -Force; Write-Host ('PGO : mesures recuperees '+$_.FullName+' vers '+$t) } }; $c=(Get-ChildItem -LiteralPath $out -Filter 'MesenCore!*.pgc' -ErrorAction SilentlyContinue | Measure-Object).Count; Write-Host ('PGO : '+$c+' fichier(s) de mesure utilises'); if($c -eq 0){ Write-Host 'PGO ATTENTION : aucune mesure trouvee, la DLL ne sera pas optimisee par profil' }; if(Test-Path -LiteralPath (Join-Path $out 'MesenCore.pgd')){ New-Item -ItemType Directory -Force -Path $bak | Out-Null; Copy-Item -LiteralPath (Join-Path $out 'MesenCore.pgd') -Destination $bak -Force; Get-ChildItem -LiteralPath $out -Filter 'MesenCore!*.pgc' | Copy-Item -Destination $bak -Force; Write-Host 'PGO : mesures sauvegardees dans bin\win-x64\PGO_Data' }&quot;</Command>
+    <PreLinkEvent>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -Command "$out='$(OutDir)'; $bak='$(SolutionDir)bin\win-$(PlatformTarget)\PGO_Data'; if(-not (Test-Path -LiteralPath (Join-Path $out 'MesenCore.pgd')) -and (Test-Path -LiteralPath (Join-Path $bak 'MesenCore.pgd'))){ Copy-Item -Path (Join-Path $bak '*') -Destination $out -Force; Write-Host 'PGO : MesenCore.pgd absent (nettoyage ?) - mesures restaurees depuis bin\win-x64\PGO_Data' }; $dirs=(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Mesen2'),'$(SolutionDir)bin\win-$(PlatformTarget)\Release'; foreach($d in $dirs){ Get-ChildItem -LiteralPath $d -Filter 'MesenCore!*.pgc' -ErrorAction SilentlyContinue | ForEach-Object { $i=1; while(Test-Path -LiteralPath (Join-Path $out ('MesenCore!'+$i+'.pgc'))){$i++}; $t=Join-Path $out ('MesenCore!'+$i+'.pgc'); Move-Item -LiteralPath $_.FullName -Destination $t -Force; Write-Host ('PGO : mesures recuperees '+$_.FullName+' vers '+$t) } }; $c=(Get-ChildItem -LiteralPath $out -Filter 'MesenCore!*.pgc' -ErrorAction SilentlyContinue | Measure-Object).Count; Write-Host ('PGO : '+$c+' fichier(s) de mesure utilises'); if($c -eq 0){ Write-Host 'PGO ATTENTION : aucune mesure trouvee, la DLL ne sera pas optimisee par profil' }; if(Test-Path -LiteralPath (Join-Path $out 'MesenCore.pgd')){ New-Item -ItemType Directory -Force -Path $bak | Out-Null; Copy-Item -LiteralPath (Join-Path $out 'MesenCore.pgd') -Destination $bak -Force; Get-ChildItem -LiteralPath $out -Filter 'MesenCore!*.pgc' | Copy-Item -Destination $bak -Force; Write-Host 'PGO : mesures sauvegardees dans bin\win-x64\PGO_Data' }"</Command>
       <Message>PGO Optimize : recuperation des fichiers de mesure .pgc</Message>
     </PreLinkEvent>
   </ItemDefinitionGroup>

@@ -27,6 +27,10 @@ bool HdGpuCore::SubmitScene(const uint32_t*, const uint32_t*, const uint32_t*, c
 
 #define SDL_MAIN_HANDLED
 #include "SDL.h"
+#include <cstdarg>
+#include <fstream>
+#include <cstdio>
+#include <cstdlib>
 
 #ifdef _WIN32
 // Le projet Core est compile en mode conforme : <windows.h> n'y compile pas. On declare donc seulement
@@ -503,6 +507,9 @@ uniform float uVolThick; // G3b3 : epaisseur de la couche (pixels NES)
 uniform vec2 uSize;     // taille de la scene (pixels NES), meme variable que dans le sommet
 uniform vec4 uR;        // partie du plan couverte, meme variable que dans le sommet
 uniform float uScale;   // pixels HD par pixel NES
+uniform int uBg;        // 1 = fond <background> : la texture est le PNG, repete et decale (uBgP)
+uniform vec4 uBgP;      // decalage x, y (pixels HD), premiere ligne NES de l'image, luminosite
+uniform vec2 uBgTile;   // repetition en x, en y
 layout(location = 0) out vec4 oColor;
 float AlphaAt(ivec2 q, ivec2 sz)
 {
@@ -599,7 +606,19 @@ void main()
 		uv0.y = (uv0.y - uExtBandY.x) / uExtBandY.y;
 		hole = hx || hy || uv0.y < -0.0001 || uv0.y > 1.0001; // groupes : ligne repetee hors de la bande de lignes envoyee
 	}
-	vec4 t = texture(uTex, uv0);   // texture premultipliee
+	vec4 t;
+	if(uBg != 0) {
+		// fond : coordonnees du plan en pixels NES -> pixel du PNG (meme calcul que le filtre normal : (left + defilement + x) x echelle)
+		vec2 pn = vec2((uR.x + vUV.x * uR.z) * uSize.x, gPlaneY * uSize.y);
+		vec2 tp = vec2(uBgP.x + pn.x * uScale, uBgP.y + (uBgP.z + pn.y) * uScale);
+		vec2 ts = vec2(textureSize(uTex, 0));
+		bool inX = uBgTile.x > 0.5 || (tp.x >= 0.0 && tp.x < ts.x);
+		bool inY = uBgTile.y > 0.5 || (tp.y >= 0.0 && tp.y < ts.y);
+		t = (inX && inY) ? textureLod(uTex, tp / ts, 0.0) : vec4(0.0);
+		t.rgb *= uBgP.w;
+	} else {
+		t = texture(uTex, uv0);   // texture premultipliee
+	}
 	// G3b2 : tranches arriere. Un pixel du bord de la forme (a moins d'un pixel NES d'un vide) prend le motif du mur : dessus ou
 	// dessous = motif du dessus, ancre au monde (xN + defilement) ; flancs = motif des flancs. Le reste garde l'image d'origine.
 	vec2 wUp = vec2((vUV.x * uSize.x + uScroll - uOrigins.x) / uPeriods.x, uDepth / uPeriods.y);
@@ -858,6 +877,33 @@ unsigned int HdGpuCore::WallTexture(const uint32_t* pix, uint32_t w, uint32_t h)
 	G.GenerateMipmap(GL_TEXTURE_2D);
 	_wallTex.push_back(e);
 	return e.Tex;
+}
+
+// Fond <background> du diorama : texture du PNG (sans mipmaps), repetee selon tileX / tileY. Renvoie 0 si pas de donnees.
+unsigned int HdGpuCore::BgTexture(const uint32_t* pix, uint32_t w, uint32_t h, bool tileX, bool tileY)
+{
+	if(!pix || w == 0 || h == 0) return 0;
+	const size_t n = (size_t)w * h;
+	const uint32_t sig = pix[0] ^ (pix[n / 2] * 31u) ^ (pix[n - 1] * 131u);
+	BgTex* found = nullptr;
+	for(BgTex& e : _bgTex) { if(e.Pix == pix) { found = &e; break; } }
+	if(!found) {
+		if(_bgTex.size() >= 96) { for(BgTex& e : _bgTex) G.DeleteTextures(1, &e.Tex); _bgTex.clear(); } // animations : on repart de zero
+		BgTex e = { pix, 0, 0, 0, 0 };
+		G.GenTextures(1, &e.Tex);
+		_bgTex.push_back(e);
+		found = &_bgTex.back();
+	}
+	G.BindTexture(GL_TEXTURE_2D, found->Tex);
+	if(found->W != w || found->H != h || found->Sig != sig) {
+		G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		G.PixelStorei(GL_UNPACK_ALIGNMENT, 4);
+		G.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, GL_BGRA, GL_UNSIGNED_BYTE, pix);
+		found->W = w; found->H = h; found->Sig = sig;
+	}
+	G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, tileX ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+	G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, tileY ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+	return found->Tex;
 }
 
 // G3f : passe de moyenne du surechantillonnage. Triangle plein ecran ; chaque pixel final = moyenne du bloc Aa x Aa de l'image
@@ -1305,7 +1351,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	// tranche par pixel NES de profondeur (128 intervalles au plus). Toutes les tranches de toutes les couches sont triees
 	// du plus loin au plus pres ; a profondeur egale, la couche de plus petit numero d'abord (tri stable).
 	struct Slice { float Z; int Layer; float InvN; float Depth; };
-	Slice slices[(4 + HdDioMaxGroups) * 129 + 8]; // (+ objets 3D H1, couche 100 + numero) couches 0 a 3 = L0..L3, couches 4 a 7 = groupes <DioramaDepth> (G3e)
+	Slice slices[(4 + HdDioMaxGroups) * 129 + 16]; // (+ objets 3D H1, couche 100 + numero) couches 0 a 3 = L0..L3, couches 4 a 7 = groupes <DioramaDepth> (G3e)
 	int sliceCount = 0;
 	for(int layer = 0; layer < 4 + HdDioMaxGroups; layer++) {
 		if(layer >= 4 && !hasExtra[layer - 4]) continue;
@@ -1323,6 +1369,9 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			const float depth = steps > 0 ? th * (float)i / (float)steps : 0.0f;
 			slices[sliceCount++] = { layerZ + depth, layer, invN, depth };
 		}
+	}
+	for(int bi = 0; bi < sc.BgCount && bi < 4; bi++) { // fonds de L0 dessines par le GPU : juste devant la face avant de L0
+		slices[sliceCount++] = { sc.PlaneZ[0] - 0.001f * (float)(bi + 1), 300 + bi, 1.0f, 0.0f };
 	}
 	for(int oi = 0; oi < sc.Objects.Count && oi < 8; oi++) { // H1 : objets 3D, ranges avec les tranches selon leur profondeur
 		slices[sliceCount++] = { sc.Objects.O[oi].Occlude ? 1.0e9f : sc.Objects.O[oi].Pos[2], 100 + oi, 1.0f, 0.0f };
@@ -1444,7 +1493,8 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	};
 	const GLint locZ = U("uZ"), locInvN = U("uInvN"), locR = U("uR"), locDepth = U("uDepth");
 	const GLint locVolVert = U("uVolVert"), locSideVol = U("uSideVol"), locVol = U("uVol"), locVolThick = U("uVolThick");
-	const GLint locKFix = U("uKFix"), locShade = U("uShade"), locZb = U("uZb");
+	const GLint locKFix = U("uKFix"), locShade = U("uShade"), locZb = U("uZb"), locBg = U("uBg"), locBgP = U("uBgP"), locBgTile = U("uBgTile");
+	G.Uniform1i(locBg, 0);
 	G.Uniform1i(locZb, 0);
 	const GLint locExt = U("uExt"), locExtMode = U("uExtMode"), locExtBand = U("uExtBand"), locExtScroll = U("uExtScroll"), locExtBandY = U("uExtBandY"), locExtEdge = U("uExtEdge"), locExtRangeV = U("uExtRangeV"), locExtRangeH = U("uExtRangeH"), locExtFog = U("uExtFog"), locExtFogDist = U("uExtFogDist"), locExtColT = U("uExtColT"), locExtColB = U("uExtColB"), locExtColL = U("uExtColL"), locExtColR = U("uExtColR");
 	G.Uniform1i(locExt, 0);
@@ -1456,12 +1506,14 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	int boundLayer = -1;
 	for(int i = 0; i < sliceCount; i++) {
 		const Slice& s = slices[i];
-		if(s.Layer >= 100) { drawObject(sc.Objects.O[s.Layer - 100]); boundLayer = -1; if(sc.Objects.O[s.Layer - 100].Occlude && objDepthOn) occlOn = true; G.Uniform1i(locZb, occlOn ? 1 : 0); continue; }
+		if(s.Layer >= 100 && s.Layer < 300) { drawObject(sc.Objects.O[s.Layer - 100]); boundLayer = -1; if(sc.Objects.O[s.Layer - 100].Occlude && objDepthOn) occlOn = true; G.Uniform1i(locZb, occlOn ? 1 : 0); continue; }
 		if(s.Layer != boundLayer) {
-			if(s.Layer < 4) {
-				const bool wideL0 = s.Layer == 0 && l0WideOn && !sc.Ext[0].Active;
-				G.BindTexture(GL_TEXTURE_2D, wideL0 ? _l0WideTex : _layerTex[s.Layer]);
-				const HdDioramaExtend& ex = sc.Ext[s.Layer];
+			const int lay = s.Layer >= 300 ? 0 : s.Layer; // un fond de L0 partage l'etat de la couche 0
+			const bool isBg = s.Layer >= 300;
+			if(lay < 4) {
+				const bool wideL0 = lay == 0 && l0WideOn && !sc.Ext[0].Active;
+				G.BindTexture(GL_TEXTURE_2D, wideL0 ? _l0WideTex : _layerTex[lay]);
+				const HdDioramaExtend& ex = sc.Ext[lay];
 				if(wideL0) {
 					const float fx = sc.L0WideMX / sc.W, fy = sc.L0WideMY / sc.H;
 					G.Uniform4f(locR, -fx, -fy, 1.0f + 2.0f * fx, 1.0f + 2.0f * fy);
@@ -1488,7 +1540,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 					G.Uniform1i(locExt, 0);
 				}
 			} else {
-				const int g = s.Layer - 4;
+				const int g = lay - 4;
 				G.BindTexture(GL_TEXTURE_2D, _extraTex[g]);
 				const HdDioramaExtend& exg = sc.Ext[4 + g];
 				const float by0 = (float)sc.ExtraY0[g] / (float)h, bh = (float)sc.ExtraRows[g] / (float)h;
@@ -1516,20 +1568,20 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			}
 			G.Uniform1f(locInvN, s.InvN);
 			// G3b2 : motifs de murs de la couche (unites 1 et 2)
-			const HdDioramaWall& wl = sc.Wall[s.Layer];
-			G.Uniform1i(locHasTop, wallTop[s.Layer] ? 1 : 0);
-			G.Uniform1i(locHasSide, wallSide[s.Layer] ? 1 : 0);
+			const HdDioramaWall& wl = sc.Wall[lay];
+			G.Uniform1i(locHasTop, wallTop[lay] ? 1 : 0);
+			G.Uniform1i(locHasSide, wallSide[lay] ? 1 : 0);
 			G.Uniform2f(locOrigins, wl.TopOriginX, wl.SideOriginY);
 			G.Uniform4f(locPeriods, wl.TopPerX > 0.01f ? wl.TopPerX : 0.01f, wl.TopPerY > 0.01f ? wl.TopPerY : 0.01f,
 				wl.SidePerX > 0.01f ? wl.SidePerX : 0.01f, wl.SidePerY > 0.01f ? wl.SidePerY : 0.01f);
 			G.Uniform1f(locScroll, wl.Scroll);
 			G.Uniform1i(locVolVert, wl.SideVolVert ? 1 : 0);
-			G.Uniform1i(locSideVol, wl.SideVol > 1 && wallSide[s.Layer] ? (int)wl.SideVol : 0);
+			G.Uniform1i(locSideVol, wl.SideVol > 1 && wallSide[lay] ? (int)wl.SideVol : 0);
 			G.Uniform4f(locVol, std::max(wl.VolPerX, 0.01f), std::max(wl.VolPerY, 0.01f), wl.VolOriginX, wl.VolOriginY);
 			G.Uniform1f(locVolThick, wl.VolThick);
-			G.Uniform1i(locShOn, (shadowOn && ((sc.Shadow.OntoMask >> s.Layer) & 1u)) ? 1 : 0);
+			G.Uniform1i(locShOn, (shadowOn && ((sc.Shadow.OntoMask >> lay) & 1u)) ? 1 : 0);
 			{ // G6d : carte de normales de la couche (L2 -> 0, L3 -> 1, groupes 4 a 7 -> 2 a 5)
-				const int ni = s.Layer == 2 ? 0 : (s.Layer == 3 ? 1 : (s.Layer >= 4 ? s.Layer - 2 : -1));
+				const int ni = lay == 2 ? 0 : (lay == 3 ? 1 : (lay >= 4 ? lay - 2 : -1));
 				if(ni >= 0 && nrmOk[ni]) {
 					G.Uniform1i(locNrmOn, 1);
 					G.Uniform2f(U("uNrmBand"), nrmBand[ni][0], nrmBand[ni][1]);
@@ -1540,9 +1592,19 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 					G.Uniform1i(locNrmOn, 0);
 				}
 			}
-			G.ActiveTexture(GL_TEXTURE0 + 1); G.BindTexture(GL_TEXTURE_2D, wallTop[s.Layer]);
-			G.ActiveTexture(GL_TEXTURE0 + 2); G.BindTexture(GL_TEXTURE_2D, wallSide[s.Layer]);
+			G.ActiveTexture(GL_TEXTURE0 + 1); G.BindTexture(GL_TEXTURE_2D, wallTop[lay]);
+			G.ActiveTexture(GL_TEXTURE0 + 2); G.BindTexture(GL_TEXTURE_2D, wallSide[lay]);
 			G.ActiveTexture(GL_TEXTURE0);
+			G.Uniform1i(locBg, isBg ? 1 : 0);
+			if(isBg) {
+				const HdDioramaBgPlane& bp = sc.Bg[s.Layer - 300];
+				G.BindTexture(GL_TEXTURE_2D, BgTexture(bp.Pix, bp.W, bp.H, bp.TileX, bp.TileY));
+				const float fx = sc.BgMargin / sc.W, fy = sc.BgMargin / sc.H;
+				G.Uniform4f(locR, -fx, -fy, 1.0f + 2.0f * fx, 1.0f + 2.0f * fy);
+				G.Uniform1i(locExt, 0);
+				G.Uniform4f(locBgP, bp.OffX, bp.OffY, sc.BgYStart, bp.Bright);
+				G.Uniform2f(locBgTile, bp.TileX ? 1.0f : 0.0f, bp.TileY ? 1.0f : 0.0f);
+			}
 			boundLayer = s.Layer;
 		}
 		G.Uniform1f(locDepth, s.Depth);
@@ -1551,7 +1613,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		G.DrawArrays(GL_TRIANGLES, 0, 6);
 		if(occlOn) { G.Disable(GL_DEPTH_TEST); G.DepthMask(GL_TRUE); }
 	}
-	G.Uniform1i(locZb, 0); occlOn = false;
+	G.Uniform1i(locZb, 0); occlOn = false; G.Uniform1i(locBg, 0);
 	// G6a : halo des lumieres ponctuelles (ajout a l'ecran, avant la couche fixe)
 	if(sc.Lights.Active && !_skyProgFailed) {
 		bool drew = false;

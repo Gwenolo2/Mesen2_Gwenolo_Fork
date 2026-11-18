@@ -96,12 +96,17 @@ export function expandAliases(text: string, aliases: Map<string, string>): { tex
  * Un .mesen inclus n'est donc pas sa propre racine : ses chemins se lisent depuis le dossier de snes_hires.txt.
  * Si aucun snes_hires.txt n'est trouvé, le fichier ouvert lui-même sert d'entrée.
  */
+/** Noms des fichiers d'entrée reconnus : snes_hires.txt (SNES) et hires.txt (NES). */
+export const ENTRY_NAMES = ['snes_hires.txt', 'hires.txt'];
+
 export function findPackEntry(file: string): string {
     const start = path.resolve(file);
     let dir = path.dirname(start);
     for (;;) {
-        const candidate = path.join(dir, 'snes_hires.txt');
-        if (fs.existsSync(candidate)) return candidate;
+        for (const name of ENTRY_NAMES) {
+            const candidate = path.join(dir, name);
+            if (fs.existsSync(candidate)) return candidate;
+        }
         const parent = path.dirname(dir);
         if (parent === dir) return start;
         dir = parent;

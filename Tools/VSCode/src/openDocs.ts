@@ -8,7 +8,7 @@ import * as vscode from 'vscode';
 export function openPackTexts(): Map<string, string> {
     const texts = new Map<string, string>();
     for (const d of vscode.workspace.textDocuments) {
-        if (d.languageId === 'mesen-snes-hd' && d.uri.scheme === 'file') {
+        if ((d.languageId === 'mesen-snes-hd' || d.languageId === 'mesen-nes-hd') && d.uri.scheme === 'file') {
             texts.set(path.resolve(d.uri.fsPath), d.getText());
         }
     }

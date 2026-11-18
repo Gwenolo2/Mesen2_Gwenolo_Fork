@@ -3,12 +3,11 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { readPngSize } from './png';
 import { openPackTexts } from './openDocs';
+import { ConsoleProfile, isBuiltin } from './consoles';
 import { parseLine, resolveRef } from './packParser';
 import { ResolvedLine, declaredConditions, resolvePack } from './resolver';
 import { Schema } from './schema';
 
-/** Conditions intégrées (SnesHdPackLoader.cpp, ligne ~343). */
-const BUILTIN = new Set(['hmirror', 'vmirror', 'gpu3d', 'widescreen', 'widescreenMode7']);
 const TILE_TAGS = new Set(['tile', 'tile_hflip', 'tile_vflip', 'tile_hvflip']);
 const SOURCE = 'Mesen HD';
 
@@ -49,7 +48,7 @@ function lineRange(doc: vscode.TextDocument, index: number): vscode.Range {
  * conditions valables seulement après leur déclaration, <scale> avant les tiles.
  * Le texte de l'éditeur est utilisé pour le fichier ouvert (modifications non sauvegardées incluses).
  */
-export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vscode.Diagnostic[] {
+export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema, profile: ConsoleProfile): vscode.Diagnostic[] {
     const docPath = path.resolve(doc.uri.fsPath);
     const pack = resolvePack(docPath, openPackTexts());
     const declared = new Set<string>();
@@ -73,7 +72,7 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
 
         // Conditions : doivent être déclarées avant la ligne (ordre de lecture).
         for (const c of conditionNames(text)) {
-            if (!declared.has(c) && !BUILTIN.has(c)) {
+            if (!declared.has(c) && !isBuiltin(profile, c)) {
                 report(r, {
                     severity: vscode.DiagnosticSeverity.Error,
                     code: 'cond-undeclared',
@@ -131,7 +130,7 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
         }
 
         // Tile définie plusieurs fois avec les mêmes conditions : doublon probable.
-        if (TILE_TAGS.has(tag.key) && positional[0] && /^[0-9A-Fa-f]+$/.test(positional[0])) {
+        if (profile.snesRules && TILE_TAGS.has(tag.key) && positional[0] && /^[0-9A-Fa-f]+$/.test(positional[0])) {
             const tileKey = `${positional[0].toUpperCase()}|${conditionKey(text)}`;
             const first = seenTiles.get(tileKey);
             if (!first) {
@@ -144,7 +143,7 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
 
         // Nombre de paramètres.
         let need = tag.params.filter(p => !p.kv && p.required).length;
-        if (TILE_TAGS.has(tag.key) && positional[2] !== undefined && /^(disable|blank)$/i.test(positional[2])) {
+        if (profile.snesRules && TILE_TAGS.has(tag.key) && positional[2] !== undefined && /^(disable|blank)$/i.test(positional[2])) {
             need = 2;
         }
         if (positional.length < need && !/\{/.test(text)) {
@@ -153,7 +152,7 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
         }
 
         // Palettes : décimal, de 0 à 15 (ou * / all).
-        const paletteFields = TILE_TAGS.has(tag.key) || tag.key === 'disableTile' || tag.key.toLowerCase() === 'distabletile'
+        const paletteFields: number[] = !profile.snesRules ? [] : TILE_TAGS.has(tag.key) || tag.key === 'disableTile' || tag.key.toLowerCase() === 'distabletile'
             ? [1]
             : tag.key.toLowerCase() === 'addition' ? [1, 3] : [];
         for (const i of paletteFields) {
@@ -169,14 +168,14 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
         }
 
         // Fichiers référencés et index d'image.
-        if (TILE_TAGS.has(tag.key) && positional[2] !== undefined && /^\d+$/.test(positional[2])) {
+        if (profile.snesRules && TILE_TAGS.has(tag.key) && positional[2] !== undefined && /^\d+$/.test(positional[2])) {
             const index = Number(positional[2]);
             if (index >= catalog) {
                 report(r, { severity: vscode.DiagnosticSeverity.Error, code: 'img-index',
                     message: `Index d'image ${index} hors du catalogue (${catalog} <img> déclaré(s) avant cette ligne).` });
             }
         }
-        for (const ref of parseLine(text)?.refs ?? []) {
+        for (const ref of parseLine(text, profile.fileField)?.refs ?? []) {
             if (ref.kind !== 'file') continue;
             const target = resolveRef(pack.rootFolder, ref);
             if (!fs.existsSync(target)) {
@@ -185,7 +184,7 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
                 continue;
             }
             // Zone de tile hors de l'image (en-tête PNG).
-            if (TILE_TAGS.has(tag.key) && scale !== undefined && ref.path.toLowerCase().endsWith('.png')) {
+            if (profile.snesRules && TILE_TAGS.has(tag.key) && scale !== undefined && ref.path.toLowerCase().endsWith('.png')) {
                 const x = Number(positional[3]);
                 const y = Number(positional[4]);
                 if (!Number.isNaN(x) && !Number.isNaN(y)) {
@@ -201,7 +200,7 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema): vs
         }
 
         // Ordre : <scale> avant les tiles.
-        if (TILE_TAGS.has(tag.key) && !scaleSeen) {
+        if (profile.snesRules && TILE_TAGS.has(tag.key) && !scaleSeen) {
             report(r, { severity: vscode.DiagnosticSeverity.Error, code: 'scale-missing',
                 message: 'Aucun <scale> avant cette balise : la taille des tiles est inconnue.' });
         }

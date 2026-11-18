@@ -1,17 +1,16 @@
 import * as vscode from 'vscode';
 import { PackCodeLensProvider } from './codelens';
 import { PackCompletionProvider } from './completion';
+import { ConsoleProfile, HdConsole, PROFILES, profileForLanguage } from './consoles';
 import { computeDiagnostics } from './diagnostics';
 import { PackHoverProvider } from './hover';
 import { PackLinkProvider } from './links';
 import { openPackTexts } from './openDocs';
 import { declaredConditions, resolvePack } from './resolver';
 import { PackSignatureProvider } from './signature';
-import { loadSchema } from './schema';
+import { Schema, loadSchema } from './schema';
 
-export type HdConsole = 'snes' | 'nes';
-
-/** Console déduite du nom du fichier (doc 29, §2) : snes_hires.txt = SNES, hires.txt = NES. */
+/** Console déduite du nom du fichier : snes_hires.txt = SNES, hires.txt = NES. */
 export function consoleForFileName(fileName: string): HdConsole | undefined {
     const base = (fileName.split(/[\\/]/).pop() ?? '').toLowerCase();
     if (base === 'snes_hires.txt') return 'snes';
@@ -23,19 +22,27 @@ export function activate(context: vscode.ExtensionContext): void {
     const output = vscode.window.createOutputChannel('Mesen HD Pack');
     context.subscriptions.push(output);
 
-    const schema = loadSchema(context.extensionPath);
-    const selector: vscode.DocumentSelector = { language: 'mesen-snes-hd', scheme: 'file' };
+    // Un jeu de fournisseurs par console : chacun a son schéma, ses champs fichiers et ses conditions intégrées.
+    const schemas = new Map<string, Schema>();
+    for (const profile of PROFILES) {
+        const schema = loadSchema(context.extensionPath, profile.schemaFile);
+        schemas.set(profile.id, schema);
+        const selector: vscode.DocumentSelector = { language: profile.languageId, scheme: 'file' };
+        context.subscriptions.push(
+            vscode.languages.registerDocumentLinkProvider(selector, new PackLinkProvider(profile)),
+            vscode.languages.registerCodeLensProvider(selector, new PackCodeLensProvider(profile)),
+            vscode.languages.registerCompletionItemProvider(selector, new PackCompletionProvider(schema, profile), '<', '[', '&', ',', '=', '/', '\\'),
+            vscode.languages.registerHoverProvider(selector, new PackHoverProvider(schema, profile)),
+            vscode.languages.registerSignatureHelpProvider(selector, new PackSignatureProvider(schema), ','),
+        );
+    }
+
     context.subscriptions.push(
-        vscode.languages.registerDocumentLinkProvider(selector, new PackLinkProvider()),
-        vscode.languages.registerCodeLensProvider(selector, new PackCodeLensProvider()),
-        vscode.languages.registerCompletionItemProvider(selector, new PackCompletionProvider(schema), '<', '[', '&', ',', '=', '/', '\\'),
-        vscode.languages.registerHoverProvider(selector, new PackHoverProvider(schema)),
-        vscode.languages.registerSignatureHelpProvider(selector, new PackSignatureProvider(schema), ','),
         vscode.commands.registerCommand('mesenHd.toggleComment', () => vscode.commands.executeCommand('editor.action.commentLine')),
         vscode.commands.registerCommand('mesenHd.listConditions', () => {
             const doc = vscode.window.activeTextEditor?.document;
-            if (!doc || doc.uri.scheme !== 'file') {
-                vscode.window.showWarningMessage('Ouvrez un snes_hires.txt.');
+            if (!doc || doc.uri.scheme !== 'file' || !profileForLanguage(doc.languageId)) {
+                vscode.window.showWarningMessage('Ouvrez un snes_hires.txt ou un hires.txt.');
                 return;
             }
             const pack = resolvePack(doc.uri.fsPath, openPackTexts());
@@ -52,11 +59,14 @@ export function activate(context: vscode.ExtensionContext): void {
     );
 
     // Diagnostics : mis à jour à l'ouverture, à la modification, et à chaque sauvegarde (les includes changent aussi).
-    const diagnostics = vscode.languages.createDiagnosticCollection('mesen-hd-snes');
+    const diagnostics = vscode.languages.createDiagnosticCollection('mesen-hd');
     context.subscriptions.push(diagnostics);
     const refresh = (doc: vscode.TextDocument): void => {
-        if (doc.languageId !== 'mesen-snes-hd' || doc.uri.scheme !== 'file') return;
-        diagnostics.set(doc.uri, computeDiagnostics(doc, schema));
+        const profile: ConsoleProfile | undefined = profileForLanguage(doc.languageId);
+        if (!profile || doc.uri.scheme !== 'file') return;
+        const schema = schemas.get(profile.id);
+        if (!schema) return;
+        diagnostics.set(doc.uri, computeDiagnostics(doc, schema, profile));
     };
     vscode.workspace.textDocuments.forEach(refresh);
     context.subscriptions.push(
@@ -66,7 +76,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.workspace.onDidCloseTextDocument(doc => diagnostics.delete(doc.uri)),
     );
 
-    output.appendLine('Mesen HD Pack (SNES) activé. Étape 5 : diagnostics.');
+    output.appendLine('Mesen HD Pack (SNES et NES) activé.');
 }
 
 export function deactivate(): void {

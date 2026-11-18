@@ -3015,6 +3015,9 @@
     <ClInclude Include="Shared\pl_mpeg.h">
       <Filter>Shared</Filter>
     </ClInclude>
+    <ClInclude Include="Gameboy\GbHdVideoFilter.h" />
+    <ClInclude Include="Gameboy\HdPacks\GbHdPackBuilder.h" />
+    <ClInclude Include="Gameboy\HdPacks\GbHdPackLoader.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Shared\Video\RotateFilter.cpp">
@@ -3395,6 +3398,9 @@
     <ClCompile Include="SNES\HdPacks\SnesHdGltf.cpp">
       <Filter>SNES\HdPacks</Filter>
     </ClCompile>
+    <ClCompile Include="Gameboy\GbHdVideoFilter.cpp" />
+    <ClCompile Include="Gameboy\HdPacks\GbHdPackBuilder.cpp" />
+    <ClCompile Include="Gameboy\HdPacks\GbHdPackLoader.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="PCE">

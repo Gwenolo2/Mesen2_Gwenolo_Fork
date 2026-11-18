@@ -1,16 +1,8 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { ConsoleProfile } from './consoles';
 import { declaredConditions, resolvePack } from './resolver';
 import { Schema, SchemaParam, SchemaTag, tagBefore, tagCovering } from './schema';
-
-/** Conditions intégrées (SnesHdPackLoader.cpp, ligne ~343). */
-const BUILTIN_CONDITIONS: Record<string, string> = {
-    hmirror: 'Vraie si la tile évaluée est retournée horizontalement.',
-    vmirror: 'Vraie si la tile évaluée est retournée verticalement.',
-    gpu3d: 'Vraie sauf si <gpu3d>off est utilisé (moteur 3D actif par défaut).',
-    widescreen: 'Vraie si <widescreen> vaut mode7 ou all.',
-    widescreenMode7: 'Vraie si <widescreen>mode7 ou all.',
-};
 
 /** Nom de condition sous le curseur dans un préfixe [ ], sans le ! ni les espaces. */
 function conditionAt(text: string, col: number): string | undefined {
@@ -29,7 +21,7 @@ function conditionAt(text: string, col: number): string | undefined {
 }
 
 export class PackHoverProvider implements vscode.HoverProvider {
-    constructor(private readonly schema: Schema) {}
+    constructor(private readonly schema: Schema, private readonly profile: ConsoleProfile) {}
 
     provideHover(doc: vscode.TextDocument, pos: vscode.Position): vscode.Hover | undefined {
         const text = doc.lineAt(pos.line).text;
@@ -68,8 +60,8 @@ export class PackHoverProvider implements vscode.HoverProvider {
     private conditionMarkdown(doc: vscode.TextDocument, name: string): vscode.MarkdownString {
         const md = new vscode.MarkdownString();
         md.appendMarkdown(`**${name}**\n\n`);
-        if (BUILTIN_CONDITIONS[name]) {
-            md.appendMarkdown(`Condition intégrée. ${BUILTIN_CONDITIONS[name]}`);
+        if (this.profile.builtins[name]) {
+            md.appendMarkdown(`Condition intégrée. ${this.profile.builtins[name]}`);
             return md;
         }
         const pack = resolvePack(doc.uri.fsPath);

@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { ConsoleProfile } from './consoles';
 import { parseLine, resolveRef } from './packParser';
 import { packRoot } from './resolver';
 
@@ -9,6 +10,8 @@ import { packRoot } from './resolver';
  * Les lignes contenant un @alias sont ignorées pour l'instant (le chemin final n'est pas à la position écrite).
  */
 export class PackLinkProvider implements vscode.DocumentLinkProvider {
+    constructor(private readonly profile: ConsoleProfile) {}
+
     provideDocumentLinks(doc: vscode.TextDocument): vscode.DocumentLink[] {
         const links: vscode.DocumentLink[] = [];
         const root = packRoot(doc.uri.fsPath);
@@ -31,7 +34,7 @@ export class PackLinkProvider implements vscode.DocumentLinkProvider {
                 continue;
             }
 
-            const parsed = parseLine(text);
+            const parsed = parseLine(text, this.profile.fileField);
             for (const ref of parsed?.refs ?? []) {
                 if (ref.kind !== 'file') continue;
                 const target = resolveRef(root, ref);

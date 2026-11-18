@@ -2738,6 +2738,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 			if(c.BackgroundIndex < 0) continue;
 			const int t = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex].DioTarget;
 			if(t == -2) continue;
+			if(cls == 0 && _dioGpuBgN > 0 && (t == -1 || t == 0) && IsDioGpuBg(c.BgPriority, c.BackgroundIndex)) continue; // dessine par le GPU
 			uint32_t* tgt = defTarget;
 			if(t >= 0 && t <= 3) {
 				tgt = t == 0 ? l0 : (t == 1 ? l1 : (t == 2 ? l2 : l3));
@@ -2851,6 +2852,51 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 			bool ok = true;
 			for(HdPackCondition* c : r.Conditions) { if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; } }
 			if(ok) { _dioL0Clear = true; break; }
+		}
+	}
+	// Fonds de L0 dessines par le GPU (doc 52) : si tous les fonds de L0 ont le meme defilement sur toutes les lignes (ramx= / ramy=,
+	// ou fond fixe), le GPU les dessine comme un plan repete a la profondeur de L0 (marges infinies, aucun envoi d'image) ; sinon,
+	// dessin par le processeur comme avant. Pas pendant le controle d'identite GPU / processeur (compare).
+	_dioGpuBgN = 0;
+	if(!compare && _dioGpuOk && _activeBgCount[0] > 0 && _activeBgCount[0] <= 4 && !_zEnabled && !_hdData->HasIgnore2D && _hdData->Diorama.T[0] <= 0.0f && yEnd > yStart && yEnd <= 240) {
+		const int nAct = _activeBgCount[0];
+		HdBgConfig first[50], lc[50];
+		ComputeLineBgConfig(hdScreenInfo->ScreenTiles[yStart << 8], (uint8_t)yStart, first);
+		bool allOk = true;
+		bool cand[4] = { false, false, false, false };
+		int nCand = 0;
+		for(int k = 0; k < nAct && allOk; k++) {
+			const HdBgConfig& c = first[k];
+			if(c.BackgroundIndex < 0) continue;
+			const HdBackgroundInfo& bi = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
+			if(!(bi.DioTarget == -1 || bi.DioTarget == 0)) continue; // un autre plan : sans effet sur L0
+			const uint32_t pw = bi.Data ? bi.Data->Width : 0, ph = bi.Data ? bi.Data->Height : 0;
+			if(bi.BlendMode != HdPackBlendMode::Alpha || pw == 0 || ph == 0 || (pw % hdScale) != 0 || (ph % hdScale) != 0 ||
+				!_hdData->Textures2D[bi.Priority].empty() || (!bi.TileX && bi.Left != 0) || (!bi.TileY && bi.Top != 0)) { allOk = false; break; }
+			cand[k] = true; nCand++;
+		}
+		if(allOk && nCand > 0) {
+			for(uint32_t y = yStart + 1; y < yEnd && allOk; y++) {
+				ComputeLineBgConfig(hdScreenInfo->ScreenTiles[y << 8], (uint8_t)y, lc);
+				for(int k = 0; k < nAct; k++) {
+					if(lc[k].BackgroundIndex != first[k].BackgroundIndex || lc[k].BgPriority != first[k].BgPriority) { allOk = false; break; }
+					if(cand[k] && (lc[k].BgScrollX != first[k].BgScrollX || lc[k].BgScrollY != first[k].BgScrollY)) { allOk = false; break; }
+				}
+			}
+		}
+		if(allOk && nCand > 0) {
+			for(int k = 0; k < nAct; k++) {
+				if(!cand[k]) continue;
+				const HdBgConfig& c = first[k];
+				HdBackgroundInfo& bi = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
+				DioGpuBg& g = _dioGpuBg[_dioGpuBgN++];
+				g.Prio = c.BgPriority; g.Index = c.BackgroundIndex;
+				g.Pix = bi.data(); g.W = bi.Data->Width; g.H = bi.Data->Height;
+				g.OffX = (float)(((int64_t)bi.Left + c.BgScrollX) * (int64_t)hdScale);
+				g.OffY = (float)(((int64_t)bi.Top + c.BgScrollY) * (int64_t)hdScale);
+				g.Bright = bi.Brightness >= 255 ? 1.0f : (float)bi.Brightness / 255.0f;
+				g.TileX = bi.TileX; g.TileY = bi.TileY;
+			}
 		}
 	}
 	// G3h : effacement reduit. L0 est entierement reecrite (pas d'effacement) ; L1 et L3 (sprites) : seulement les lignes NES
@@ -3349,8 +3395,16 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 		memcmp(_dioL[0].data(), _dioL[0].data() + 1, (pixels - 1) * sizeof(uint32_t)) == 0;
 	{ // diagnostic : etat de la L0 elargie, journalise a chaque changement
 		char b[256];
-		snprintf(b, sizeof(b), "[HD-DIORAMA] L0 elargie : bande=%zu HD, L0 unie=%d, fonds actifs par classe=%d/%d/%d/%d/%d, L0 transparente=%d", wsPadHd, scene.L0Uniform ? 1 : 0, _activeBgCount[0], _activeBgCount[1], _activeBgCount[2], _activeBgCount[3], _activeBgCount[4], _dioL0Clear ? 1 : 0);
+		snprintf(b, sizeof(b), "[HD-DIORAMA] L0 elargie : bande=%zu HD, L0 unie=%d, fonds actifs par classe=%d/%d/%d/%d/%d, L0 transparente=%d, fonds de L0 dessines par le GPU=%d", wsPadHd, scene.L0Uniform ? 1 : 0, _activeBgCount[0], _activeBgCount[1], _activeBgCount[2], _activeBgCount[3], _activeBgCount[4], _dioL0Clear ? 1 : 0, _dioGpuBgN);
 		if(_dioWideLog != b) { _dioWideLog = b; MessageManager::Log(b); }
+	}
+	// Fonds de L0 dessines par le GPU (voir RunDioramaLayers)
+	scene.BgCount = _dioGpuBgN;
+	scene.BgYStart = (float)yStart;
+	for(int i = 0; i < _dioGpuBgN; i++) {
+		const DioGpuBg& g = _dioGpuBg[i];
+		HdDioramaBgPlane& bp = scene.Bg[i];
+		bp.Pix = g.Pix; bp.W = g.W; bp.H = g.H; bp.OffX = g.OffX; bp.OffY = g.OffY; bp.Bright = g.Bright; bp.TileX = g.TileX; bp.TileY = g.TileY;
 	}
 	// Fonds <background> de L0 prolonges au-dela de l'ecran (bandes widescreen et marges wide= / tall= pour la rotation de la camera) :
 	// L0 elargie, centre = L0, marges = les memes fonds.
@@ -3359,8 +3413,9 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 		bool anyL0Bg = false;
 		if(_activeBgCount[0] > 0) {
 			for(int pr = 0; pr < (int)HdPackData::BgLayerCount; pr++) {
-				for(const HdBackgroundInfo& bi : _hdData->BackgroundsByPriority[pr]) {
-					if(bi.DioTarget == -1 || bi.DioTarget == 0) {
+				for(size_t bix = 0; bix < _hdData->BackgroundsByPriority[pr].size(); bix++) {
+					const HdBackgroundInfo& bi = _hdData->BackgroundsByPriority[pr][bix];
+					if((bi.DioTarget == -1 || bi.DioTarget == 0) && !IsDioGpuBg(pr, (int)bix)) {
 						anyL0Bg = true;
 						marginX = std::max(marginX, (float)bi.DioWideX);
 						marginY = std::max(marginY, (float)bi.DioWideY);
@@ -3386,7 +3441,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 					const HdBgConfig& c = lc[k];
 					if(c.BackgroundIndex < 0) continue;
 					const int t = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex].DioTarget;
-					if(t == -1 || t == 0) bgs.push_back(&c);
+					if((t == -1 || t == 0) && !IsDioGpuBg(c.BgPriority, c.BackgroundIndex)) bgs.push_back(&c);
 				}
 				for(int i = 0; i < sc_; i++) {
 					const int64_t r = (int64_t)(ln - (int)yStart) * sc_ + i; // ligne de L0 (negative au-dessus)

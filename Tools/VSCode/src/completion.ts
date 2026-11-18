@@ -1,12 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { FILE_FIELD } from './packParser';
+import { ConsoleProfile } from './consoles';
 import { declaredConditions, packRoot, resolvePack } from './resolver';
 import { Schema, USABLE, conditionPrefix, tagBefore } from './schema';
-
-/** Conditions intégrées (SnesHdPackLoader.cpp, ligne ~343 et ~357). */
-const BUILTIN_CONDITIONS = ['hmirror', 'vmirror', 'gpu3d', 'widescreen', 'widescreenMode7'];
 
 /** Balises dont le fichier est une image PNG. */
 const PNG_TAGS = new Set(['img', 'tile', 'tile_hflip', 'tile_vflip', 'tile_hvflip', 'background', 'm7img', 'm7tiles', 'loadingscreen']);
@@ -27,7 +24,7 @@ interface FileArg {
 }
 
 /** Si le curseur est dans le champ fichier d'une balise (index donné par FILE_FIELD), renvoie le texte tapé. */
-function fileArgAt(text: string, col: number): FileArg | undefined {
+function fileArgAt(text: string, col: number, fileField: Record<string, number>): FileArg | undefined {
     const before = text.slice(0, col);
     const hash = text.indexOf('#');
     if (hash >= 0 && col > hash) return undefined;
@@ -41,7 +38,7 @@ function fileArgAt(text: string, col: number): FileArg | undefined {
     }
     if (!last) return undefined;
     const tag = last[1].toLowerCase();
-    const fieldIndex = FILE_FIELD[tag];
+    const fieldIndex = fileField[tag];
     if (fieldIndex === undefined) return undefined;
     const fields = before.slice(last.index + last[0].length).split(',');
     if (fields.length - 1 !== fieldIndex) return undefined;
@@ -49,7 +46,7 @@ function fileArgAt(text: string, col: number): FileArg | undefined {
 }
 
 export class PackCompletionProvider implements vscode.CompletionItemProvider {
-    constructor(private readonly schema: Schema) {}
+    constructor(private readonly schema: Schema, private readonly profile: ConsoleProfile) {}
 
     provideCompletionItems(doc: vscode.TextDocument, pos: vscode.Position): vscode.CompletionItem[] {
         const text = doc.lineAt(pos.line).text;
@@ -64,7 +61,7 @@ export class PackCompletionProvider implements vscode.CompletionItemProvider {
         }
 
         // 2. Champ fichier d'une balise (png, ogg, json…) : fichiers et dossiers du pack.
-        const file = fileArgAt(text, col);
+        const file = fileArgAt(text, col, this.profile.fileField);
         if (file) return this.fileItems(doc, pos, file);
 
         // 3. Nom de balise en cours de frappe, après '<'.
@@ -129,7 +126,7 @@ export class PackCompletionProvider implements vscode.CompletionItemProvider {
     private conditionItems(doc: vscode.TextDocument, pos: vscode.Position, token: string): vscode.CompletionItem[] {
         const range = new vscode.Range(pos.line, pos.character - token.length, pos.line, pos.character);
         const declared = declaredConditions(resolvePack(doc.uri.fsPath)).map(c => c.name);
-        const names = [...new Set([...declared, ...BUILTIN_CONDITIONS])];
+        const names = [...new Set([...declared, ...Object.keys(this.profile.builtins)])];
         const items: vscode.CompletionItem[] = [];
         for (const n of names) {
             for (const label of [n, '!' + n]) {

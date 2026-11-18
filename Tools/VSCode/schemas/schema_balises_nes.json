@@ -1,0 +1,2410 @@
+{
+  "$comment": "Schéma des balises NES (hires.txt), établi depuis claude/19 et HdPackLoader.cpp. Éditer ce fichier à la main en gardant le format.",
+  "tags": [
+    {
+      "name": "<ver>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<ver>N",
+      "params": [
+        {
+          "name": "version",
+          "src": "code",
+          "pos": 1,
+          "type": "int",
+          "required": true,
+          "range": "100 et plus"
+        }
+      ],
+      "notes": "Version du format. Une version plus récente que le loader est refusée."
+    },
+    {
+      "name": "<scale>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<scale>N",
+      "params": [
+        {
+          "name": "facteur",
+          "src": "code",
+          "pos": 1,
+          "type": "int",
+          "required": true,
+          "range": "min 1"
+        }
+      ],
+      "notes": "Agrandissement des graphismes HD."
+    },
+    {
+      "name": "<overscan>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<overscan>haut,droite,bas,gauche",
+      "params": [
+        {
+          "name": "haut",
+          "src": "code",
+          "pos": 1,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "droite",
+          "src": "code",
+          "pos": 2,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "bas",
+          "src": "code",
+          "pos": 3,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "gauche",
+          "src": "code",
+          "pos": 4,
+          "type": "int",
+          "required": true
+        }
+      ],
+      "notes": "Marges appliquées au chargement."
+    },
+    {
+      "name": "<patch>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<patch>fichier,sha1",
+      "params": [
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin",
+          "required": true
+        },
+        {
+          "name": "sha1",
+          "src": "code",
+          "pos": 2,
+          "type": "hex"
+        }
+      ],
+      "notes": "Patch .ips ou .bps appliqué si la ROM a ce SHA1."
+    },
+    {
+      "name": "<options>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<options>opt1,opt2",
+      "params": [
+        {
+          "name": "option",
+          "src": "code",
+          "pos": 1,
+          "values": [
+            "disableSpriteLimit",
+            "disableOriginalTiles",
+            "alternateRegisterRange",
+            "disableCache",
+            "automaticFallbackTiles",
+            "disableContours"
+          ]
+        }
+      ],
+      "notes": "Options séparées par des virgules."
+    },
+    {
+      "name": "<img>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<img>chemin.png",
+      "params": [
+        {
+          "name": "chemin",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin",
+          "required": true
+        }
+      ],
+      "notes": "Feuille PNG ; l'index suit l'ordre d'apparition."
+    },
+    {
+      "name": "<tile>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<tile>image,tuile,palette,x,y[,luminosite[,defaut]]",
+      "params": [
+        {
+          "name": "image",
+          "src": "code",
+          "pos": 1,
+          "type": "index|chemin",
+          "required": true,
+          "desc": "index d'<img> ou chemin PNG (randomize possible)"
+        },
+        {
+          "name": "tuile",
+          "src": "code",
+          "pos": 2,
+          "type": "hex",
+          "required": true,
+          "desc": "index CHR (hex) ou 32 caractères hex (CHR RAM)"
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "pos": 3,
+          "type": "hex8",
+          "required": true,
+          "desc": "8 caractères hex ; * ou all pour toutes"
+        },
+        {
+          "name": "x",
+          "src": "code",
+          "pos": 4,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "y",
+          "src": "code",
+          "pos": 5,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "luminosite",
+          "src": "code",
+          "pos": 6,
+          "type": "float",
+          "default": 1.0
+        },
+        {
+          "name": "defaut",
+          "src": "code",
+          "pos": 7,
+          "default": "N",
+          "values": [
+            "Y",
+            "N"
+          ]
+        }
+      ],
+      "notes": "Remplacement d'une tuile (claude/19 § 4.1)."
+    },
+    {
+      "name": "<tile_hflip>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<tile_hflip>image,tuile,palette,x,y[,luminosite[,defaut]]",
+      "params": [
+        {
+          "name": "image",
+          "src": "code",
+          "pos": 1,
+          "type": "index|chemin",
+          "required": true,
+          "desc": "index d'<img> ou chemin PNG (randomize possible)"
+        },
+        {
+          "name": "tuile",
+          "src": "code",
+          "pos": 2,
+          "type": "hex",
+          "required": true,
+          "desc": "index CHR (hex) ou 32 caractères hex (CHR RAM)"
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "pos": 3,
+          "type": "hex8",
+          "required": true,
+          "desc": "8 caractères hex ; * ou all pour toutes"
+        },
+        {
+          "name": "x",
+          "src": "code",
+          "pos": 4,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "y",
+          "src": "code",
+          "pos": 5,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "luminosite",
+          "src": "code",
+          "pos": 6,
+          "type": "float",
+          "default": 1.0
+        },
+        {
+          "name": "defaut",
+          "src": "code",
+          "pos": 7,
+          "default": "N",
+          "values": [
+            "Y",
+            "N"
+          ]
+        }
+      ],
+      "notes": "Variante miroir horizontal (fork)."
+    },
+    {
+      "name": "<tile_vflip>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<tile_vflip>image,tuile,palette,x,y[,luminosite[,defaut]]",
+      "params": [
+        {
+          "name": "image",
+          "src": "code",
+          "pos": 1,
+          "type": "index|chemin",
+          "required": true,
+          "desc": "index d'<img> ou chemin PNG (randomize possible)"
+        },
+        {
+          "name": "tuile",
+          "src": "code",
+          "pos": 2,
+          "type": "hex",
+          "required": true,
+          "desc": "index CHR (hex) ou 32 caractères hex (CHR RAM)"
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "pos": 3,
+          "type": "hex8",
+          "required": true,
+          "desc": "8 caractères hex ; * ou all pour toutes"
+        },
+        {
+          "name": "x",
+          "src": "code",
+          "pos": 4,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "y",
+          "src": "code",
+          "pos": 5,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "luminosite",
+          "src": "code",
+          "pos": 6,
+          "type": "float",
+          "default": 1.0
+        },
+        {
+          "name": "defaut",
+          "src": "code",
+          "pos": 7,
+          "default": "N",
+          "values": [
+            "Y",
+            "N"
+          ]
+        }
+      ],
+      "notes": "Variante miroir vertical (fork)."
+    },
+    {
+      "name": "<tile_hvflip>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<tile_hvflip>image,tuile,palette,x,y[,luminosite[,defaut]]",
+      "params": [
+        {
+          "name": "image",
+          "src": "code",
+          "pos": 1,
+          "type": "index|chemin",
+          "required": true,
+          "desc": "index d'<img> ou chemin PNG (randomize possible)"
+        },
+        {
+          "name": "tuile",
+          "src": "code",
+          "pos": 2,
+          "type": "hex",
+          "required": true,
+          "desc": "index CHR (hex) ou 32 caractères hex (CHR RAM)"
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "pos": 3,
+          "type": "hex8",
+          "required": true,
+          "desc": "8 caractères hex ; * ou all pour toutes"
+        },
+        {
+          "name": "x",
+          "src": "code",
+          "pos": 4,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "y",
+          "src": "code",
+          "pos": 5,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "luminosite",
+          "src": "code",
+          "pos": 6,
+          "type": "float",
+          "default": 1.0
+        },
+        {
+          "name": "defaut",
+          "src": "code",
+          "pos": 7,
+          "default": "N",
+          "values": [
+            "Y",
+            "N"
+          ]
+        }
+      ],
+      "notes": "Variante miroir dans les deux sens (fork)."
+    },
+    {
+      "name": "<background>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<background>nom,luminosite,scrollX,scrollY,priorite,gauche,haut,fusion,tileX,tileY,framesBetweenSteps,reverse,operator[,dio=..][,ramx=..][,ramy=..]",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin",
+          "required": true,
+          "desc": "PNG ou dossier (animation)"
+        },
+        {
+          "name": "luminosite",
+          "src": "code",
+          "pos": 2,
+          "type": "float",
+          "default": 1.0
+        },
+        {
+          "name": "scrollX",
+          "src": "code",
+          "pos": 3,
+          "type": "float",
+          "default": 0
+        },
+        {
+          "name": "scrollY",
+          "src": "code",
+          "pos": 4,
+          "type": "float",
+          "default": 0
+        },
+        {
+          "name": "priorite",
+          "src": "code",
+          "pos": 5,
+          "type": "int",
+          "default": 10,
+          "range": "0-49"
+        },
+        {
+          "name": "gauche",
+          "src": "code",
+          "pos": 6,
+          "type": "int",
+          "default": 0
+        },
+        {
+          "name": "haut",
+          "src": "code",
+          "pos": 7,
+          "type": "int",
+          "default": 0
+        },
+        {
+          "name": "fusion",
+          "src": "code",
+          "pos": 8,
+          "default": "Alpha",
+          "values": [
+            "Alpha",
+            "Add",
+            "Subtract"
+          ]
+        },
+        {
+          "name": "tileX",
+          "src": "code",
+          "pos": 9,
+          "default": "N",
+          "values": [
+            "Y",
+            "N"
+          ]
+        },
+        {
+          "name": "tileY",
+          "src": "code",
+          "pos": 10,
+          "default": "N",
+          "values": [
+            "Y",
+            "N"
+          ]
+        },
+        {
+          "name": "framesBetweenSteps",
+          "src": "code",
+          "pos": 11,
+          "type": "int",
+          "default": 0
+        },
+        {
+          "name": "reverse",
+          "src": "code",
+          "pos": 12,
+          "default": "N",
+          "values": [
+            "Y",
+            "N"
+          ]
+        },
+        {
+          "name": "operator",
+          "src": "code",
+          "pos": 13,
+          "default": "*",
+          "values": [
+            "*",
+            "/",
+            "+",
+            "-",
+            "multiply",
+            "divide",
+            "plus",
+            "minus"
+          ]
+        },
+        {
+          "name": "dio",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "off",
+            "l0",
+            "l1",
+            "l2",
+            "l3",
+            "g1",
+            "g2",
+            "g3",
+            "g4",
+            "g5",
+            "g6",
+            "g7",
+            "g8"
+          ],
+          "desc": "cible du fond dans le diorama (doc 50)"
+        },
+        {
+          "name": "ramx",
+          "src": "code",
+          "kv": true,
+          "type": "expr",
+          "desc": "valeur $nom de <watchMemoryAddress> (doc 46)"
+        },
+        {
+          "name": "ramy",
+          "src": "code",
+          "kv": true,
+          "type": "expr",
+          "desc": "valeur $nom de <watchMemoryAddress> (doc 46)"
+        }
+      ],
+      "notes": "Fond. Priorité 0 à 49. dio= cible le diorama (doc 50), ramx= et ramy= lisent la RAM (doc 46). Champs 8 à 13 : version 107+."
+    },
+    {
+      "name": "<condition>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<condition>nom,type,...",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "type": "nom",
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true,
+          "values": [
+            "tileAtPosition",
+            "spriteAtPosition",
+            "tileNearby",
+            "spriteNearby",
+            "memoryCheck",
+            "ppuMemoryCheck",
+            "memoryCheckConstant",
+            "ppuMemoryCheckConstant",
+            "frameRange",
+            "positionCheckX",
+            "positionCheckY",
+            "originPositionCheckX",
+            "originPositionCheckY"
+          ]
+        }
+      ],
+      "notes": "Déclare une condition (claude/19 § 5)."
+    },
+    {
+      "name": "<addition>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<addition>tuileOrig,paletteOrig,decalX,decalY,tuileAdd,paletteAdd[,ignorerPalette]",
+      "params": [
+        {
+          "name": "tuileOrig",
+          "src": "code",
+          "pos": 1,
+          "type": "hex",
+          "required": true
+        },
+        {
+          "name": "paletteOrig",
+          "src": "code",
+          "pos": 2,
+          "type": "hex8",
+          "required": true
+        },
+        {
+          "name": "decalX",
+          "src": "code",
+          "pos": 3,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "decalY",
+          "src": "code",
+          "pos": 4,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "tuileAdd",
+          "src": "code",
+          "pos": 5,
+          "type": "hex",
+          "required": true
+        },
+        {
+          "name": "paletteAdd",
+          "src": "code",
+          "pos": 6,
+          "type": "hex8",
+          "required": true
+        },
+        {
+          "name": "ignorerPalette",
+          "src": "code",
+          "pos": 7,
+          "values": [
+            "Y",
+            "N"
+          ]
+        }
+      ],
+      "notes": "Tuile supplémentaire superposée (107+)."
+    },
+    {
+      "name": "<fallback>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<fallback>tuile,palette",
+      "params": [
+        {
+          "name": "tuile",
+          "src": "code",
+          "pos": 1,
+          "type": "hex",
+          "required": true
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "pos": 2,
+          "type": "hex8",
+          "required": true
+        }
+      ],
+      "notes": "Tuile de repli (107+)."
+    },
+    {
+      "name": "<bgm>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<bgm>album,piste,fichier.ogg",
+      "params": [
+        {
+          "name": "album",
+          "src": "code",
+          "pos": 1,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "piste",
+          "src": "code",
+          "pos": 2,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 3,
+          "type": "chemin",
+          "required": true
+        }
+      ],
+      "notes": "Musique OGG préchargée."
+    },
+    {
+      "name": "<sfx>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<sfx>album,piste,fichier.ogg",
+      "params": [
+        {
+          "name": "album",
+          "src": "code",
+          "pos": 1,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "piste",
+          "src": "code",
+          "pos": 2,
+          "type": "int",
+          "required": true
+        },
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 3,
+          "type": "chemin",
+          "required": true
+        }
+      ],
+      "notes": "Effet sonore OGG préchargé."
+    },
+    {
+      "name": "<play_conditional_bgm>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<play_conditional_bgm>...",
+      "params": [],
+      "notes": "Reconnue par le loader ; syntaxe dans la source (claude/19 § 6)."
+    },
+    {
+      "name": "<play_conditional_sfx>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<play_conditional_sfx>...",
+      "params": [],
+      "notes": "Reconnue par le loader ; syntaxe dans la source (claude/19 § 6)."
+    },
+    {
+      "name": "<disable_8bits_Sound>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<disable_8bits_Sound>...",
+      "params": [],
+      "notes": "Reconnue par le loader ; syntaxe dans la source (claude/19 § 6)."
+    },
+    {
+      "name": "<video>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<video>fichier,mode,saut,une_fois,muet,boucle,X,Y,Z,alpha,etirer",
+      "params": [
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin",
+          "required": true,
+          "desc": "MPEG-1 (pl_mpeg)"
+        },
+        {
+          "name": "mode",
+          "src": "code",
+          "pos": 2,
+          "values": [
+            "play",
+            "pause"
+          ],
+          "desc": "lu, non appliqué"
+        },
+        {
+          "name": "saut",
+          "src": "code",
+          "pos": 3,
+          "values": [
+            "start",
+            "a",
+            "b",
+            "none"
+          ],
+          "desc": "lu, non appliqué"
+        },
+        {
+          "name": "une_fois",
+          "src": "code",
+          "pos": 4,
+          "values": [
+            "Y",
+            "N"
+          ]
+        },
+        {
+          "name": "muet",
+          "src": "code",
+          "pos": 5,
+          "values": [
+            "Y",
+            "N"
+          ]
+        },
+        {
+          "name": "boucle",
+          "src": "code",
+          "pos": 6,
+          "type": "int",
+          "desc": "-1 reprend au début, 0 s'arrête, N reprend à la frame N"
+        },
+        {
+          "name": "X",
+          "src": "code",
+          "pos": 7,
+          "type": "int"
+        },
+        {
+          "name": "Y",
+          "src": "code",
+          "pos": 8,
+          "type": "int"
+        },
+        {
+          "name": "Z",
+          "src": "code",
+          "pos": 9,
+          "type": "int",
+          "default": 99,
+          "range": "0-49"
+        },
+        {
+          "name": "alpha",
+          "src": "code",
+          "pos": 10,
+          "values": [
+            "Y",
+            "N"
+          ]
+        },
+        {
+          "name": "etirer",
+          "src": "code",
+          "pos": 11,
+          "values": [
+            "Y",
+            "N"
+          ]
+        }
+      ],
+      "notes": "Échelle Z des <background> (0 à 49), claude/19 § 4.6."
+    },
+    {
+      "name": "<2DOverlay>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<2DOverlay>effets\\fichier.json,Z=39,Layer=0,SpeedX=1,SpeedY=1,Alpha=1,FieldW=1,FieldH=1",
+      "params": [
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin",
+          "required": true,
+          "desc": "JSON de l'effet (clé \"type\")"
+        },
+        {
+          "name": "Z",
+          "src": "code",
+          "kv": true,
+          "type": "int",
+          "default": 39,
+          "range": "0-49"
+        },
+        {
+          "name": "Layer",
+          "src": "code",
+          "kv": true,
+          "type": "0|1",
+          "default": 0
+        },
+        {
+          "name": "SpeedX",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "SpeedY",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "Alpha",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 1,
+          "range": "0-1"
+        },
+        {
+          "name": "FieldW",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "min 0.25"
+        },
+        {
+          "name": "FieldH",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "min 0.25"
+        }
+      ],
+      "notes": "Effets particles, plainscreen, ellipse, shadows, clouds, fog, rays, aurora, distortion, torchlight (claude/19 § 4.7)."
+    },
+    {
+      "name": "<2DLiquid>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<2DLiquid>view=side|top,...",
+      "params": [
+        {
+          "name": "view",
+          "src": "code",
+          "kv": true,
+          "default": "side",
+          "values": [
+            "side",
+            "top"
+          ]
+        },
+        {
+          "name": "prio",
+          "src": "code",
+          "kv": true,
+          "type": "int",
+          "default": 40,
+          "range": "0-49"
+        },
+        {
+          "name": "ymin",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "ymax",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 240
+        },
+        {
+          "name": "level",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "depth",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "xmin",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "xmax",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "amplitude",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "wavelength",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "speed",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "phase",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "foam",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0-1"
+        },
+        {
+          "name": "alpha",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0-1"
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        },
+        {
+          "name": "deep",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        },
+        {
+          "name": "texture",
+          "src": "code",
+          "kv": true,
+          "type": "chemin"
+        },
+        {
+          "name": "texscale",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "scrollx",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "glow",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "glowradius",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "bubbles",
+          "src": "code",
+          "kv": true,
+          "type": "int"
+        },
+        {
+          "name": "bubblesize",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "bubblerise",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "mask",
+          "src": "code",
+          "kv": true,
+          "type": "0|1"
+        },
+        {
+          "name": "maskcolor",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        },
+        {
+          "name": "normal",
+          "src": "code",
+          "kv": true,
+          "type": "0|1"
+        },
+        {
+          "name": "specular",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 0.6,
+          "range": "0-1"
+        },
+        {
+          "name": "refract",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 4
+        }
+      ],
+      "notes": "Nappe de liquide. mask=1 et normal=1 : claude/19 § 4.11 (test en jeu à faire)."
+    },
+    {
+      "name": "<2DTexture>",
+      "status": "implemented",
+      "block": false,
+      "conditions": false,
+      "syntax": "<2DTexture>texture=fichier.png,color=RRGGBB|TRANS,prio=10,scalex=100,scaley=100,scrollx=0,scrolly=0",
+      "params": [
+        {
+          "name": "texture",
+          "src": "code",
+          "kv": true,
+          "type": "chemin",
+          "required": true
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB|TRANS",
+          "required": true
+        },
+        {
+          "name": "prio",
+          "src": "code",
+          "kv": true,
+          "type": "int",
+          "default": 10,
+          "range": "0-49"
+        },
+        {
+          "name": "scalex",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 100
+        },
+        {
+          "name": "scaley",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 100
+        },
+        {
+          "name": "scrollx",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 0
+        },
+        {
+          "name": "scrolly",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 0
+        }
+      ],
+      "notes": "Texture répétée qui remplace une couleur d'un <background> (claude/19 § 4.12). Pas de conditions."
+    },
+    {
+      "name": "<2DReflect>",
+      "status": "implemented",
+      "block": false,
+      "conditions": false,
+      "syntax": "<2DReflect>prio=10,intensity=0.5,fade=0",
+      "params": [
+        {
+          "name": "prio",
+          "src": "code",
+          "kv": true,
+          "type": "int",
+          "default": 10,
+          "range": "0-49"
+        },
+        {
+          "name": "intensity",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 0.5,
+          "range": "0-1"
+        },
+        {
+          "name": "fade",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 0
+        }
+      ],
+      "notes": "Reflet miroir des sprites sous le sol (claude/19 § 4.13). Pas de conditions."
+    },
+    {
+      "name": "<2DSpriteLight>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<2DSpriteLight>tuile,palette|*[,radius=48][,color=FFA040][,intensity=1.4][,flicker=0][,speed=9][,mode=add|shadow][,dx=0][,dy=0]",
+      "params": [
+        {
+          "name": "tuile",
+          "src": "code",
+          "pos": 1,
+          "type": "hex",
+          "required": true
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "pos": 2,
+          "type": "hex8|*",
+          "required": true
+        },
+        {
+          "name": "radius",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 48
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        },
+        {
+          "name": "intensity",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 1.4
+        },
+        {
+          "name": "flicker",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0-1"
+        },
+        {
+          "name": "speed",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 9
+        },
+        {
+          "name": "mode",
+          "src": "code",
+          "kv": true,
+          "default": "add",
+          "values": [
+            "add",
+            "shadow"
+          ]
+        },
+        {
+          "name": "dx",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 0
+        },
+        {
+          "name": "dy",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "default": 0
+        }
+      ],
+      "notes": "Halo au centre de chaque sprite reconnu (claude/19 § 4.10)."
+    },
+    {
+      "name": "<2DPerspective>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<2DPerspective>...",
+      "params": [],
+      "notes": "Voir claude/26_2DPerspective.md ; paramètres non détaillés ici."
+    },
+    {
+      "name": "<Ignore2DOverlays>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "[cond]<Ignore2DOverlays>tuile[,palette] ou bloc { ... }",
+      "params": [
+        {
+          "name": "tuile",
+          "src": "code",
+          "pos": 1,
+          "type": "hex"
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "pos": 2,
+          "type": "hex8|*"
+        }
+      ],
+      "notes": "Pixels nets pendant une distorsion (claude/19 § 4.9)."
+    },
+    {
+      "name": "<include>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<include>chemin",
+      "params": [
+        {
+          "name": "chemin",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin",
+          "required": true
+        }
+      ],
+      "notes": "Insère un autre fichier (fork)."
+    },
+    {
+      "name": "<alias>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<alias>Nom,valeur",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "valeur",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Remplacement textuel de @Nom (fork)."
+    },
+    {
+      "name": "<watchMemoryAddress>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<watchMemoryAddress>nom,adresse[,taille][,signed]",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "type": "nom",
+          "required": true
+        },
+        {
+          "name": "adresse",
+          "src": "code",
+          "pos": 2,
+          "type": "hex",
+          "required": true
+        },
+        {
+          "name": "taille",
+          "src": "code",
+          "pos": 3,
+          "values": [
+            "1",
+            "2"
+          ]
+        },
+        {
+          "name": "signe",
+          "src": "code",
+          "pos": 4,
+          "values": [
+            "signed",
+            "unsigned"
+          ]
+        }
+      ],
+      "notes": "Valeur RAM nommée, lue une fois par image (doc 46)."
+    },
+    {
+      "name": "<Diorama>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<Diorama>plainTiles,z0=..,z1=..,z3=..",
+      "params": [
+        {
+          "name": "mode",
+          "src": "code",
+          "pos": 1,
+          "required": true,
+          "values": [
+            "plainTiles"
+          ]
+        },
+        {
+          "name": "z0",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "z1",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "z3",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        }
+      ],
+      "notes": "Diorama NES. Clés complètes dans ProcessDioramaTag ; à compléter (claude/45, 47)."
+    },
+    {
+      "name": "<DioramaDepth>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaDepth>z=..,t=..[,rect=x,y,l,h]{ ... }",
+      "params": [
+        {
+          "name": "z",
+          "src": "code",
+          "kv": true,
+          "type": "int",
+          "default": 0
+        },
+        {
+          "name": "t",
+          "src": "code",
+          "kv": true,
+          "type": "int",
+          "range": "0-16"
+        },
+        {
+          "name": "rect",
+          "src": "code",
+          "kv": true,
+          "type": "x,y,largeur,hauteur"
+        }
+      ],
+      "notes": "Groupe de profondeur (doc 38). Forme bloc { } possible."
+    },
+    {
+      "name": "<DioramaShadow>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaShadow>options{ ... }",
+      "params": [
+        {
+          "name": "opacity",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "soft",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        },
+        {
+          "name": "light",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "onto",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "tile",
+          "src": "code",
+          "kv": true,
+          "type": "hex"
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "kv": true,
+          "type": "hex8|*"
+        }
+      ],
+      "notes": "Ombres des sprites (doc 42, 43). Forme bloc { } possible."
+    },
+    {
+      "name": "<DioramaObject>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaObject>fichier.obj,tex=..,lit=on|off,shadow=on|off,occlude=on|off,...",
+      "params": [
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin",
+          "required": true,
+          "desc": "modèle .obj"
+        },
+        {
+          "name": "tex",
+          "src": "code",
+          "kv": true,
+          "type": "chemin"
+        },
+        {
+          "name": "lit",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "name": "shadow",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "name": "occlude",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "name": "scrollx",
+          "src": "code",
+          "kv": true,
+          "type": "expr"
+        },
+        {
+          "name": "scrolly",
+          "src": "code",
+          "kv": true,
+          "type": "expr"
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        },
+        {
+          "name": "x",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "y",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "z",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "refz",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "-4096 à 4096"
+        },
+        {
+          "name": "scale",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0-4096"
+        },
+        {
+          "name": "rotx",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "roty",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "rotz",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "spin",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "window",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0-4096"
+        }
+      ],
+      "notes": "Objet 3D de décor (doc 45)."
+    },
+    {
+      "name": "<DioramaNormal>",
+      "status": "implemented",
+      "block": false,
+      "conditions": false,
+      "syntax": "<DioramaNormal>albedo.png,normal.png",
+      "params": [
+        {
+          "name": "albedo",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin",
+          "required": true
+        },
+        {
+          "name": "normal",
+          "src": "code",
+          "pos": 2,
+          "type": "chemin",
+          "required": true
+        }
+      ],
+      "notes": "Carte de normales (doc 44). Pas de conditions."
+    },
+    {
+      "name": "<DioramaLight>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaLight>type=ambient|point|sun,...",
+      "params": [
+        {
+          "name": "type",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "ambient",
+            "point",
+            "sun"
+          ]
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        },
+        {
+          "name": "intensity",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "radius",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "tile",
+          "src": "code",
+          "kv": true,
+          "type": "hex"
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "kv": true,
+          "type": "hex8|*"
+        },
+        {
+          "name": "flicker",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "speed",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "offx",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "offy",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "glow",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "glowradius",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "x",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "y",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "z",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "dx",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "dy",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        },
+        {
+          "name": "dz",
+          "src": "code",
+          "kv": true,
+          "type": "float"
+        }
+      ],
+      "notes": "Lumières de scène ou attachées à une tile (doc 42)."
+    },
+    {
+      "name": "<DioramaCamera>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaCamera>nom,yaw=..,pitch=..,dist=..,zoom=..,time=..,key=..,default=on|off",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "yaw",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "-70 à 70"
+        },
+        {
+          "name": "pitch",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "-70 à 70"
+        },
+        {
+          "name": "dist",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "16 à 100000"
+        },
+        {
+          "name": "zoom",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0.1 à 4"
+        },
+        {
+          "name": "time",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0 à 1000"
+        },
+        {
+          "name": "key",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "default",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        }
+      ],
+      "notes": "Caméra nommée (doc 49)."
+    },
+    {
+      "name": "<DioramaCameraDefault>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaCameraDefault>...",
+      "params": [],
+      "notes": "Caméra par défaut selon conditions (doc 49). Clés à compléter."
+    },
+    {
+      "name": "<DioramaCameraKeys>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaCameraKeys>next=..,prev=..,default=..",
+      "params": [
+        {
+          "name": "next",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "prev",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "default",
+          "src": "code",
+          "kv": true
+        }
+      ],
+      "notes": "Touches de changement de caméra (doc 49)."
+    },
+    {
+      "name": "<DioramaPad>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaPad>left=..,right=..,port=1-4,...",
+      "params": [
+        {
+          "name": "left",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "rot",
+            "rotation",
+            "zoom",
+            "off",
+            "none"
+          ]
+        },
+        {
+          "name": "right",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "rot",
+            "rotation",
+            "zoom",
+            "off",
+            "none"
+          ]
+        },
+        {
+          "name": "port",
+          "src": "code",
+          "kv": true,
+          "type": "int",
+          "range": "1-4"
+        },
+        {
+          "name": "yawmax",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0-70"
+        },
+        {
+          "name": "pitchmax",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0-70"
+        },
+        {
+          "name": "zoomrange",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "1-4"
+        },
+        {
+          "name": "dead",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0-0.9"
+        },
+        {
+          "name": "smooth",
+          "src": "code",
+          "kv": true,
+          "type": "float",
+          "range": "0.01-1"
+        },
+        {
+          "name": "invx",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "name": "invy",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        }
+      ],
+      "notes": "Manette analogique : yaw, pitch, zoom (doc 48)."
+    },
+    {
+      "name": "<DioramaSkybox>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaSkybox>color,skytop=..,skybottom=.. | pano,... | cube,...",
+      "params": [
+        {
+          "name": "mode",
+          "src": "code",
+          "pos": 1,
+          "required": true,
+          "values": [
+            "color",
+            "pano",
+            "cube"
+          ]
+        },
+        {
+          "name": "skytop",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        },
+        {
+          "name": "skybottom",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        }
+      ],
+      "notes": "Ciel : couleur, panorama ou cubemap (doc 41). Clés des faces à compléter."
+    },
+    {
+      "name": "<DioramaExtend>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaExtend>side=top+bottom+left+right|all,layer=..,mode=stretch|clamp|repeat|mirror|wrap|color,size=..",
+      "params": [
+        {
+          "name": "side",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "top",
+            "bottom",
+            "left",
+            "right",
+            "all"
+          ]
+        },
+        {
+          "name": "layer",
+          "src": "code",
+          "kv": true,
+          "type": "int"
+        },
+        {
+          "name": "mode",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "stretch",
+            "clamp",
+            "repeat",
+            "mirror",
+            "wrap",
+            "color"
+          ]
+        },
+        {
+          "name": "size",
+          "src": "code",
+          "kv": true,
+          "type": "int"
+        },
+        {
+          "name": "band",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "edge",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "rows",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "cols",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "fog",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "fogdist",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "hex RRGGBB"
+        }
+      ],
+      "notes": "Complétion de l'écran (doc 40)."
+    },
+    {
+      "name": "<DioramaOffCamera>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaOffCamera>...",
+      "params": [],
+      "notes": "Tranches hors caméra (doc 38). Clés à compléter."
+    },
+    {
+      "name": "<DioramaIgnore>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaIgnore>...",
+      "params": [],
+      "notes": "Clés à compléter (ProcessDioramaIgnore)."
+    }
+  ],
+  "conditionTypes": [
+    {
+      "name": "tileAtPosition",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "spriteAtPosition",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "tileNearby",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "spriteNearby",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "memoryCheck",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "ppuMemoryCheck",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "memoryCheckConstant",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "ppuMemoryCheckConstant",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "frameRange",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "positionCheckX",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "positionCheckY",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "originPositionCheckX",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    },
+    {
+      "name": "originPositionCheckY",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "required": true
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "pos": 2,
+          "required": true
+        }
+      ],
+      "notes": "Type de condition NES (claude/19 § 5)."
+    }
+  ],
+  "notRecognizedByLoader": [],
+  "planned": [],
+  "matching": {
+    "caseInsensitive": [
+      "<2DTexture>",
+      "<2DReflect>",
+      "<2DSpriteLight>",
+      "<Ignore2DOverlays>",
+      "<watchMemoryAddress>",
+      "<Diorama>",
+      "<DioramaDepth>",
+      "<DioramaShadow>",
+      "<DioramaObject>",
+      "<DioramaNormal>",
+      "<DioramaLight>",
+      "<DioramaCamera>",
+      "<DioramaCameraDefault>",
+      "<DioramaCameraKeys>",
+      "<DioramaPad>",
+      "<DioramaSkybox>",
+      "<DioramaExtend>",
+      "<DioramaOffCamera>",
+      "<DioramaIgnore>"
+    ]
+  }
+}

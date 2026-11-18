@@ -53,8 +53,8 @@ function bareName(s: string): string {
     return first.replace(/^</, '').replace(/>$/, '').toLowerCase();
 }
 
-export function loadSchema(extensionRoot: string): Schema {
-    const file = path.join(extensionRoot, 'schemas', '29_schema_balises_snes.json');
+export function loadSchema(extensionRoot: string, fileName: string): Schema {
+    const file = path.join(extensionRoot, 'schemas', fileName);
     const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
     const tags: SchemaTag[] = (raw.tags as Array<Record<string, unknown>>).map(t => {
         const name = String(t.name);

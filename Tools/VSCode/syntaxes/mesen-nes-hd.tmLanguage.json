@@ -1,0 +1,98 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mesen HD Pack (NES)",
+  "scopeName": "source.mesen-nes-hd",
+  "comment": "Généré par scripts/generate-grammar.py depuis schemas/schema_balises_nes.json. Ne pas éditer à la main.",
+  "patterns": [
+    {
+      "name": "comment.line.number-sign.mesen-nes-hd",
+      "match": "#.*$"
+    },
+    {
+      "name": "meta.condition.mesen-nes-hd",
+      "begin": "^\\s*\\[",
+      "end": "\\]",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.condition.begin.mesen-nes-hd"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.condition.end.mesen-nes-hd"
+        }
+      },
+      "patterns": [
+        {
+          "name": "keyword.operator.and.mesen-nes-hd",
+          "match": "&"
+        },
+        {
+          "name": "keyword.operator.not.mesen-nes-hd",
+          "match": "!"
+        },
+        {
+          "name": "support.function.condition.mesen-nes-hd",
+          "match": "\\b(?:ppuMemoryCheckConstant|originPositionCheckY|originPositionCheckX|memoryCheckConstant|spriteAtPosition|ppuMemoryCheck|positionCheckY|positionCheckX|tileAtPosition|spriteNearby|memoryCheck|tileNearby|frameRange)\\b"
+        },
+        {
+          "name": "constant.numeric.hash.mesen-nes-hd",
+          "match": "\\b[0-9A-Fa-f]{8,16}\\b"
+        },
+        {
+          "name": "constant.numeric.mesen-nes-hd",
+          "match": "-?\\d+(?:\\.\\d+)?"
+        },
+        {
+          "name": "keyword.operator.or.mesen-nes-hd",
+          "match": "\\|"
+        }
+      ]
+    },
+    {
+      "name": "punctuation.section.block.mesen-nes-hd",
+      "match": "\\}>?|\\{"
+    },
+    {
+      "name": "keyword.control.tag.mesen-nes-hd",
+      "match": "<(?:play_conditional_sfx|play_conditional_bgm|disable_8bits_Sound|2DPerspective|tile_hvflip|tile_hflip|background|tile_vflip|condition|2DOverlay|addition|fallback|overscan|2DLiquid|include|options|alias|video|scale|patch|tile|ver|img|sfx|bgm)>"
+    },
+    {
+      "name": "keyword.control.tag.mesen-nes-hd",
+      "match": "(?i:<(?:DioramaCameraDefault|watchMemoryAddress|DioramaCameraKeys|DioramaOffCamera|Ignore2DOverlays|DioramaIgnore|DioramaSkybox|2DSpriteLight|DioramaNormal|DioramaExtend|DioramaShadow|DioramaObject|DioramaCamera|DioramaLight|DioramaDepth|DioramaPad|2DTexture|2DReflect|Diorama)>)"
+    },
+    {
+      "name": "invalid.illegal.tag.mesen-nes-hd",
+      "match": "<[^>\\s]*>"
+    },
+    {
+      "name": "variable.parameter.mesen-nes-hd",
+      "match": "(?<=[,>\\s])[A-Za-z_]\\w*(?==)"
+    },
+    {
+      "name": "string.unquoted.path.mesen-nes-hd",
+      "match": "[^\\s,\\[\\]{}<>=|#]+\\.(?i:png|ogg|json|obj|mtl|gltf|glb|mpg|mp4|txt|mesen)\\b"
+    },
+    {
+      "name": "constant.numeric.hash.mesen-nes-hd",
+      "match": "\\b[0-9A-Fa-f]{8,16}\\b"
+    },
+    {
+      "name": "constant.numeric.mesen-nes-hd",
+      "match": "(?<![\\w.])-?\\d+(?:\\.\\d+)?\\b"
+    },
+    {
+      "name": "constant.language.boolean.mesen-nes-hd",
+      "match": "\\b(?i:true|false|yes|no)\\b"
+    },
+    {
+      "name": "keyword.operator.wildcard.mesen-nes-hd",
+      "match": "\\*"
+    },
+    {
+      "name": "keyword.operator.or.mesen-nes-hd",
+      "match": "\\|"
+    }
+  ],
+  "repository": {}
+}
