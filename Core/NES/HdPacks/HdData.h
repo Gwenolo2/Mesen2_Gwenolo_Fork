@@ -527,6 +527,7 @@ struct HdBackgroundInfo
 	int DioTarget = -1;
 	int DioWideX = 0, DioWideY = 0; // diorama, fond sur L0 : marge (pixels NES) dessinee au-dela de l'ecran a gauche / droite (wide=) et en haut / en bas (tall=)
 
+	float DioIncl = 0.0f;   // diorama topDown : inclinaison du fond (degres ; 0 = parallele au sol, 90 = parallele a l'ecran ; option inclinaison=)
 	// <background> etendu (NES) : repetition, animation par dossier, operateur de defilement
 	bool TileX = false;
 	bool TileY = false;
@@ -966,6 +967,7 @@ struct HdDioramaDepthGroup
 	bool HasRect = false;
 	int X = 0, Y = 0, W = 0, H = 0;
 	HdDioramaWallTex Wall;  // G3b2 : options side=, top=, stretchx=, stretchy=...
+	bool WorldTex = false;  // worldtex=on : les tiles du groupe prennent la couleur du fond L0 aux memes coordonnees monde (doc 53)
 };
 
 // <DioramaExtend>side=..,layer=..,mode=..,size=..,band=.. (doc 40) : complete l'ecran au-dela de ses bords (marge de Size pixels NES)
@@ -1148,6 +1150,7 @@ struct HdDioramaSkyboxRule
 	uint32_t Top = 0, Bottom = 0;
 	HdPackBitmapInfo* Image = nullptr;
 	float SpeedX = 0.0f, SpeedY = 0.0f;
+	float PitchOffset = 0.0f; bool HasOffset = false; // offset=<deg> : decalage du ciel (pitch), si HasOffset ; sinon defaut selon la vue
 	vector<HdPackCondition*> Conditions;
 };
 

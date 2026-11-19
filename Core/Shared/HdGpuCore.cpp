@@ -430,6 +430,7 @@ uniform vec2 uOut;      // taille de l'image (pixels HD)
 uniform vec4 uR;        // G3c : partie du plan couverte (origine xy, taille zw, en fraction) ; (0,0,1,1) = tout le plan
 uniform int uZb;        // occlude=on : ecrit la profondeur (meme formule que les objets 3D) pour le test contre eux
 uniform int uFlat;     // doc 53 (topDown) : 1 = couche posee a plat (sol) : uZ = hauteur, l'axe vertical de l'image devient la profondeur
+uniform float uIncC, uIncS; // doc 53 : cos et sin de l'inclinaison du plan a plat (0 = parallele au sol, 90 = parallele a l'ecran)
 out vec2 vUV;
 void main()
 {
@@ -437,7 +438,7 @@ void main()
 	vec2 uv = q[gl_VertexID];
 	float k = uFlat != 0 ? 1.0 : (uKFix > 0.0 ? uKFix : (uD + uZ) / uD);
 	vec2 pv = uR.xy + uv * uR.zw;
-	vec3 P = uFlat != 0 ? vec3((pv.x - 0.5) * uSize.x * k, uZ, -(pv.y - 0.5) * uSize.y * k) : vec3((pv.x - 0.5) * uSize.x * k, (pv.y - 0.5) * uSize.y * k, uZ);
+	vec3 P = uFlat != 0 ? vec3((pv.x - 0.5) * uSize.x, -uZ * uIncC + (pv.y - 0.5) * uSize.y * uIncS, uZ * uIncS - (pv.y - 0.5) * uSize.y * uIncC) : vec3((pv.x - 0.5) * uSize.x * k, (pv.y - 0.5) * uSize.y * k, uZ);
 	vec3 c = vec3(dot(uRt0, P), dot(uRt1, P), dot(uRt2, P)) + vec3(0.0, 0.0, uD);
 	float dpt = max(c.z, 1.0);
 	vec2 s = uO + c.xy * (uD / dpt) * uZoom;
@@ -945,6 +946,7 @@ uniform vec3 uRt0, uRt1, uRt2; // rotation de la camera de la scene
 uniform float uD, uZoom, uPxNes; // focale (pixels NES), zoom, pixels dessines par pixel NES
 uniform vec2 uO;        // centre de la vue (pixels NES)
 uniform vec2 uRot;      // decalage de yaw / pitch du fond (radians)
+uniform float uCamPitch; // G5c : decalage de pitch dans le repere de la camera (radians), axe horizontal de l'ecran
 uniform int uCubeLayout;
 uniform vec4 uGlow;     // G6a : halo (mode 5) : x, y centre (pixels dessines, origine en haut a gauche), z rayon, w intensite
 layout(location = 0) out vec4 oColor;
@@ -952,6 +954,8 @@ vec3 SkyDir()
 {
 	vec2 off = (vec2(gl_FragCoord.x, uOut.y - gl_FragCoord.y) / uPxNes - uO) / uZoom;
 	vec3 cam = vec3(off, uD);
+	float ct = cos(uCamPitch), st = sin(uCamPitch);
+	cam = vec3(cam.x, cam.y * ct - cam.z * st, cam.y * st + cam.z * ct);
 	vec3 d = cam.x * uRt0 + cam.y * uRt1 + cam.z * uRt2;   // monde = transposee de la rotation de la camera
 	float cy = cos(uRot.x), sy = sin(uRot.x);
 	d = vec3(d.x * cy + d.z * sy, d.y, -d.x * sy + d.z * cy);
@@ -1241,6 +1245,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			G.Uniform1f(US("uPxNes"), sc.Scale * (float)aa);
 			G.Uniform2f(US("uO"), sc.W * 0.5f + oPadNes, sc.H * 0.5f);
 			G.Uniform2f(US("uRot"), sc.Sky.RotYaw * kDeg, sc.Sky.RotPitch * kDeg);
+			G.Uniform1f(US("uCamPitch"), sc.Sky.CamPitch * kDeg);
 			G.Uniform1i(US("uCubeLayout"), sc.Sky.CubeLayout);
 			if(skyTex) {
 				G.ActiveTexture(GL_TEXTURE0);
@@ -1377,7 +1382,16 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	for(int oi = 0; oi < sc.Objects.Count && oi < 8; oi++) { // H1 : objets 3D, ranges avec les tranches selon leur profondeur
 		slices[sliceCount++] = { sc.Objects.O[oi].Occlude ? 1.0e9f : sc.Objects.O[oi].Pos[2], 100 + oi, 1.0f, 0.0f };
 	}
-	std::stable_sort(slices, slices + sliceCount, [](const Slice& a, const Slice& b) { return a.Z > b.Z; });
+	// doc 53 : couches a plat (sol, murs) d'abord, du plus bas au plus haut ; puis les plans verticaux (sprites), du plus loin au plus pres
+	auto flatSlice = [&](const Slice& s) {
+		if(s.Layer >= 300) return s.Layer - 300 < sc.BgCount && sc.Bg[s.Layer - 300].Flat;
+		return s.Layer >= 0 && s.Layer < 12 && ((sc.FlatMask >> s.Layer) & 1u) != 0;
+	};
+	std::stable_sort(slices, slices + sliceCount, [&](const Slice& a, const Slice& b) {
+		const bool fa = flatSlice(a), fb = flatSlice(b);
+		if(fa != fb) return fa;
+		return fa ? a.Z < b.Z : a.Z > b.Z;
+	});
 	// H1 : dessin d'un objet 3D (programme de maillage, profondeur propre a l'image), puis retour a l'etat des tranches
 	bool objDepthOn = false;
 	bool occlOn = false;   // occlude=on : les tranches suivantes sont testees contre la profondeur des objets
@@ -1582,6 +1596,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			G.Uniform1f(locVolThick, wl.VolThick);
 			G.Uniform1i(locShOn, (shadowOn && ((sc.Shadow.OntoMask >> lay) & 1u)) ? 1 : 0);
 			G.Uniform1i(U("uFlat"), ((sc.FlatMask >> lay) & 1u) ? 1 : 0); // doc 53 : couche a plat (sol topDown)
+			G.Uniform1f(U("uIncC"), 1.0f); G.Uniform1f(U("uIncS"), 0.0f);
 			{ // G6d : carte de normales de la couche (L2 -> 0, L3 -> 1, groupes 4 a 7 -> 2 a 5)
 				const int ni = lay == 2 ? 0 : (lay == 3 ? 1 : (lay >= 4 ? lay - 2 : -1));
 				if(ni >= 0 && nrmOk[ni]) {
@@ -1606,6 +1621,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 				G.Uniform1i(locExt, 0);
 				G.Uniform4f(locBgP, bp.OffX, bp.OffY, sc.BgYStart, bp.Bright);
 				G.Uniform2f(locBgTile, bp.TileX ? 1.0f : 0.0f, bp.TileY ? 1.0f : 0.0f);
+				G.Uniform1i(U("uFlat"), bp.Flat ? 1 : 0); G.Uniform1f(U("uIncC"), bp.InclC); G.Uniform1f(U("uIncS"), bp.InclS); // doc 53
 			}
 			boundLayer = s.Layer;
 		}

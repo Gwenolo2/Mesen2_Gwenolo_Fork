@@ -2713,6 +2713,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 	}
 	// G3e : groupe de profondeur de la tile de fond (bloc : marque de la tile ; rect= : position). Sprites non concernes.
 	uint32_t* tileTarget = l2;
+	int worldGroup = -1; // doc 53 : groupe avec worldtex=on, pour la tile courante
 	int tileNrm = 0; // G6d : tampon de normales de la couche de la tile (0 = L2, 2 a 5 = groupes)
 	if(!_hdData->DioramaDepthGroups.empty() && l2 != l4) {
 		int g = hdPackTileInfo ? (int)hdPackTileInfo->DioDepthGroup : 0;
@@ -2722,6 +2723,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 		if(g > 0 && g <= DioGroups && !(hdPackTileInfo && hdPackTileInfo->DioOffCamera)) {
 			tileTarget = _dioG[g - 1].data() + offset;
 			tileNrm = 1 + g;
+			if((size_t)(g - 1) < _hdData->DioramaDepthGroups.size() && _hdData->DioramaDepthGroups[g - 1].WorldTex) worldGroup = g - 1;
 			_dioGLines[g - 1][y] = 1;
 		}
 	}
@@ -2781,6 +2783,28 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 
 	if(hdPackTileInfo) {
 		if(!hdPackTileInfo->DioIgnore) DrawTileLayer(pixelInfo.Tile, *hdPackTileInfo, (l4 && hdPackTileInfo->DioOffCamera) ? l4 : tileTarget, screenWidth);
+		// doc 53 : worldtex=on : le fond L0 est recalcule ici aux memes coordonnees (meme DrawBackgroundLayer, donc memes ramx / ramy),
+		// puis copie sur les pixels opaques du groupe. La forme de la tile sert de masque.
+		if(worldGroup >= 0 && lineCfg && !hdPackTileInfo->DioIgnore && !(l4 && hdPackTileInfo->DioOffCamera)) {
+			const HdBgConfig* wc = nullptr;
+			for(int i = 0; i < _activeBgCount[0] && !wc; i++) {
+				const HdBgConfig& c = lineCfg[i];
+				if(c.BackgroundIndex < 0) continue;
+				const int t = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex].DioTarget;
+				if(t == -1 || t == 0) wc = &c;
+			}
+			if(wc) {
+				if(_dioWorldTmp.size() != _dioG[worldGroup].size()) _dioWorldTmp.assign(_dioG[worldGroup].size(), 0u);
+				uint32_t* tmp = _dioWorldTmp.data() + offset;
+				for(uint32_t yy = 0; yy < scale; yy++) for(uint32_t xx = 0; xx < scale; xx++) tmp[yy * screenWidth + xx] = 0u;
+				DrawBackgroundLayer(*wc, x, y, tmp, screenWidth);
+				for(uint32_t yy = 0; yy < scale; yy++) for(uint32_t xx = 0; xx < scale; xx++) {
+					uint32_t& d = tileTarget[yy * screenWidth + xx];
+					const uint32_t s = tmp[yy * screenWidth + xx];
+					if(d != 0 && (s >> 24) != 0) d = s | 0xFF000000u;
+				}
+			}
+		}
 		// G6d : normales de la tile (couches normales seulement)
 		if(!_dioNrm[0].empty() && hdPackTileInfo->NormalBitmap && !hdPackTileInfo->NormalTileData.empty() && !hdPackTileInfo->DioIgnore && tileTarget != l4 && !(l4 && hdPackTileInfo->DioOffCamera)) {
 			DrawNormalLayer(pixelInfo.Tile, *hdPackTileInfo, _dioNrm[tileNrm].data() + offset, screenWidth);
@@ -2891,6 +2915,7 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 				HdBackgroundInfo& bi = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
 				DioGpuBg& g = _dioGpuBg[_dioGpuBgN++];
 				g.Prio = c.BgPriority; g.Index = c.BackgroundIndex;
+				g.Incl = bi.DioIncl;
 				g.Pix = bi.data(); g.W = bi.Data->Width; g.H = bi.Data->Height;
 				g.OffX = (float)(((int64_t)bi.Left + c.BgScrollX) * (int64_t)hdScale);
 				g.OffY = (float)(((int64_t)bi.Top + c.BgScrollY) * (int64_t)hdScale);
@@ -3245,9 +3270,10 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 	scene.D = dist;
 	scene.Yaw = yaw; scene.Pitch = pitch;
 	for(int k = 0; k < 4; k++) { scene.PlaneZ[k] = cfg.Z[k]; scene.Thick[k] = cfg.T[k] * 8.0f; } // G3b1 : tiles -> pixels NES
+	if(_dioTopDown) scene.PlaneZ[0] = 0.0f; // doc 53 : sol topDown, L0 au niveau du sol
 	scene.Scale = (float)GetScale();
 	scene.Aa = cfg.Aa; // G3f
-	scene.FlatMask = _dioTopDown ? (1u << 2) : 0u; // doc 53 : sol a plat = decor L2 seul pour ce test
+	scene.FlatMask = _dioTopDown ? ((1u << 0) | (1u << 2) | 0xFF0u) : 0u; // doc 53 : sol a plat = L0, decor L2 et groupes <DioramaDepth> (bits 4..11)
 	scene.Clear = _dioL[0].empty() ? 0xFF000000u : (_dioL[0][0] | 0xFF000000u);
 	if(_dioL4Rows && _dioL4.size() >= pixels) { scene.Fixed = _dioL4.data(); scene.FixedY0 = _dioL4Y0; scene.FixedRows = _dioL4Rows; } // G3c
 	if(scene.Fixed && _hdData->DioramaFixed3d) { // G3c3 : plaque epaisse
@@ -3415,6 +3441,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 		const DioGpuBg& g = _dioGpuBg[i];
 		HdDioramaBgPlane& bp = scene.Bg[i];
 		bp.Pix = g.Pix; bp.W = g.W; bp.H = g.H; bp.OffX = g.OffX; bp.OffY = g.OffY; bp.Bright = g.Bright; bp.TileX = g.TileX; bp.TileY = g.TileY;
+		bp.Flat = _dioTopDown; const float incR = g.Incl * 3.14159265f / 180.0f; bp.InclC = std::cos(incR); bp.InclS = std::sin(incR); // doc 53
 	}
 	// Fonds <background> de L0 prolonges au-dela de l'ecran (bandes widescreen et marges wide= / tall= pour la rotation de la camera) :
 	// L0 elargie, centre = L0, marges = les memes fonds.
@@ -3543,7 +3570,8 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 					_dioSkyX += chosen->SpeedX; _dioSkyY += chosen->SpeedY;
 					scene.Sky.Mode = chosen->Mode;
 					scene.Sky.Pix = pix; scene.Sky.W = sw; scene.Sky.H = sh;
-					scene.Sky.RotYaw = _dioSkyX; scene.Sky.RotPitch = _dioSkyY; scene.Sky.CubeLayout = layout;
+					const float skyOff = chosen->HasOffset ? chosen->PitchOffset : (_dioTopDown ? 45.0f : 0.0f); // offset= du pack ; sinon 45 deg en topDown, 0 en side
+					scene.Sky.RotYaw = _dioSkyX; scene.Sky.RotPitch = _dioSkyY; scene.Sky.CamPitch = skyOff; scene.Sky.CubeLayout = layout;
 				}
 			} else if(chosen->Image) {
 				chosen->Image->Init();

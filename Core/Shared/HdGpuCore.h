@@ -71,6 +71,7 @@ struct HdDioramaSky
 	// G5b : modes 3 (panorama equirectangulaire) et 4 (cubemap) : tournent avec la camera de la scene. Rot = decalage de yaw / pitch (degres).
 	// CubeLayout : 1 croix 4 x 3, 2 croix 3 x 4, 3 bande 6 x 1, 4 bande 1 x 6 (faces dans l'ordre gauche, devant, droite, derriere, haut, bas).
 	float RotYaw = 0.0f, RotPitch = 0.0f;
+	float CamPitch = 0.0f; // G5c : inclinaison fixe du ciel (degres) dans le repere de la camera (offset= du pack)
 	int CubeLayout = 1;
 };
 
@@ -151,6 +152,7 @@ struct HdDioramaBgPlane
 	float OffX = 0, OffY = 0;                               // (left + defilement) x echelle, (top + defilement) x echelle
 	float Bright = 1.0f;                                    // luminosite 0..1
 	bool TileX = false, TileY = false;
+	bool Flat = false; float InclC = 1.0f, InclS = 0.0f; // doc 53 : fond a plat (topDown) et cos / sin de son inclinaison
 };
 
 struct HdDioramaScene

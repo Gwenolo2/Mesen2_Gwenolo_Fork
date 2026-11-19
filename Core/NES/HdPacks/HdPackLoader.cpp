@@ -1286,6 +1286,7 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 	}
 	// Option nommee dio=off|l0..l3|g1..g4 : cible du fond dans le diorama (doc 50), retiree avant la lecture positionnelle
 	int bgDio = -1;
+	float bgIncl = 0.0f;
 	int bgWideX = 0, bgWideY = 0;
 	for(size_t ti = 1; ti < tokens.size(); ) {
 		string tk = StringUtilities::Trim(tokens[ti]);
@@ -1295,6 +1296,9 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 				const int n = std::max(0, std::min(1024, std::stoi(low.substr(5))));
 				if(low[0] == 'w') bgWideX = n; else bgWideY = n;
 			} catch(...) { logError("Background : " + low.substr(0, 4) + "= attend un nombre de pixels NES, option ignoree."); }
+			tokens.erase(tokens.begin() + ti);
+		} else if(low.compare(0, 12, "inclinaison=") == 0 || low.compare(0, 12, "inclination=") == 0) { // doc 53 : graphie francaise ou anglaise
+			try { bgIncl = std::max(-90.0f, std::min(90.0f, std::stof(low.substr(12)))); } catch(...) { logError("Background : inclinaison= attend un angle en degres, option ignoree."); }
 			tokens.erase(tokens.begin() + ti);
 		} else if(low.compare(0, 4, "dio=") == 0) {
 			const string v = low.substr(4);
@@ -1394,6 +1398,7 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 		backgroundInfo.ScrollXExpr = bgExprX;
 		backgroundInfo.ScrollYExpr = bgExprY;
 		backgroundInfo.DioTarget = bgDio;
+		backgroundInfo.DioIncl = bgIncl;
 		backgroundInfo.DioWideX = bgWideX; backgroundInfo.DioWideY = bgWideY;
 		backgroundInfo.BlendMode = HdPackBlendMode::Alpha;
 		if(!_ign2dBlockStack.empty()) {
@@ -2251,6 +2256,8 @@ bool HdPackLoader::ParseDioramaDepthOptions(vector<string>& tokens, HdDioramaDep
 			}
 		} else if(ParseDioramaWallOption(key, val, group.Wall)) {
 			// cle de mur reconnue : side, top, stretchx, stretchy, topstretchx, topstretchy, sidestretchx, sidestretchy
+		} else if(key == "worldtex") {
+			group.WorldTex = (val == "on" || val == "true" || val == "1"); // doc 53 : fond L0 projete sur le groupe
 		} else if(key == "rect") {
 			int v[4] = {};
 			bool ok = DioParseInt(val, v[0]) && i + 3 < tokens.size();
@@ -3085,6 +3092,15 @@ void HdPackLoader::ProcessDioramaSkyboxTag(vector<string>& tokens, vector<HdPack
 	}
 	HdDioramaSkyboxRule rule;
 	rule.Conditions = conditions;
+	// offset=<deg> : decalage angulaire du ciel (pitch) en degres. Lu avant les vitesses. Absent : defaut selon la vue (topDown ou side), voir HdNesPack.cpp.
+	for(size_t ti = 1; ti < tokens.size();) {
+		const string opt = StringUtilities::Trim(tokens[ti]);
+		if(StringUtilities::ToLower(opt).compare(0, 7, "offset=") == 0) {
+			try { rule.PitchOffset = std::max(-180.0f, std::min(180.0f, std::stof(opt.substr(7)))); rule.HasOffset = true; }
+			catch(...) { logError("DioramaSkybox : offset= doit etre un nombre de degres : " + opt + ", ligne ignoree."); return; }
+			tokens.erase(tokens.begin() + ti);
+		} else ti++;
+	}
 	const string first = StringUtilities::Trim(tokens[0]);
 	if(StringUtilities::ToLower(first) == "color") {
 		rule.Mode = 1;

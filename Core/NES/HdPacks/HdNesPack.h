@@ -151,6 +151,7 @@ private:
 	// pixel NES pour les zones rect=, 0 = aucun ; _dioGLines[g][y] = 1 si la ligne NES y a recu un pixel du groupe.
 	static constexpr int DioGroups = 8; // groupes <DioramaDepth> (doit valoir HdDioMaxGroups de HdGpuCore.h)
 	vector<uint32_t> _dioG[8];
+	vector<uint32_t> _dioWorldTmp; // doc 53 : tampon du fond L0 pour worldtex= (projection sur les tiles du groupe)
 	vector<uint8_t> _dioDepthMask;
 	vector<uint8_t> _dioGLines[8];
 	// G3h : lignes NES ou L1 ([0]) et L3 ([1]) ont recu un sprite a cette image, lignes a renvoyer au GPU, image entiere a renvoyer
@@ -184,7 +185,7 @@ private:
 	double _dioMsLayers = 0, _dioMsGpu = 0, _dioMsCopy = 0;
 	uint32_t _dioN = 0, _dioFail = 0;
 	// Fonds de L0 dessines par le GPU (doc 52) : identifiants (priorite, index) et parametres du plan
-	struct DioGpuBg { int Prio = 0, Index = 0; const uint32_t* Pix = nullptr; uint32_t W = 0, H = 0; float OffX = 0, OffY = 0, Bright = 1.0f; bool TileX = false, TileY = false; };
+	struct DioGpuBg { int Prio = 0, Index = 0; const uint32_t* Pix = nullptr; uint32_t W = 0, H = 0; float OffX = 0, OffY = 0, Bright = 1.0f; bool TileX = false, TileY = false; float Incl = 0.0f; };
 	DioGpuBg _dioGpuBg[4];
 	int _dioGpuBgN = 0;
 	bool IsDioGpuBg(int prio, int index) const { for(int i = 0; i < _dioGpuBgN; i++) { if(_dioGpuBg[i].Prio == prio && _dioGpuBg[i].Index == index) return true; } return false; }
