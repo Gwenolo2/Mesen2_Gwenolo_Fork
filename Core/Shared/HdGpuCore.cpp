@@ -118,7 +118,7 @@ bool HdGpuCore::Init()
 	};
 	load(G.GetString, "glGetString"); load(G.GetError, "glGetError");
 	load(G.Viewport, "glViewport"); load(G.Enable, "glEnable"); load(G.Disable, "glDisable");
-	load(G.ClearBufferfv, "glClearBufferfv"); load(G.BlendFunc, "glBlendFunc"); load(G.DepthFunc, "glDepthFunc"); load(G.DepthMask, "glDepthMask");
+	load(G.ClearBufferfv, "glClearBufferfv"); load(G.BlendFunc, "glBlendFunc"); load(G.DepthFunc, "glDepthFunc"); load(G.DepthMask, "glDepthMask"); load(G.ColorMask, "glColorMask");
 	load(G.GenTextures, "glGenTextures"); load(G.DeleteTextures, "glDeleteTextures"); load(G.BindTexture, "glBindTexture");
 	load(G.TexImage2D, "glTexImage2D"); load(G.TexSubImage2D, "glTexSubImage2D"); load(G.TexParameteri, "glTexParameteri"); load(G.PixelStorei, "glPixelStorei");
 	load(G.ActiveTexture, "glActiveTexture"); load(G.GenerateMipmap, "glGenerateMipmap");
@@ -492,6 +492,8 @@ uniform int uShOn;      // G6c : 1 = ombres des sprites recues par cette couche
 uniform sampler2D uShTex;   // G6c : masque des silhouettes (unite 3)
 uniform vec2 uShBand;       // G6c : bande de lignes du masque (debut, hauteur, fractions de l'image)
 uniform vec4 uShL;          // G6c : lumiere qui projette : xyz position (ponctuelle) ou vecteur vers la lumiere (soleil), w type
+uniform vec4 uShBlob[16];   // topDown : silhouettes de sprites debout a leurs pieds (x0, x1, haut, pied)
+uniform int uShBlobN;       // topDown : nombre de silhouettes
 uniform vec4 uShP;          // G6c : x opacite, y adoucissement (pixels NES), z profondeur du plan des sprites, w echelle (D + z) / D
 uniform vec3 uShCol;        // G6c : couleur de l'ombre
 uniform vec3 uLAmb;     // G6a : lumiere ambiante
@@ -499,6 +501,10 @@ uniform vec4 uLP0, uLP1, uLP2, uLP3, uLP4, uLP5, uLP6, uLP7;  // xyz position (p
 uniform vec4 uLC0, uLC1, uLC2, uLC3, uLC4, uLC5, uLC6, uLC7;  // rgb = couleur x intensite, w = portee
 uniform float uShade;   // G3c3 : facteur de couleur de la tranche (1 = inchange)
 uniform float uInvN;    // G3b1 : 1 / nombre de tranches de la couche (1 = feuille)
+uniform int uSprDepth;  // topDown : 1 = tranche de sprites : profondeur du pixel debout sur le sol, a ses pieds (uFoot)
+uniform sampler2D uFoot; // topDown : pied des sprites (unite 7), valeur = ligne du plan + 1 (0 = pas de sprite)
+uniform vec3 uRt2;      // 3e ligne de la rotation (meme variable que dans le sommet)
+uniform int uMaskPass;  // topDown : 1 = passe de profondeur du masque des groupes (pixels hors tile ignores)
 uniform float uDepth;   // G3b2 : profondeur de la tranche depuis la face avant (pixels NES), 0 = face avant
 uniform int uHasTop, uHasSide;
 uniform vec2 uOrigins;  // pixels NES : debut du motif du dessus en X, debut du motif des flancs en Y
@@ -514,6 +520,21 @@ uniform float uScale;   // pixels HD par pixel NES
 uniform int uBg;        // 1 = fond <background> : la texture est le PNG, repete et decale (uBgP)
 uniform vec4 uBgP;      // decalage x, y (pixels HD), premiere ligne NES de l'image, luminosite
 uniform vec2 uBgTile;   // repetition en x, en y
+uniform int uCtN;       // <2DTexture> : nombre de remplacements de couleur du fond (0 a 4)
+uniform sampler2D uCt0, uCt1, uCt2, uCt3;   // textures de remplacement (unites 8 a 11)
+uniform vec4 uCtK0, uCtK1, uCtK2, uCtK3;    // couleur cle (rgb 0..255), w = 1 couleur, 0 = pixels transparents
+uniform vec4 uCtP0, uCtP1, uCtP2, uCtP3;    // texels par pixel HD (x, y), decalage en pixels HD (z, w)
+bool CtMatch(vec4 tn, vec4 k)
+{
+	if(k.w < 0.5) return tn.a < 0.5 / 255.0;
+	if(tn.a < 0.5 / 255.0) return false;
+	return all(lessThan(abs(tn.rgb * 255.0 - k.rgb), vec3(0.5)));
+}
+vec4 CtTex(sampler2D s, vec4 p, vec2 hd)
+{
+	vec2 sz = vec2(textureSize(s, 0));
+	return textureLod(s, floor((hd + p.zw) * p.xy) / sz + 0.5 / sz, 0.0);
+}
 layout(location = 0) out vec4 oColor;
 float AlphaAt(ivec2 q, ivec2 sz)
 {
@@ -587,7 +608,8 @@ vec3 LightOne(vec4 lp, vec4 lc, vec3 P, vec3 N)
 	float k = clamp(1.0 - dist / max(lc.w, 1.0), 0.0, 1.0);
 	return lc.rgb * max(dot(N, d / max(dist, 0.001)), 0.0) * k * k;
 }
-void main()
+)"
+R"(void main()
 {
 	vec2 uv0 = vUV;   // coordonnee de lecture de la texture
 	gPlaneY = uExt != 0 ? vUV.y : uR.y + vUV.y * uR.w;
@@ -619,10 +641,20 @@ void main()
 		bool inX = uBgTile.x > 0.5 || (tp.x >= 0.0 && tp.x < ts.x);
 		bool inY = uBgTile.y > 0.5 || (tp.y >= 0.0 && tp.y < ts.y);
 		t = (inX && inY) ? textureLod(uTex, tp / ts, 0.0) : vec4(0.0);
+		if(uCtN > 0 && inX && inY) {   // <2DTexture> : couleur du pixel du PNG (texel exact) -> texture repetee
+			vec4 tn = texelFetch(uTex, ivec2(mod(floor(tp), ts)), 0);
+			vec2 hd = vec2(pn.x, uBgP.z + pn.y) * uScale;
+			if(CtMatch(tn, uCtK0)) t = CtTex(uCt0, uCtP0, hd);
+			else if(uCtN > 1 && CtMatch(tn, uCtK1)) t = CtTex(uCt1, uCtP1, hd);
+			else if(uCtN > 2 && CtMatch(tn, uCtK2)) t = CtTex(uCt2, uCtP2, hd);
+			else if(uCtN > 3 && CtMatch(tn, uCtK3)) t = CtTex(uCt3, uCtP3, hd);
+		}
 		t.rgb *= uBgP.w;
 	} else {
 		t = texture(uTex, uv0);   // texture premultipliee
 	}
+	// topDown : passe de masque (profondeur seule) : seuls les pixels de tile du groupe ecrivent la profondeur
+	if(uMaskPass != 0 && (hole || t.a < 0.5)) discard;
 	// G3b2 : tranches arriere. Un pixel du bord de la forme (a moins d'un pixel NES d'un vide) prend le motif du mur : dessus ou
 	// dessous = motif du dessus, ancre au monde (xN + defilement) ; flancs = motif des flancs. Le reste garde l'image d'origine.
 	vec2 wUp = vec2((vUV.x * uSize.x + uScroll - uOrigins.x) / uPeriods.x, uDepth / uPeriods.y);
@@ -685,7 +717,37 @@ void main()
 		t.rgb = min(t.rgb * lit, vec3(t.a));
 	}
 	// G6c : ombre des sprites. Le rayon du pixel vers la lumiere coupe le plan des sprites ; le masque y dit si un sprite s'y trouve.
-	if(uShOn != 0 && t.a > 0.0 && !hole) {
+	// topDown : le sol est a plat et chaque silhouette de sprite est un panneau debout a ses pieds (z = H/2 - pied).
+	// Le rayon du point du sol vers la lumiere coupe chaque panneau ; le masque des silhouettes dit si un sprite s'y trouve.
+	if(uShOn != 0 && uFlat != 0 && t.a > 0.0 && !hole) {
+		float fx = (uExt != 0 ? vUV.x : uR.x + vUV.x * uR.z) * uSize.x;
+		vec3 P = vec3(fx, -uZ * uIncC + (gPlaneY - 0.5) * uSize.y * uIncS, uZ * uIncS - (gPlaneY - 0.5) * uSize.y * uIncC);
+		vec3 dv = uShL.w > 2.5 ? uShL.xyz : (uShL.xyz - P);
+		float a = 0.0;
+		if(abs(dv.z) > 0.0001) {
+			for(int i = 0; i < 16; i++) {
+				if(i >= uShBlobN) break;
+				vec4 b = uShBlob[i];
+				float tt = (0.5 * uSize.y - b.w - P.z) / dv.z;
+				if(tt <= 0.0 || (uShL.w < 2.5 && tt >= 1.0)) continue;
+				vec3 S = P + dv * tt;
+				float row = b.w + S.y;   // hauteur au-dessus du pied = -S.y
+				float s = uShP.y;
+				float ai = 0.0, nn = 0.0;
+				for(int k = 0; k < 5; k++) {
+					vec2 o = k == 0 ? vec2(0.0) : (k == 1 ? vec2(s, 0.0) : (k == 2 ? vec2(-s, 0.0) : (k == 3 ? vec2(0.0, s) : vec2(0.0, -s))));
+					vec2 q = vec2(S.x, row) + o;
+					nn += 1.0;
+					if(q.x < b.x || q.x >= b.y || q.y < b.z || q.y >= b.w) continue;
+					float vb = (q.y / uSize.y - uShBand.x) / max(uShBand.y, 0.0001);
+					if(vb >= 0.0 && vb <= 1.0) ai += textureLod(uShTex, vec2(q.x / uSize.x, vb), 0.0).a;
+					if(s <= 0.0) break;
+				}
+				a = max(a, s > 0.0 ? ai / nn : ai);
+			}
+		}
+		t.rgb = mix(t.rgb, uShCol * t.a, clamp(a * uShP.x, 0.0, 1.0));
+	} else if(uShOn != 0 && t.a > 0.0 && !hole) {
 		float kk = uKFix > 0.0 ? uKFix : (uD + uZ) / uD;
 		float px = uExt != 0 ? vUV.x : uR.x + vUV.x * uR.z;
 		vec3 P = vec3((px - 0.5) * uSize.x * kk + uSize.x * 0.5, (gPlaneY - 0.5) * uSize.y * kk + uSize.y * 0.5, uZ);
@@ -716,6 +778,27 @@ void main()
 	}
 	if(uExtDebug != 0 && remapped && !hole) t = t * 0.7 + vec4(0.3, 0.0, 0.3, 0.3);   // controle : zone d'extension en magenta
 	oColor = hole ? vec4(0.0) : vec4(t.rgb * uShade, t.a);   // premultiplie : la couleur seule s'assombrit
+	// topDown : un pixel de sprite prend la profondeur du point ou il serait debout sur le sol (pieds = bas de sa silhouette),
+	// meme formule que les objets 3D ; teste contre la profondeur des montagnes. Hors sprite : toujours devant (0).
+	float fd = gl_FragCoord.z;
+	if(uSprDepth != 0) {
+		fd = 0.0;
+		float px = (uExt != 0 ? vUV.x : uR.x + vUV.x * uR.z) * uSize.x;
+		float py = gPlaneY * uSize.y;
+		ivec2 fs = textureSize(uFoot, 0);
+		ivec2 fi = ivec2(floor(px), floor(py));
+		if(fi.x >= 0 && fi.y >= 0 && fi.x < fs.x && fi.y < fs.y) {
+			float foot = texelFetch(uFoot, fi, 0).r * 255.0;
+			if(foot > 0.5) {
+				foot -= 1.0;
+				vec3 Pw = vec3(px - 0.5 * uSize.x, py - (foot + 1.0), 0.5 * uSize.y - (foot + 1.0));
+				float cz = max(dot(uRt2, Pw) + uD, 1.0);
+				float nz = (16384.0 + 1.0) / (16384.0 - 1.0) - 2.0 * 16384.0 / (16384.0 - 1.0) / cz;
+				fd = clamp(nz * 0.5 + 0.5, 0.0, 1.0);
+			}
+		}
+	}
+	gl_FragDepth = fd;
 }
 )";
 
@@ -732,6 +815,8 @@ uniform vec3 uRt0, uRt1, uRt2;
 uniform float uD, uZoom, uScale;
 uniform vec2 uOut;
 uniform vec3 uWin;               // fenetre en x du modele (min, max, 1 = active)
+uniform int uShadowPass;         // topDown : 1 = ombre projetee : le point est aplati sur le sol (y = 0) dans la direction de la lumiere
+uniform vec4 uShDir;             // topDown : xyz vers la lumiere (soleil, w = 3) ou position de la lumiere (ponctuelle, w = 2), axes du modele
 out vec2 vUV;
 out vec3 vN;
 out vec3 vPc;                    // position du point (axes de la scene centres sur la scene) pour l'eclairage
@@ -755,6 +840,12 @@ void main()
 	m = vec3(m.x, -m.y, -m.z);       // modele (Y haut, Z vers l'observateur) -> scene (Y bas, Z vers le fond)
 	vN = vec3(mn.x, -mn.y, -mn.z);
 	vec3 P = uAnchor + vec3(m.xy * uK, m.z);
+	if(uShadowPass != 0) {
+		vec3 L = uShDir.w > 2.5 ? uShDir.xyz : (uShDir.xyz - P);
+		if(L.y > -0.001) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vUV = vec2(0.0); vN = vec3(0.0, 0.0, 1.0); vPc = vec3(0.0); return; } // lumiere sous le point : pas d'ombre
+		P -= L * (P.y / L.y);   // y = 0 : sol
+		P.y = 0.25;             // juste sous le sol : le pied de l'objet reste devant son ombre
+	}
 	vPc = P;
 	vec3 c = vec3(dot(uRt0, P), dot(uRt1, P), dot(uRt2, P)) + vec3(0.0, 0.0, uD);
 	// projection homogene : le decoupage par OpenGL est correct meme quand une partie du modele passe derriere la camera (plan proche c.z = 1)
@@ -773,6 +864,7 @@ in vec3 vPc;
 uniform sampler2D uTexM;
 uniform int uHasTex;
 uniform vec3 uColor;
+uniform int uShadowPass;   // topDown : ombre projetee
 uniform int uLightOn;   // H2 : 1 = eclaire par les lumieres de la scene
 uniform vec3 uLAmb;
 uniform vec4 uLP0, uLP1, uLP2, uLP3, uLP4, uLP5, uLP6, uLP7;   // xyz position (ponctuelle) ou vecteur vers la lumiere (soleil), w = type (0 aucune, 2 ponctuelle, 3 soleil)
@@ -799,6 +891,7 @@ void main()
 {
 	vec4 t = uHasTex != 0 ? texture(uTexM, vUV) : vec4(1.0);
 	if(t.a < 0.5) discard;
+	if(uShadowPass != 0) { oColor = vec4(uShCol * uShP.x, uShP.x); return; }   // ombre projetee (premultipliee)
 	vec3 col = t.rgb / t.a * uColor;   // texture premultipliee -> couleur opaque
 	if(uLightOn != 0) {
 		vec3 N = normalize(vN);
@@ -1201,6 +1294,29 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		G.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)sc.ExtraRows[g], 0, GL_BGRA, GL_UNSIGNED_BYTE, sc.ExtraImg[g] + (size_t)sc.ExtraY0[g] * w);
 	}
+	// topDown : pied des sprites (une ligne d'octets par ligne du plan)
+	if(sc.SpriteFoot && sc.SpriteFootH > 0) {
+		if(!_sprFootTex) {
+			G.GenTextures(1, &_sprFootTex);
+			G.BindTexture(GL_TEXTURE_2D, _sprFootTex);
+			G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		}
+		G.BindTexture(GL_TEXTURE_2D, _sprFootTex);
+		G.TexImage2D(GL_TEXTURE_2D, 0, 0x8229 /* GL_R8 */, 256, (GLsizei)sc.SpriteFootH, 0, 0x1903 /* GL_RED */, GL_UNSIGNED_BYTE, sc.SpriteFoot);
+	}
+	// topDown : masque de profondeur des groupes (memes bandes que la couche)
+	for(int g = 0; g < HdDioMaxGroups; g++) {
+		if(!hasExtra[g] || !sc.ExtraMask[g]) continue;
+		if(!_extraMaskTex[g]) {
+			G.GenTextures(1, &_extraMaskTex[g]);
+			G.BindTexture(GL_TEXTURE_2D, _extraMaskTex[g]);
+			G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		}
+		G.BindTexture(GL_TEXTURE_2D, _extraMaskTex[g]);
+		G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		G.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)sc.ExtraRows[g], 0, GL_BGRA, GL_UNSIGNED_BYTE, sc.ExtraMask[g] + (size_t)sc.ExtraY0[g] * w);
+	}
 	// G3b2 : textures de murs (une fois), pour les 8 couches possibles
 	unsigned int wallTop[4 + HdDioMaxGroups] = {}, wallSide[4 + HdDioMaxGroups] = {};
 	for(int l = 0; l < 4 + HdDioMaxGroups; l++) {
@@ -1343,6 +1459,11 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			const float zc = sc.PlaneZ[3];
 			G.Uniform4f(U("uShP"), sc.Shadow.Opacity, sc.Shadow.Soft, zc, (sc.D + zc) / sc.D);
 			G.Uniform3f(U("uShCol"), sc.Shadow.Color[0], sc.Shadow.Color[1], sc.Shadow.Color[2]);
+			G.Uniform1i(U("uShBlobN"), sc.FlatMask != 0 ? sc.SpriteBlobN : 0); // topDown : panneaux des silhouettes
+			for(int bi = 0; bi < sc.SpriteBlobN && bi < 16; bi++) {
+				const std::string nm = "uShBlob[" + std::to_string(bi) + "]";
+				G.Uniform4f(U(nm.c_str()), sc.SpriteBlob[bi][0], sc.SpriteBlob[bi][1], sc.SpriteBlob[bi][2], sc.SpriteBlob[bi][3]);
+			}
 			shObjL[0] = sl.Pos[0]; shObjL[1] = sl.Pos[1]; shObjL[2] = sl.Pos[2]; shObjL[3] = (float)sl.Type;
 			shObjP[0] = sc.Shadow.Opacity; shObjP[1] = sc.Shadow.Soft; shObjP[2] = zc; shObjP[3] = (sc.D + zc) / sc.D;
 			shObjBand[0] = (float)sc.Shadow.Y0 / (float)h; shObjBand[1] = (float)sc.Shadow.Rows / (float)h;
@@ -1358,6 +1479,9 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	G.Uniform1i(U("uTex"), 0);
 	G.Uniform1i(U("uTopTex"), 1);
 	G.Uniform1i(U("uSideTex"), 2);
+	G.Uniform1i(U("uFoot"), 7);
+	G.Uniform1i(U("uCt0"), 8); G.Uniform1i(U("uCt1"), 9); G.Uniform1i(U("uCt2"), 10); G.Uniform1i(U("uCt3"), 11);
+	G.Uniform1i(U("uCtN"), 0);
 	G.Uniform4f(U("uR"), 0.0f, 0.0f, 1.0f, 1.0f);
 	G.BindVertexArray(_vao);
 	// G3b1 : chaque couche = pile de tranches (la meme texture), de PlaneZ + Thick (fond) a PlaneZ (face avant), environ une
@@ -1402,30 +1526,33 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	// H1 : dessin d'un objet 3D (programme de maillage, profondeur propre a l'image), puis retour a l'etat des tranches
 	bool objDepthOn = false;
 	bool occlOn = false;   // occlude=on : les tranches suivantes sont testees contre la profondeur des objets
-	auto drawObject = [&](const HdDioramaObject& o) {
+	auto ensureObjDepth = [&]() -> bool {
+		if(objDepthOn) return true;
+		const uint32_t tw = ow * (uint32_t)aa, th = h * (uint32_t)aa;
+		if(!_objDepthTex) G.GenTextures(1, &_objDepthTex);
+		G.ActiveTexture(GL_TEXTURE0);
+		G.BindTexture(GL_TEXTURE_2D, _objDepthTex);
+		if(_objDepthW != tw || _objDepthH != th) {
+			G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			G.TexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, (GLsizei)tw, (GLsizei)th, 0, 0x1902 /* GL_DEPTH_COMPONENT */, 0x1405 /* GL_UNSIGNED_INT */, nullptr);
+			_objDepthW = tw; _objDepthH = th;
+		}
+		G.FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, _objDepthTex, 0);
+		if(G.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+			G.FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+			_objProgFailed = true;
+			MessageManager::Log("[HD-GPU-CORE] objets 3D : tampon de profondeur impossible, objets ignores.");
+			return false;
+		}
+		const GLfloat one = 1.0f;
+		G.ClearBufferfv(GL_DEPTH, 0, &one);
+		objDepthOn = true;
+		return true;
+	};
+	auto drawObject = [&](const HdDioramaObject& o, bool shadowPass) {
 		if(!o.Verts || o.VertCount < 3 || _objProgFailed) return;
 		if(!_progObj && !BuildObjProgram()) { _objProgFailed = true; return; }
-		if(!objDepthOn) {
-			const uint32_t tw = ow * (uint32_t)aa, th = h * (uint32_t)aa;
-			if(!_objDepthTex) G.GenTextures(1, &_objDepthTex);
-			G.ActiveTexture(GL_TEXTURE0);
-			G.BindTexture(GL_TEXTURE_2D, _objDepthTex);
-			if(_objDepthW != tw || _objDepthH != th) {
-				G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-				G.TexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, (GLsizei)tw, (GLsizei)th, 0, 0x1902 /* GL_DEPTH_COMPONENT */, 0x1405 /* GL_UNSIGNED_INT */, nullptr);
-				_objDepthW = tw; _objDepthH = th;
-			}
-			G.FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, _objDepthTex, 0);
-			if(G.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-				G.FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
-				_objProgFailed = true;
-				MessageManager::Log("[HD-GPU-CORE] objets 3D : tampon de profondeur impossible, objets ignores.");
-				return;
-			}
-			const GLfloat one = 1.0f;
-			G.ClearBufferfv(GL_DEPTH, 0, &one);
-			objDepthOn = true;
-		}
+		if(!objDepthOn && !ensureObjDepth()) return;
 		// donnees des sommets en texture (une fois par modele)
 		ObjMesh* mesh = nullptr;
 		for(ObjMesh& e : _objMeshes) { if(e.Key == o.Verts && e.N == o.VertCount) { mesh = &e; break; } }
@@ -1506,10 +1633,18 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		G.Uniform1f(UO("uScale"), sc.Scale);
 		G.Uniform2f(UO("uOut"), (float)ow, (float)h);
 		static int objDrawLog = 0;
-		if(objDrawLog++ < 3) MessageManager::Log("[HD-GPU-CORE] objet 3D dessine : " + std::to_string(o.VertCount) + " sommets, position " + std::to_string(o.Pos[0]) + "," + std::to_string(o.Pos[1]) + "," + std::to_string(o.Pos[2]) + ", echelle " + std::to_string(o.Scale) + (ot ? ", texture" : ", sans texture"));
+		if(!shadowPass && objDrawLog++ < 3) MessageManager::Log("[HD-GPU-CORE] objet 3D dessine : " + std::to_string(o.VertCount) + " sommets, position " + std::to_string(o.Pos[0]) + "," + std::to_string(o.Pos[1]) + "," + std::to_string(o.Pos[2]) + ", echelle " + std::to_string(o.Scale) + (ot ? ", texture" : ", sans texture"));
+		G.Uniform1i(UO("uShadowPass"), shadowPass ? 1 : 0);
+		if(shadowPass) {
+			const bool sun = shObjL[3] > 2.5f;
+			G.Uniform4f(UO("uShDir"), sun ? shObjL[0] : shObjL[0] - sc.W * 0.5f, shObjL[1], shObjL[2], shObjL[3]);
+			G.Uniform4f(UO("uShP"), shObjP[0], shObjP[1], shObjP[2], shObjP[3]);
+			G.Uniform3f(UO("uShCol"), shObjCol[0], shObjCol[1], shObjCol[2]);
+		}
 		G.Enable(GL_DEPTH_TEST);
 		G.DrawArrays(GL_TRIANGLES, 0, (GLsizei)o.VertCount);
 		G.Disable(GL_DEPTH_TEST);
+		if(shadowPass) G.Uniform1i(UO("uShadowPass"), 0);
 		G.ActiveTexture(GL_TEXTURE0);
 		G.UseProgram(_progScene);   // retour a l'etat des tranches
 	};
@@ -1518,6 +1653,8 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	const GLint locKFix = U("uKFix"), locShade = U("uShade"), locZb = U("uZb"), locBg = U("uBg"), locBgP = U("uBgP"), locBgTile = U("uBgTile");
 	G.Uniform1i(locBg, 0);
 	G.Uniform1i(locZb, 0);
+	const GLint locMaskPass = U("uMaskPass");
+	G.Uniform1i(locMaskPass, 0);
 	const GLint locExt = U("uExt"), locExtMode = U("uExtMode"), locExtBand = U("uExtBand"), locExtScroll = U("uExtScroll"), locExtBandY = U("uExtBandY"), locExtEdge = U("uExtEdge"), locExtRangeV = U("uExtRangeV"), locExtRangeH = U("uExtRangeH"), locExtFog = U("uExtFog"), locExtFogDist = U("uExtFogDist"), locExtColT = U("uExtColT"), locExtColB = U("uExtColB"), locExtColL = U("uExtColL"), locExtColR = U("uExtColR");
 	G.Uniform1i(locExt, 0);
 	G.Uniform1i(U("uExtDebug"), sc.ExtDebug ? 1 : 0);
@@ -1525,10 +1662,26 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	G.Uniform1f(locKFix, 0.0f);
 	G.Uniform1f(locShade, 1.0f);
 	const GLint locHasTop = U("uHasTop"), locHasSide = U("uHasSide"), locPeriods = U("uPeriods"), locOrigins = U("uOrigins"), locScroll = U("uScroll");
+	if(sc.FlatMask != 0 && (sc.Objects.Count > 0 || sc.SpriteFoot) && !objDepthOn) ensureObjDepth();
+	const GLint locSprDepth = U("uSprDepth");
+	G.Uniform1i(locSprDepth, 0);
 	int boundLayer = -1;
+	// topDown : ombres projetees des objets (castshadow=on), sur le sol, apres les couches a plat et avant les plans verticaux
+	bool objShadowsDone = !(sc.FlatMask != 0 && shadowOn && shObjL[3] > 1.5f);
+	auto drawObjShadows = [&]() {
+		objShadowsDone = true;
+		bool any = false;
+		for(int oi = 0; oi < sc.Objects.Count && oi < HdDioMaxObjects; oi++) {
+			if(!sc.Objects.O[oi].CastShadow) continue;
+			if(!any) { G.DepthFunc(GL_LESS); G.DepthMask(GL_TRUE); any = true; }
+			drawObject(sc.Objects.O[oi], true);
+		}
+		boundLayer = -1;
+	};
 	for(int i = 0; i < sliceCount; i++) {
 		const Slice& s = slices[i];
-		if(s.Layer >= 100 && s.Layer < 300) { drawObject(sc.Objects.O[s.Layer - 100]); boundLayer = -1; if(sc.Objects.O[s.Layer - 100].Occlude && objDepthOn) occlOn = true; G.Uniform1i(locZb, occlOn ? 1 : 0); continue; }
+		if(!objShadowsDone && !flatSlice(s)) drawObjShadows();
+		if(s.Layer >= 100 && s.Layer < 300) { drawObject(sc.Objects.O[s.Layer - 100], false); boundLayer = -1; if(sc.Objects.O[s.Layer - 100].Occlude && objDepthOn) occlOn = true; G.Uniform1i(locZb, occlOn ? 1 : 0); continue; }
 		if(s.Layer != boundLayer) {
 			const int lay = s.Layer >= 300 ? 0 : s.Layer; // un fond de L0 partage l'etat de la couche 0
 			const bool isBg = s.Layer >= 300;
@@ -1620,6 +1773,23 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			G.ActiveTexture(GL_TEXTURE0 + 2); G.BindTexture(GL_TEXTURE_2D, wallSide[lay]);
 			G.ActiveTexture(GL_TEXTURE0);
 			G.Uniform1i(locBg, isBg ? 1 : 0);
+			G.Uniform1i(U("uCtN"), 0);
+			if(isBg) { // <2DTexture> : textures de remplacement du fond (unites 8 a 11)
+				const HdDioramaBgPlane& cb = sc.Bg[s.Layer - 300];
+				static const char* kn[4] = { "uCtK0", "uCtK1", "uCtK2", "uCtK3" };
+				static const char* pn[4] = { "uCtP0", "uCtP1", "uCtP2", "uCtP3" };
+				int nOk = 0;
+				for(int ci = 0; ci < cb.CtN && ci < 4; ci++) {
+					const HdDioramaColorTex& ct = cb.Ct[ci];
+					G.ActiveTexture(GL_TEXTURE0 + 8 + nOk);
+					if(!BgTexture(ct.Pix, ct.W, ct.H, true, true)) continue;
+					G.Uniform4f(U(kn[nOk]), (float)((ct.Key >> 16) & 0xFF), (float)((ct.Key >> 8) & 0xFF), (float)(ct.Key & 0xFF), ct.HasKey ? 1.0f : 0.0f);
+					G.Uniform4f(U(pn[nOk]), ct.TexelX, ct.TexelY, ct.OffX, ct.OffY);
+					nOk++;
+				}
+				G.ActiveTexture(GL_TEXTURE0);
+				G.Uniform1i(U("uCtN"), nOk);
+			}
 			if(isBg) {
 				const HdDioramaBgPlane& bp = sc.Bg[s.Layer - 300];
 				G.BindTexture(GL_TEXTURE_2D, BgTexture(bp.Pix, bp.W, bp.H, bp.TileX, bp.TileY));
@@ -1635,7 +1805,29 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		G.Uniform1f(locDepth, s.Depth);
 		G.Uniform1f(locZ, s.Z);
 		if(occlOn) { G.Enable(GL_DEPTH_TEST); G.DepthFunc(GL_LEQUAL); G.DepthMask(GL_FALSE); }
+		// topDown : un groupe a plat (montagne) ecrit sa profondeur, mais seulement sur ses tiles (masque), sans couleur ; les objets sont testes contre elle
+		const bool t2oWrite = objDepthOn && !occlOn && sc.FlatMask != 0 && s.Layer >= 4 && s.Layer < 12 && flatSlice(s) && sc.ExtraMask[s.Layer - 4] && _extraMaskTex[s.Layer - 4];
+		// topDown : sprites (L1, L3) testes contre la profondeur des montagnes et des objets, sans l'ecrire
+		const bool sprDepth = objDepthOn && sc.FlatMask != 0 && sc.SpriteFoot && _sprFootTex && (s.Layer == 1 || s.Layer == 3) && !flatSlice(s);
+		if(sprDepth) {
+			G.ActiveTexture(GL_TEXTURE0 + 7); G.BindTexture(GL_TEXTURE_2D, _sprFootTex); G.ActiveTexture(GL_TEXTURE0);
+			G.Uniform1i(locSprDepth, 1); G.Enable(GL_DEPTH_TEST); G.DepthFunc(GL_LEQUAL); G.DepthMask(GL_FALSE);
+		}
 		G.DrawArrays(GL_TRIANGLES, 0, 6);
+		if(sprDepth) {
+			G.Uniform1i(locSprDepth, 0); G.DepthMask(GL_TRUE); G.DepthFunc(GL_LESS);
+			if(!occlOn) G.Disable(GL_DEPTH_TEST);
+		}
+		if(t2oWrite) {
+			G.BindTexture(GL_TEXTURE_2D, _extraMaskTex[s.Layer - 4]);
+			G.ColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+			G.Enable(GL_DEPTH_TEST); G.DepthFunc(GL_LESS); G.DepthMask(GL_TRUE); G.Uniform1i(locZb, 1); G.Uniform1i(locMaskPass, 1);
+			G.DrawArrays(GL_TRIANGLES, 0, 6);
+			G.Uniform1i(locMaskPass, 0);
+			G.Uniform1i(locZb, 0); G.Disable(GL_DEPTH_TEST);
+			G.ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+			G.BindTexture(GL_TEXTURE_2D, _extraTex[s.Layer - 4]);
+		}
 		if(occlOn) { G.Disable(GL_DEPTH_TEST); G.DepthMask(GL_TRUE); }
 	}
 	G.Uniform1i(locZb, 0); occlOn = false; G.Uniform1i(locBg, 0);

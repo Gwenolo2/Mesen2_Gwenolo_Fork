@@ -134,6 +134,7 @@ struct HdDioramaObject
 	float RefZ = 0;                                 // profondeur du modele (derriere sa face avant) a l'echelle de la vue 2D
 	bool Occlude = false;                           // dessine en premier ; les tranches suivantes sont testees contre sa profondeur (sprites coupes par la geometrie)
 	bool Shadow = true;                             // H3 : recoit les ombres des sprites (G6c)
+	bool CastShadow = false;                        // topDown : projette son ombre sur le sol (castshadow=on)
 	bool WinOn = false; float WinX0 = 0, WinX1 = 0; // fenetre en x (unites du modele, avant rotation et echelle) : triangles dessines seulement dedans
 	float Scale = 16.0f;
 	float Rot[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
@@ -148,6 +149,16 @@ struct HdDioramaObjects
 };
 
 // Fond <background> dessine par le GPU a la place de L0 (doc 52) : texture du PNG repetee sur un grand plan a la profondeur de L0
+// <2DTexture> sur un fond du diorama : les pixels de la couleur Key (ou transparents si HasKey = false) sont remplaces par la texture
+// repetee. Texel = (pixel HD de l'ecran + Off) x Texel (memes regles que le filtre normal).
+struct HdDioramaColorTex
+{
+	const uint32_t* Pix = nullptr; uint32_t W = 0, H = 0;
+	bool HasKey = true; uint32_t Key = 0; // RRGGBB
+	float TexelX = 1.0f, TexelY = 1.0f;   // texels par pixel HD
+	float OffX = 0.0f, OffY = 0.0f;       // decalage (pixels HD) : scroll PPU x ratio x echelle
+};
+
 struct HdDioramaBgPlane
 {
 	const uint32_t* Pix = nullptr; uint32_t W = 0, H = 0;   // image du fond (premultipliee), pixels HD
@@ -155,6 +166,7 @@ struct HdDioramaBgPlane
 	float Bright = 1.0f;                                    // luminosite 0..1
 	bool TileX = false, TileY = false;
 	bool Flat = false; float InclC = 1.0f, InclS = 0.0f; // doc 53 : fond a plat (topDown) et cos / sin de son inclinaison
+	HdDioramaColorTex Ct[4]; int CtN = 0;                  // <2DTexture> : remplacements de couleur
 };
 
 struct HdDioramaScene
@@ -188,6 +200,11 @@ struct HdDioramaScene
 	// G3e : couches supplementaires <DioramaDepth> (doc 38). ExtraImg[g] = image complete (meme taille que les couches) ;
 	// seules les lignes HD ExtraY0 .. ExtraY0 + ExtraRows - 1 sont envoyees et dessinees. nullptr ou 0 ligne = groupe absent.
 	const uint32_t* ExtraImg[HdDioMaxGroups] = {};
+	// topDown : pied des sprites, 256 octets par ligne du plan (ligne du plan du bas de la silhouette + 1 ; 0 = pas de sprite) ; nullptr = aucun
+	const uint8_t* SpriteFoot = nullptr; uint32_t SpriteFootH = 0;
+	// topDown : silhouettes de sprites (16 au plus) : x debut, x fin (exclue), ligne du haut, pied (lignes du plan) ; pour les ombres
+	float SpriteBlob[16][4] = {}; int SpriteBlobN = 0;
+	const uint32_t* ExtraMask[HdDioMaxGroups] = {}; // topDown : tiles de montagne du groupe (alpha 255), pour la profondeur seule
 	uint32_t ExtraY0[HdDioMaxGroups] = {}, ExtraRows[HdDioMaxGroups] = {};
 	float ExtraZ[HdDioMaxGroups] = {};      // profondeur de la face avant (pixels NES)
 	float ExtraThick[HdDioMaxGroups] = {};  // epaisseur (pixels NES)
@@ -289,6 +306,8 @@ private:
 	bool EnsureAaTarget(uint32_t w, uint32_t h);
 	bool BuildResolveProgram();
 	unsigned int _extraTex[HdDioMaxGroups] = {}; // G3e : bandes des couches <DioramaDepth>
+	unsigned int _sprFootTex = 0; // topDown : pied des sprites (R8)
+	unsigned int _extraMaskTex[HdDioMaxGroups] = {}; // masque de profondeur des groupes (topDown)
 	// G3b2 : textures de murs envoyees une fois (cle = adresse des pixels, taille et signature de quelques pixels)
 	struct WallTex { const uint32_t* Pix; uint32_t W, H, Sig; unsigned int Tex; };
 	std::vector<WallTex> _wallTex;

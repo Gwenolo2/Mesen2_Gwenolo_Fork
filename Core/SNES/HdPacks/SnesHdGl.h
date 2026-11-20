@@ -97,6 +97,7 @@ struct SnesHdGlApi
 	void (SNESHD_GLAPI* BlendFunc)(GLenum, GLenum);
 	void (SNESHD_GLAPI* DepthFunc)(GLenum);
 	void (SNESHD_GLAPI* DepthMask)(GLboolean);
+	void (SNESHD_GLAPI* ColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
 	void (SNESHD_GLAPI* GenTextures)(GLsizei, GLuint*);
 	void (SNESHD_GLAPI* DeleteTextures)(GLsizei, const GLuint*);
 	void (SNESHD_GLAPI* BindTexture)(GLenum, GLuint);

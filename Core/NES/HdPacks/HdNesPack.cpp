@@ -193,10 +193,11 @@ void HdNesPack<scale>::DrawCustomBackground(HdBackgroundInfo& bgInfo, uint32_t *
 	uint32_t *pngData = bgInfo.data() + ((uint32_t)py * scale * width) + ((uint32_t)px * scale);
 	// <2DLiquid> mask=1 : couverture du fond de meme priorite (alpha par pixel HD) pour le liquide
 	std::vector<uint8_t>* covBuf = nullptr;
-	if(bgInfo.Priority >= 0 && bgInfo.Priority < 50 && !_liqCover[bgInfo.Priority].empty() && x >= _liquidOffX && y >= _liquidOffY) {
+	// position a l'ecran (screenX, screenY), pas dans l'image du fond (x, y contiennent le defilement, ramx= / ramy= compris)
+	if(bgInfo.Priority >= 0 && bgInfo.Priority < 50 && !_liqCover[bgInfo.Priority].empty() && screenX >= _liquidOffX && screenY >= _liquidOffY) {
 		covBuf = &_liqCover[bgInfo.Priority];
 	}
-	const size_t covBase = covBuf ? ((size_t)(y - _liquidOffY) * scale * screenWidth + (size_t)(x - _liquidOffX) * scale) : 0;
+	const size_t covBase = covBuf ? ((size_t)(screenY - _liquidOffY) * scale * screenWidth + (size_t)(screenX - _liquidOffX) * scale) : 0;
 	const int64_t covKey = covBuf ? _liqKey[bgInfo.Priority] : -1; // maskcolor : couleur cle (RGB)
 	auto markCover = [&](uint32_t i, uint32_t j, uint32_t px) {
 		const size_t idx = covBase + (size_t)i * screenWidth + j;
@@ -254,6 +255,7 @@ uint32_t HdNesPack<scale>::ApplyTexture2D(const vector<NesHdTextureInfo>& rules,
 {
 	const uint32_t alpha = raw >> 24;
 	for(const NesHdTextureInfo& r : rules) {
+		if(r.DioMode == (_dioDrawing ? 2 : 1)) continue; // diorama= off / only
 		const bool match = r.HasKey ? (alpha != 0 && (raw & 0xFFFFFFu) == r.Key) : (alpha == 0);
 		if(!match || r.Texture == nullptr || r.Texture->PixelData.empty() || r.Texture->Width == 0 || r.Texture->Height == 0) {
 			continue;
@@ -954,6 +956,19 @@ void HdNesPack<scale>::PrepareLiquids(uint32_t screenWidth)
 	auto liqHash = [](uint32_t v) -> uint32_t { v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; v ^= v >> 16; return v; };
 	for(auto& liqPtr : _hdData->Liquids) {
 		NesHdLiquidInfo& liq = *liqPtr;
+		// followx / followy : scroll PPU d'une ligne de reference (milieu de la zone), cumule d'image en image (sans saut au retour a 0)
+		if((liq.FollowX != 0.0f || liq.FollowY != 0.0f) && _hdScreenInfo) {
+			const int line = std::clamp((int)((liq.YMin + std::min(liq.YMax, 240.0f)) * 0.5f), 0, 239);
+			const HdPpuPixelInfo& li = _hdScreenInfo->ScreenTiles[(size_t)line << 8];
+			const int32_t sx = NesLineScrollX(li), sy = NesLineScrollY(li);
+			if(!liq.FollowHasLast) { liq.FollowAccX = (float)sx; liq.FollowAccY = (float)sy; liq.FollowHasLast = true; }
+			else {
+				int32_t dx = (sx - liq.FollowLastX) % 512; if(dx >= 256) dx -= 512; if(dx < -256) dx += 512;
+				int32_t dy = (sy - liq.FollowLastY) % 480; if(dy >= 240) dy -= 480; if(dy < -240) dy += 480;
+				liq.FollowAccX += (float)dx; liq.FollowAccY += (float)dy;
+			}
+			liq.FollowLastX = sx; liq.FollowLastY = sy;
+		}
 		liq.Col0 = (int)std::clamp(liq.XMin * (float)screenWidth, 0.0f, (float)screenWidth);
 		liq.Col1 = (int)std::clamp(liq.XMax * (float)screenWidth, 0.0f, (float)screenWidth);
 		liq.Surface.assign(screenWidth, 0.0f);
@@ -1022,8 +1037,10 @@ void HdNesPack<scale>::PrepareLiquids(uint32_t screenWidth)
 }
 
 // view=top : degrade par profondeur dans la zone + ondulations croisees (coordonnees NES)
-static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, uint32_t dst, float maskK = 1.0f)
+static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, uint32_t dst, float maskK = 1.0f, float offX = 0.0f, float offY = 0.0f)
 {
+	// followx / followy : vagues et texture en coordonnees de la carte (ecran + defilement suivi) ; le degrade reste en coordonnees d'ecran
+	const float xW = xN + offX, yW = yN + offY;
 	auto chan = [](uint32_t c, int sh) -> float { return (float)((c >> sh) & 0xFF); };
 	const float zoneH = std::max(1.0f, liq.YMax - liq.YMin);
 	const float depth = std::clamp((yN - liq.YMin) / zoneH, 0.0f, 1.0f);
@@ -1034,9 +1051,9 @@ static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, u
 	if(liq.NormalMode) {
 		// [normal=1] vaguelettes : hauteur a 3 trains d'ondes, normale par pixel, refraction de la texture, eclairage et reflet
 		const float twoPiN = 2.0f * OverlayPi;
-		const float p1 = twoPiN * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * (OverlayPi / 180.0f);
-		const float p2 = twoPiN * (yN / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time);
-		const float p3 = twoPiN * ((xN + yN) / (liq.Wave * 1.7f) + 1.3f * liq.Speed * liq.Time);
+		const float p1 = twoPiN * (xW / liq.Wave + liq.Speed * liq.Time) + liq.Phase * (OverlayPi / 180.0f);
+		const float p2 = twoPiN * (yW / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time);
+		const float p3 = twoPiN * ((xW + yW) / (liq.Wave * 1.7f) + 1.3f * liq.Speed * liq.Time);
 		const float k1 = twoPiN / liq.Wave, k2 = twoPiN / (liq.Wave * 0.6f), k3 = twoPiN / (liq.Wave * 1.7f);
 		const float slope = 1.25f * std::max(0.01f, liq.Amp);
 		const float hn = 0.5f * (std::sin(p1) + 0.6f * std::sin(p2) + 0.4f * std::sin(p3));
@@ -1045,11 +1062,11 @@ static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, u
 		float nx = -dhdx, ny = -dhdy, nz = 1.0f;
 		const float nlen = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
 		nx *= nlen; ny *= nlen; nz *= nlen;
-		const bool hasTexN = liq.Texture != nullptr && liq.Texture->Width > 0 && liq.Texture->Height > 0 && liq.Texture->PixelData.size() >= (size_t)liq.Texture->Width * liq.Texture->Height;
-		if(hasTexN) {
+		const bool hasTexW = liq.Texture != nullptr && liq.Texture->Width > 0 && liq.Texture->Height > 0 && liq.Texture->PixelData.size() >= (size_t)liq.Texture->Width * liq.Texture->Height;
+		if(hasTexW) {
 			const int tw = (int)liq.Texture->Width, th = (int)liq.Texture->Height;
-			const float u = (xN + dhdx * liq.Refract + liq.ScrollX * liq.Time) / liq.TexScale;
-			const float v = (yN - liq.YMin + dhdy * liq.Refract) / liq.TexScale;
+			const float u = (xW + dhdx * liq.Refract + liq.ScrollX * liq.Time) / liq.TexScale;
+			const float v = (yW - liq.YMin + dhdy * liq.Refract) / liq.TexScale;
 			int tx = (int)std::floor(u) % tw; if(tx < 0) tx += tw;
 			int ty = (int)std::floor(v) % th; if(ty < 0) ty += th;
 			const uint32_t c = liq.Texture->PixelData[(size_t)ty * tw + tx];
@@ -1074,8 +1091,8 @@ static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, u
 		const float crest = std::clamp((hn - 0.55f) / 0.35f, 0.0f, 1.0f) * liq.Foam * 0.6f;
 		rr += (255.0f - rr) * crest; gg += (255.0f - gg) * crest; bb += (255.0f - bb) * crest;
 	} else {
-	const float w1 = std::sin(twoPi * (xN / liq.Wave + liq.Speed * liq.Time) + liq.Phase * (OverlayPi / 180.0f));
-	const float w2 = std::sin(twoPi * (yN / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time));
+	const float w1 = std::sin(twoPi * (xW / liq.Wave + liq.Speed * liq.Time) + liq.Phase * (OverlayPi / 180.0f));
+	const float w2 = std::sin(twoPi * (yW / (liq.Wave * 0.6f) - 0.7f * liq.Speed * liq.Time));
 	const float rip = 0.5f * (w1 + w2) * std::min(1.0f, liq.Amp / 6.0f);
 	if(rip >= 0.0f) {
 		rr += (255.0f - rr) * rip * liq.Foam;
@@ -1088,8 +1105,8 @@ static uint32_t LiquidTopPixel(const NesHdLiquidInfo& liq, float xN, float yN, u
 	const bool hasTex = liq.Texture != nullptr && liq.Texture->Width > 0 && liq.Texture->Height > 0 && liq.Texture->PixelData.size() >= (size_t)liq.Texture->Width * liq.Texture->Height;
 	if(hasTex) {
 		const int tw = (int)liq.Texture->Width, th = (int)liq.Texture->Height;
-		const float u = (xN + liq.ScrollX * liq.Time) / liq.TexScale;
-		const float v = (yN - liq.YMin) / liq.TexScale;
+		const float u = (xW + liq.ScrollX * liq.Time) / liq.TexScale;
+		const float v = (yW - liq.YMin) / liq.TexScale;
 		int tx = (int)std::floor(u) % tw; if(tx < 0) tx += tw;
 		int ty = (int)std::floor(v) % th; if(ty < 0) ty += th;
 		const uint32_t c = liq.Texture->PixelData[(size_t)ty * tw + tx];
@@ -1173,7 +1190,7 @@ void HdNesPack<scale>::DrawLiquidBand(int band, uint32_t nesX, uint32_t nesY, ui
 							const uint8_t cv = ci < _liqCover[liq.Priority].size() ? _liqCover[liq.Priority][ci] : 0;
 							if(cv == 255) covered = true; else maskK = (255.0f - (float)cv) / 255.0f;
 						}
-						if(!covered) px = LiquidTopPixel(liq, xN, yN, dst, maskK);
+						if(!covered) px = LiquidTopPixel(liq, xN, yN, dst, maskK, liq.FollowX * liq.FollowAccX, liq.FollowY * liq.FollowAccY);
 					}
 				} else {
 					const float s = liq.Surface[col];
@@ -2366,7 +2383,9 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	_dioWsReady = false;
 	if(_hdData->DioramaEnabled) {
 		const bool dioCheck = (_dioFrame++ % 300) == 0;
+		_dioDrawing = true;
 		RunDioramaLayers(hdScreenInfo, outputBuffer, screenWidth, yStart, yEnd, xStart, xEnd, dioCheck);
+		_dioDrawing = false;
 		DioramaGpuStep(hdScreenInfo, outputBuffer, screenWidth, (yEnd - yStart) * hdScale, yStart, yEnd, dioCheck);
 		tLap = std::chrono::steady_clock::now();
 	}
@@ -2733,7 +2752,7 @@ void HdNesPack<scale>::DetectTile2Obj()
 				o.Y = (float)(y + 8 * gh) - r.Elevation;
 				o.Z = 0.0f;
 				o.Scale = r.Scale; o.RotY = r.RotY; o.RotX = r.RotX; o.RotZ = r.RotZ; o.Radius = r.Radius;
-				o.FromTile2Obj = true; o.BottomY = (float)(y + 8 * gh); o.Elevation = r.Elevation;
+				o.FromTile2Obj = true; o.BottomY = (float)(y + 8 * gh); o.Elevation = r.Elevation; o.CastShadow = r.CastShadow;
 				_dioT2oRules.push_back(o);
 				}
 			}
@@ -2759,6 +2778,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 	}
 	// G3e : groupe de profondeur de la tile de fond (bloc : marque de la tile ; rect= : position). Sprites non concernes.
 	uint32_t* tileTarget = l2;
+	uint32_t* maskTarget = nullptr; // masque du groupe de la tile (topDown)
 	int worldGroup = -1; // doc 53 : groupe avec worldtex=on, pour la tile courante
 	int tileNrm = 0; // G6d : tampon de normales de la couche de la tile (0 = L2, 2 a 5 = groupes)
 	if(!_hdData->DioramaDepthGroups.empty() && l2 != l4) {
@@ -2768,6 +2788,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 		}
 		if(g > 0 && g <= DioGroups && !(hdPackTileInfo && hdPackTileInfo->DioOffCamera)) {
 			tileTarget = _dioG[g - 1].data() + offset;
+			if(_dioGMask[g - 1].size() == _dioG[g - 1].size()) maskTarget = _dioGMask[g - 1].data() + offset;
 			tileNrm = 1 + g;
 			if((size_t)(g - 1) < _hdData->DioramaDepthGroups.size() && _hdData->DioramaDepthGroups[g - 1].WorldTex) worldGroup = g - 1;
 			_dioGLines[g - 1][y] = 1;
@@ -2829,6 +2850,10 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 
 	if(hdPackTileInfo) {
 		if(!hdPackTileInfo->DioIgnore && !(pixelIndex < _dioT2oHide.size() && _dioT2oHide[pixelIndex])) DrawTileLayer(pixelInfo.Tile, *hdPackTileInfo, (l4 && hdPackTileInfo->DioOffCamera) ? l4 : tileTarget, screenWidth);
+		// masque de profondeur (topDown) : seuls les pixels de tile opaques, pas le fond ni la couleur de fond
+		if(maskTarget && hdPackTileInfo && !hdPackTileInfo->DioIgnore) {
+			for(uint32_t yy = 0; yy < scale; yy++) for(uint32_t xx = 0; xx < scale; xx++) if(tileTarget[yy * screenWidth + xx] >> 24) maskTarget[yy * screenWidth + xx] = 0xFF000000u;
+		}
 		// doc 53 : worldtex=on : le fond L0 est recalcule ici aux memes coordonnees (meme DrawBackgroundLayer, donc memes ramx / ramy),
 		// puis copie sur les pixels opaques du groupe. La forme de la tile sert de masque.
 		if(worldGroup >= 0 && lineCfg && !hdPackTileInfo->DioIgnore && !(l4 && hdPackTileInfo->DioOffCamera)) {
@@ -2942,7 +2967,7 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 			if(!(bi.DioTarget == -1 || bi.DioTarget == 0)) continue; // un autre plan : sans effet sur L0
 			const uint32_t pw = bi.Data ? bi.Data->Width : 0, ph = bi.Data ? bi.Data->Height : 0;
 			if(bi.BlendMode != HdPackBlendMode::Alpha || pw == 0 || ph == 0 || (pw % hdScale) != 0 || (ph % hdScale) != 0 ||
-				!_hdData->Textures2D[bi.Priority].empty() || (!bi.TileX && bi.Left != 0) || (!bi.TileY && bi.Top != 0)) { allOk = false; break; }
+				DioGpuTexCount(bi.Priority) > 4 || (!bi.TileX && bi.Left != 0) || (!bi.TileY && bi.Top != 0)) { allOk = false; break; }
 			cand[k] = true; nCand++;
 		}
 		if(allOk && nCand > 0) {
@@ -2967,6 +2992,7 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 				g.OffY = (float)(((int64_t)bi.Top + c.BgScrollY) * (int64_t)hdScale);
 				g.Bright = bi.Brightness >= 255 ? 1.0f : (float)bi.Brightness / 255.0f;
 				g.TileX = bi.TileX; g.TileY = bi.TileY;
+				g.TexPrio = bi.Priority; g.RawX = c.RawScrollX; g.RawY = c.RawScrollY; // <2DTexture> sur le GPU
 			}
 		}
 	}
@@ -3025,8 +3051,9 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 	// G3g : on n'efface que les lignes NES utilisees a l'image precedente (le reste est deja a zero) ; effacement complet si la geometrie change
 	const uint64_t groupKey = ((uint64_t)screenWidth << 40) ^ ((uint64_t)yStart << 24) ^ ((uint64_t)hdScale << 8) ^ (uint64_t)pixels;
 	for(size_t g = 0; g < groupCount; g++) {
-		if(_dioGKey != groupKey || _dioG[g].size() != pixels || _dioGLines[g].size() != 240) {
+		if(_dioGKey != groupKey || _dioG[g].size() != pixels || _dioGLines[g].size() != 240 || _dioGMask[g].size() != pixels) {
 			_dioG[g].assign(pixels, 0u);
+			_dioGMask[g].assign(pixels, 0u);
 			_dioGLines[g].assign(240, 0);
 		} else {
 			for(uint32_t y = 0; y < 240; y++) {
@@ -3036,6 +3063,7 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 				const size_t r0 = (size_t)(y - yStart) * hdScale * screenWidth;
 				if(r0 >= pixels) continue;
 				std::fill(_dioG[g].begin() + r0, _dioG[g].begin() + std::min(pixels, r0 + (size_t)hdScale * screenWidth), 0u);
+				std::fill(_dioGMask[g].begin() + r0, _dioGMask[g].begin() + std::min(pixels, r0 + (size_t)hdScale * screenWidth), 0u);
 			}
 		}
 	}
@@ -3320,6 +3348,44 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 	scene.Scale = (float)GetScale();
 	scene.Aa = cfg.Aa; // G3f
 	scene.FlatMask = _dioTopDown ? ((1u << 0) | (1u << 2) | 0xFF0u) : 0u; // doc 53 : sol a plat = L0, decor L2 et groupes <DioramaDepth> (bits 4..11)
+	// topDown : pied des sprites. Silhouette = pixels couverts par des sprites qui se touchent (4-voisins) ; pied = sa ligne la plus basse.
+	// Le GPU place chaque pixel de sprite debout sur le sol a ce pied, pour le tester contre la profondeur des montagnes.
+	if(_dioTopDown && hdScreenInfo && yEnd > yStart && yStart < 240) {
+		const uint32_t rows = std::min(yEnd, 240u) - yStart;
+		_dioFoot.assign((size_t)256 * rows, 0);
+		std::vector<int> stack, comp;
+		auto covered = [&](int r, int x) { return hdScreenInfo->ScreenTiles[((size_t)(yStart + (uint32_t)r) << 8) | (size_t)x].SpriteCount > 0; };
+		for(int r = 0; r < (int)rows; r++) {
+			for(int x = 0; x < 256; x++) {
+				const int i0 = (r << 8) | x;
+				if(_dioFoot[i0] || !covered(r, x)) continue;
+				stack.clear(); comp.clear();
+				_dioFoot[i0] = 255; stack.push_back(i0);
+				int maxR = r, minX = x, maxX = x;
+				while(!stack.empty()) {
+					const int c = stack.back(); stack.pop_back(); comp.push_back(c);
+					const int cr = c >> 8, cx = c & 255;
+					if(cr > maxR) maxR = cr;
+					if(cx < minX) minX = cx;
+					if(cx > maxX) maxX = cx;
+					const int nr[4] = { cr - 1, cr + 1, cr, cr }, nx[4] = { cx, cx, cx - 1, cx + 1 };
+					for(int k = 0; k < 4; k++) {
+						if(nr[k] < 0 || nr[k] >= (int)rows || nx[k] < 0 || nx[k] > 255) continue;
+						const int j = (nr[k] << 8) | nx[k];
+						if(_dioFoot[j] || !covered(nr[k], nx[k])) continue;
+						_dioFoot[j] = 255; stack.push_back(j);
+					}
+				}
+				const uint8_t v = (uint8_t)(maxR + 1);
+				for(int c : comp) _dioFoot[c] = v;
+				if(scene.SpriteBlobN < 16) { // ombres : panneau de la silhouette (r = ligne du haut, balayage de haut en bas)
+					float* b = scene.SpriteBlob[scene.SpriteBlobN++];
+					b[0] = (float)minX; b[1] = (float)(maxX + 1); b[2] = (float)r; b[3] = (float)(maxR + 1);
+				}
+			}
+		}
+		scene.SpriteFoot = _dioFoot.data(); scene.SpriteFootH = rows;
+	}
 	scene.Clear = _dioL[0].empty() ? 0xFF000000u : (_dioL[0][0] | 0xFF000000u);
 	if(_dioL4Rows && _dioL4.size() >= pixels) { scene.Fixed = _dioL4.data(); scene.FixedY0 = _dioL4Y0; scene.FixedRows = _dioL4Rows; } // G3c
 	if(scene.Fixed && _hdData->DioramaFixed3d) { // G3c3 : plaque epaisse
@@ -3397,6 +3463,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			b = std::min(b + 1, (int)yEnd - 1);
 			const HdDioramaDepthGroup& grp = _hdData->DioramaDepthGroups[g];
 			scene.ExtraImg[g] = _dioG[g].data();
+			scene.ExtraMask[g] = _dioGMask[g].size() == _dioG[g].size() ? _dioGMask[g].data() : nullptr;
 			scene.ExtraY0[g] = (uint32_t)(a - (int)yStart) * hdScale;
 			scene.ExtraRows[g] = (uint32_t)(b - a + 1) * hdScale;
 			scene.ExtraZ[g] = std::max(grp.Z, -0.9f * dist);
@@ -3488,6 +3555,17 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 		HdDioramaBgPlane& bp = scene.Bg[i];
 		bp.Pix = g.Pix; bp.W = g.W; bp.H = g.H; bp.OffX = g.OffX; bp.OffY = g.OffY; bp.Bright = g.Bright; bp.TileX = g.TileX; bp.TileY = g.TileY;
 		bp.Flat = _dioTopDown; const float incR = g.Incl * 3.14159265f / 180.0f; bp.InclC = std::cos(incR); bp.InclS = std::sin(incR); // doc 53
+		// <2DTexture> : remplacement de couleur fait par le shader du fond (4 regles au plus, diorama=off exclues)
+		bp.CtN = 0;
+		for(const NesHdTextureInfo& r : _hdData->Textures2D[g.TexPrio]) {
+			if(r.DioMode == 2 || !r.Texture || r.Texture->PixelData.empty() || r.Texture->Width == 0 || r.Texture->Height == 0) continue;
+			if(r.Texture->PixelData.size() < (size_t)r.Texture->Width * r.Texture->Height || bp.CtN >= 4) continue;
+			HdDioramaColorTex& ct = bp.Ct[bp.CtN++];
+			ct.Pix = r.Texture->PixelData.data(); ct.W = r.Texture->Width; ct.H = r.Texture->Height;
+			ct.HasKey = r.HasKey; ct.Key = r.Key;
+			ct.TexelX = r.TexelPerPxX; ct.TexelY = r.TexelPerPxY;
+			ct.OffX = std::floor((float)g.RawX * r.RatioX * (float)GetScale()); ct.OffY = std::floor((float)g.RawY * r.RatioY * (float)GetScale());
+		}
 	}
 	// Fonds <background> de L0 prolonges au-dela de l'ecran (bandes widescreen et marges wide= / tall= pour la rotation de la camera) :
 	// L0 elargie, centre = L0, marges = les memes fonds.
@@ -3784,6 +3862,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			o.Scale = r.Scale;
 			o.Lit = r.Lit;
 			o.Shadow = r.Shadow;
+			o.CastShadow = r.CastShadow && _dioTopDown;
 			o.WinOn = false;
 			if(r.HasWindow && !r.ScrollX.Empty()) { // fenetre sur le niveau : [defilement - marge, defilement + largeur + marge], convertie en x du modele
 				o.WinOn = true;
@@ -4016,7 +4095,7 @@ void HdNesPack<scale>::DrawWidescreenLiquidPixel(uint32_t hb, uint32_t outWidth,
 		}
 		if(liq.IsTop) {
 			if(yN >= liq.YMin && yN < liq.YMax) {
-				px = LiquidTopPixel(liq, xN, yN, px);
+				px = LiquidTopPixel(liq, xN, yN, px, 1.0f, liq.FollowX * liq.FollowAccX, liq.FollowY * liq.FollowAccY);
 			}
 		} else {
 			const float s = _wsLiqSurface[k][hb];

@@ -795,6 +795,7 @@ struct NesHdTextureInfo
 	float TexelPerPxY = 1.0f;
 	float RatioX = 0.0f;       // defilement : scroll PPU (pixels NES) x ratio
 	float RatioY = 0.0f;
+	uint8_t DioMode = 0;       // diorama= : 0 on (partout), 1 only (seulement en diorama), 2 off (jamais en diorama)
 };
 
 // <2DLiquid> (vue de profil, phase 1) : liquide sous une surface ondulee. Dimensions en pixels NES.
@@ -881,6 +882,9 @@ struct NesHdLiquidInfo
 	uint32_t Color = 0x1E6FB0, Deep = 0x0B2F5C;
 	HdPackBitmapInfo* Texture = nullptr;  // PNG optionnel, repete et defilant
 	float Time = 0.0f;                    // temps d'activite (houle, defilement)
+	float FollowX = 0.0f, FollowY = 0.0f; // followx= / followy= (view=top) : part du defilement de la carte (scroll PPU) suivie par l'eau (1 = colle a la carte)
+	float FollowAccX = 0.0f, FollowAccY = 0.0f; // scroll PPU cumule sans retour a zero (pixels NES)
+	int32_t FollowLastX = 0, FollowLastY = 0; bool FollowHasLast = false;
 	bool IsTop = false;                   // view=top : zone rectangulaire ondulee (ymin/ymax) au lieu d'une surface
 	float YMin = 0.0f, YMax = 240.0f;     // view=top : zone verticale (lignes NES depuis le haut de l'image)
 	float Glow = 0.0f;                    // halo au-dessus de la surface (0 a 1)
@@ -1112,6 +1116,7 @@ struct HdDioramaObjectRule
 	bool Lit = true;                     // lit=off : l'objet n'est pas eclaire par <DioramaLight> (couleur de la texture telle quelle)
 	bool HasWindow = false; float Window = 0.0f; // window=N : seuls les triangles a moins de N pixels NES de l'ecran (dans le niveau, avec scrollx=) sont dessines
 	float Radius = 0.0f;                 // distance maximale d'un sommet a l'origine du modele x scale (pixels NES), pour ne pas dessiner un objet hors ecran
+	bool CastShadow = false;             // castshadow=on (Tile2Obj, topDown) : ombre projetee sur le sol
 	bool FromTile2Obj = false;           // instance <Tile2Obj> : en topDown, posee sur le sol (BottomY = bas du motif en pixels NES, Elevation = hauteur)
 	float BottomY = 0.0f, Elevation = 0.0f;
 	HdDioramaExpr ScrollX, ScrollY;      // scrollx= / scrolly= : defilement du niveau (pixels) ; position a l'ecran = x - scrollx
@@ -1141,6 +1146,7 @@ struct HdDioramaTile2ObjRule
 	float RotY = 0.0f;                   // rotation= : degres autour de la verticale
 	float RotX = 0.0f, RotZ = 0.0f;      // rotx= / rotz= : degres (axes du modele)
 	float Radius = 0.0f;                 // rayon du modele a l'echelle, pour le test d'ecran
+	bool CastShadow = false;             // castshadow=on : ombre projetee sur le sol (topDown, avec <DioramaShadow>)
 	vector<HdPackCondition*> Conditions;
 };
 

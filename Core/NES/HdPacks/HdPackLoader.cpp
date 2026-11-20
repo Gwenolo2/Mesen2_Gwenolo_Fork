@@ -2753,6 +2753,10 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 				if(val.empty() || endp == val.c_str() || *endp != 0) { logError("Tile2Obj : palette doit etre * ou RRGGBBAA hexa : " + val + ", ligne ignoree."); return; }
 				r.AnyPalette = false; r.Palette = (uint32_t)v;
 			}
+		} else if(key == "castshadow") {
+			if(val == "on" || val == "1" || val == "yes") r.CastShadow = true;
+			else if(val == "off" || val == "0" || val == "no") r.CastShadow = false;
+			else { logError("Tile2Obj : castshadow doit etre on ou off : " + val + ", ligne ignoree."); return; }
 		} else if(key == "tex") {
 			texName = raw;
 		} else if(key == "color") {
@@ -3733,6 +3737,13 @@ void HdPackLoader::ProcessTexture2DTag(vector<string>& tokens, vector<HdPackCond
 	info.TexelPerPxY = 100.0f / sy;
 	info.RatioX = num("scrollx", 0.0f);
 	info.RatioY = num("scrolly", 0.0f);
+	{
+		const string dm = StringUtilities::ToLower(StringUtilities::Trim(str("diorama")));
+		if(dm.empty() || dm == "on" || dm == "all") info.DioMode = 0;
+		else if(dm == "only") info.DioMode = 1;
+		else if(dm == "off") info.DioMode = 2;
+		else { logError("2DTexture : diorama doit etre on, only ou off : " + dm); return; }
+	}
 
 	// Texture chargee une seule fois, partagee par nom (comme <2DLiquid>)
 	HdPackBitmapInfo* found = nullptr;
@@ -3807,6 +3818,8 @@ void HdPackLoader::ProcessLiquidTag(vector<string>& tokens, vector<HdPackConditi
 	liquid->Speed = num("speed", 0.8f);
 	liquid->Phase = num("phase", 0.0f);
 	liquid->ScrollX = num("scrollx", 0.0f);
+	liquid->FollowX = num("followx", 0.0f);
+	liquid->FollowY = num("followy", 0.0f);
 	liquid->TexScale = std::max(0.01f, num("texscale", 1.0f));
 	liquid->Foam = std::clamp(num("foam", 0.6f), 0.0f, 1.0f);
 	liquid->Alpha = std::clamp(num("alpha", 1.0f), 0.0f, 1.0f);
