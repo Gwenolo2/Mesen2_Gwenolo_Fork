@@ -9,6 +9,9 @@
 #include "Utilities/HexUtilities.h"
 #include "Shared/HdWatchExpr.h"
 #include "Utilities/SimpleLock.h"
+
+// Decodage d'image hors PNG (JPG, BMP, TGA via stb_image), defini dans SNES/HdPacks/SnesHdGltf.cpp
+bool SnesHdDecodeImageFallback(const std::vector<uint8_t>& data, std::vector<uint32_t>& pixels, uint32_t& w, uint32_t& h);
 #include "Utilities/Timer.h"
 #include "Utilities/VirtualFile.h"
 #include "Shared/pl_mpeg.h"
@@ -263,6 +266,8 @@ public:
 		//Timer tmr;
 		if(PNGHelper::ReadPNG(FileData, PixelData, Width, Height)) {
 			//MessageManager::Log("[HDPack] PNG file loaded: " + PngName + " (" + std::to_string(tmr.GetElapsedMS()) + ")");
+			PremultiplyAlpha();
+		} else if(!FileData.empty() && SnesHdDecodeImageFallback(FileData, PixelData, Width, Height)) { // JPG / BMP / TGA
 			PremultiplyAlpha();
 		} else {
 			MessageManager::Log("[HDPack] PNG file " + PngName + " is invalid.");
@@ -796,6 +801,11 @@ struct NesHdTextureInfo
 	float RatioX = 0.0f;       // defilement : scroll PPU (pixels NES) x ratio
 	float RatioY = 0.0f;
 	uint8_t DioMode = 0;       // diorama= : 0 on (partout), 1 only (seulement en diorama), 2 off (jamais en diorama)
+	// Materiau PBR (diorama, fond GPU) : image combinee R = normale x, G = normale y (convention OpenGL), B = AO, A = rugosite
+	std::shared_ptr<std::vector<uint32_t>> Mat; uint32_t MatW = 0, MatH = 0;
+	float NStrength = 1.0f, AoStrength = 1.0f, Specular = 0.5f;
+	// Defilement de la normale (eau) : flowx / flowy (pixels NES par seconde) ; seconde couche flow2x / flow2y a l'echelle flow2scale
+	float FlowX = 0.0f, FlowY = 0.0f, Flow2X = 0.0f, Flow2Y = 0.0f, Flow2Scale = 1.37f; bool HasFlow2 = false;
 };
 
 // <2DLiquid> (vue de profil, phase 1) : liquide sous une surface ondulee. Dimensions en pixels NES.
@@ -1099,6 +1109,7 @@ struct HdDioramaViewRule
 	bool Has[4] = { false, false, false, false }; // yaw, pitch, dist, zoom (seuls pitch et zoom sont lus pour l'instant)
 	float V[4] = { 0, 0, 0, 1 };
 	bool HasTime = false; float Time = 40.0f;     // duree de la transition vers cette vue, en images
+	float FloorMargin = -1.0f;                     // floormargin= : etendue du sol GPU autour de l'ecran (pixels NES) ; -1 = defaut (1024)
 };
 
 struct HdDioramaObjectRule

@@ -157,6 +157,10 @@ struct HdDioramaColorTex
 	bool HasKey = true; uint32_t Key = 0; // RRGGBB
 	float TexelX = 1.0f, TexelY = 1.0f;   // texels par pixel HD
 	float OffX = 0.0f, OffY = 0.0f;       // decalage (pixels HD) : scroll PPU x ratio x echelle
+	const uint32_t* MatPix = nullptr; uint32_t MatW = 0, MatH = 0; // materiau : R normale x, G normale y, B AO, A rugosite (nullptr = aucun)
+	float NStrength = 1.0f, AoStrength = 1.0f, Specular = 0.5f;
+	float Flow[4] = { 0, 0, 0, 0 };   // decalage de la normale (fraction de la texture) : couche 1 (x, y), couche 2 (z, w)
+	bool HasFlow2 = false; float Flow2Scale = 1.37f;
 };
 
 struct HdDioramaBgPlane
@@ -204,6 +208,7 @@ struct HdDioramaScene
 	const uint8_t* SpriteFoot = nullptr; uint32_t SpriteFootH = 0;
 	// topDown : silhouettes de sprites (16 au plus) : x debut, x fin (exclue), ligne du haut, pied (lignes du plan) ; pour les ombres
 	float SpriteBlob[16][4] = {}; int SpriteBlobN = 0;
+	int SpriteBlobTotal = 0; // nombre total de silhouettes (au-dela de 16 : sprites sur le plan entier, comme avant)
 	const uint32_t* ExtraMask[HdDioMaxGroups] = {}; // topDown : tiles de montagne du groupe (alpha 255), pour la profondeur seule
 	uint32_t ExtraY0[HdDioMaxGroups] = {}, ExtraRows[HdDioMaxGroups] = {};
 	float ExtraZ[HdDioMaxGroups] = {};      // profondeur de la face avant (pixels NES)

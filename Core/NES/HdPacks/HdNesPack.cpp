@@ -2386,7 +2386,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 		_dioDrawing = true;
 		RunDioramaLayers(hdScreenInfo, outputBuffer, screenWidth, yStart, yEnd, xStart, xEnd, dioCheck);
 		_dioDrawing = false;
-		DioramaGpuStep(hdScreenInfo, outputBuffer, screenWidth, (yEnd - yStart) * hdScale, yStart, yEnd, dioCheck);
+		DioramaGpuStep(hdScreenInfo, outputBuffer, screenWidth, (yEnd - yStart) * hdScale, yStart, yEnd, dioCheck && _dioGpuBgN == 0);
 		tLap = std::chrono::steady_clock::now();
 	}
 	//<2DReflect> : reflet des sprites sous le sol, sur l'image composee (avant les overlays)
@@ -2953,7 +2953,7 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 	// ou fond fixe), le GPU les dessine comme un plan repete a la profondeur de L0 (marges infinies, aucun envoi d'image) ; sinon,
 	// dessin par le processeur comme avant. Pas pendant le controle d'identite GPU / processeur (compare).
 	_dioGpuBgN = 0;
-	if(!compare && _dioGpuOk && _activeBgCount[0] > 0 && _activeBgCount[0] <= 4 && !_zEnabled && !_hdData->HasIgnore2D && _hdData->Diorama.T[0] <= 0.0f && yEnd > yStart && yEnd <= 240) {
+	if(_dioGpuOk && _activeBgCount[0] > 0 && _activeBgCount[0] <= 4 && !_zEnabled && !_hdData->HasIgnore2D && _hdData->Diorama.T[0] <= 0.0f && yEnd > yStart && yEnd <= 240) {
 		const int nAct = _activeBgCount[0];
 		HdBgConfig first[50], lc[50];
 		ComputeLineBgConfig(hdScreenInfo->ScreenTiles[yStart << 8], (uint8_t)yStart, first);
@@ -2966,7 +2966,7 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 			const HdBackgroundInfo& bi = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
 			if(!(bi.DioTarget == -1 || bi.DioTarget == 0)) continue; // un autre plan : sans effet sur L0
 			const uint32_t pw = bi.Data ? bi.Data->Width : 0, ph = bi.Data ? bi.Data->Height : 0;
-			if(bi.BlendMode != HdPackBlendMode::Alpha || pw == 0 || ph == 0 || (pw % hdScale) != 0 || (ph % hdScale) != 0 ||
+			if(bi.BlendMode != HdPackBlendMode::Alpha || pw == 0 || ph == 0 || (bi.TileX && (pw % hdScale) != 0) || (bi.TileY && (ph % hdScale) != 0) || // taille multiple de l'echelle : seulement pour un fond repete (periode en pixels NES)
 				DioGpuTexCount(bi.Priority) > 4 || (!bi.TileX && bi.Left != 0) || (!bi.TileY && bi.Top != 0)) { allOk = false; break; }
 			cand[k] = true; nCand++;
 		}
@@ -3138,7 +3138,7 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 	}
 	const double layersMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 	_dioMsLayers += layersMs;
-	if(!compare) return;
+	if(!compare || _dioGpuBgN > 0) return; // fond dessine par le GPU : L0 n'a pas le fond, controle d'identite sans objet (l'image de controle n'est plus differente : pas de flash)
 
 	// Comparaison : L0, puis L1, L2, L3 par-dessus
 	uint32_t diff = 0, big = 0, excused = 0, shown = 0;
@@ -3231,9 +3231,11 @@ void HdNesPack<scale>::DioramaCameraStep(const HdDioramaConfig& cfg, float& yaw,
 	}
 	// <DioramaView> (doc 53) : reglages de vue selon [cond] ; la derniere regle vraie l'emporte (pitch, zoom, time)
 	_dioTopDown = false;
+	_dioFloorMargin = -1.0f;
 	for(const HdDioramaViewRule& r : _hdData->DioramaViews) {
 		if(!condsOk(r.Conditions)) continue;
 		_dioTopDown = true; // doc 53 : vue topDown active (sol a plat)
+		if(r.FloorMargin >= 0.0f) _dioFloorMargin = r.FloorMargin;
 		for(int i = 0; i < 4; i++) { if(r.Has[i]) v[i] = r.V[i]; }
 		if(r.HasTime) time = r.Time;
 	}
@@ -3378,6 +3380,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 				}
 				const uint8_t v = (uint8_t)(maxR + 1);
 				for(int c : comp) _dioFoot[c] = v;
+				scene.SpriteBlobTotal++;
 				if(scene.SpriteBlobN < 16) { // ombres : panneau de la silhouette (r = ligne du haut, balayage de haut en bas)
 					float* b = scene.SpriteBlob[scene.SpriteBlobN++];
 					b[0] = (float)minX; b[1] = (float)(maxX + 1); b[2] = (float)r; b[3] = (float)(maxR + 1);
@@ -3550,6 +3553,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 	// Fonds de L0 dessines par le GPU (voir RunDioramaLayers)
 	scene.BgCount = _dioGpuBgN;
 	scene.BgYStart = (float)yStart;
+	if(_dioTopDown && _dioFloorMargin >= 0.0f) scene.BgMargin = _dioFloorMargin; // <DioramaView> floormargin=
 	for(int i = 0; i < _dioGpuBgN; i++) {
 		const DioGpuBg& g = _dioGpuBg[i];
 		HdDioramaBgPlane& bp = scene.Bg[i];
@@ -3564,6 +3568,14 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			ct.Pix = r.Texture->PixelData.data(); ct.W = r.Texture->Width; ct.H = r.Texture->Height;
 			ct.HasKey = r.HasKey; ct.Key = r.Key;
 			ct.TexelX = r.TexelPerPxX; ct.TexelY = r.TexelPerPxY;
+			if(r.Mat && r.MatW > 0 && r.MatH > 0) { ct.MatPix = r.Mat->data(); ct.MatW = r.MatW; ct.MatH = r.MatH; ct.NStrength = r.NStrength; ct.AoStrength = r.AoStrength; ct.Specular = r.Specular; }
+			{ // eau : la normale defile (pixels NES par seconde -> fraction de la texture), seconde couche a une autre echelle
+				const float tSec = hdScreenInfo ? (float)hdScreenInfo->FrameNumber / 60.0f : 0.0f;
+				const float kx = (float)GetScale() * r.TexelPerPxX / (float)r.Texture->Width, ky = (float)GetScale() * r.TexelPerPxY / (float)r.Texture->Height;
+				ct.Flow[0] = std::fmod(r.FlowX * tSec * kx, 1.0f); ct.Flow[1] = std::fmod(r.FlowY * tSec * ky, 1.0f);
+				ct.Flow[2] = std::fmod(r.Flow2X * tSec * kx * r.Flow2Scale, 1.0f); ct.Flow[3] = std::fmod(r.Flow2Y * tSec * ky * r.Flow2Scale, 1.0f);
+				ct.HasFlow2 = r.HasFlow2; ct.Flow2Scale = r.Flow2Scale;
+			}
 			ct.OffX = std::floor((float)g.RawX * r.RatioX * (float)GetScale()); ct.OffY = std::floor((float)g.RawY * r.RatioY * (float)GetScale());
 		}
 	}

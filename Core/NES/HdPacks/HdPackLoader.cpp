@@ -3096,6 +3096,7 @@ void HdPackLoader::ProcessDioramaViewTag(vector<string>& tokens, vector<HdPackCo
 		if(key == "pitch") { if(!num(-70, 70, r.V[1])) return; r.Has[1] = true; }
 		else if(key == "zoom") { if(!num(0.1f, 4, r.V[3])) return; r.Has[3] = true; }
 		else if(key == "time") { if(!num(0, 1000, r.Time)) return; r.HasTime = true; }
+		else if(key == "floormargin") { if(!num(0, 4096, r.FloorMargin)) return; }
 		else { logError("DioramaView : option inconnue : " + key + ", ligne ignoree."); return; }
 	}
 	if(_data->DioramaViews.size() >= 16) { logError("DioramaView : 16 regles au plus, ligne ignoree."); return; }
@@ -3702,6 +3703,41 @@ void HdPackLoader::ProcessTexture2DTag(vector<string>& tokens, vector<HdPackCond
 	};
 
 	string tex = StringUtilities::Trim(str("texture"));
+	// Materiau PBR : set=dossier (cartes reconnues par les mots du nom, comme <m7material>) ou normal= roughness= ao=
+	string fNormal = str("normal"), fRough = str("roughness"), fAo = str("ao");
+	if(fAo.empty()) fAo = str("occlusion");
+	int normalConv = -1; // -1 = selon le nom du fichier (dx), 0 = OpenGL, 1 = DirectX
+	{ const string nc = StringUtilities::ToLower(str("normalconv")); if(nc == "dx" || nc == "directx") normalConv = 1; else if(nc == "gl" || nc == "opengl") normalConv = 0; }
+	const string setDir = StringUtilities::Trim(str("set"));
+	if(!setDir.empty()) {
+		std::vector<string> names;
+		try {
+			for(const auto& e : std::filesystem::directory_iterator(FolderUtilities::CombinePath(_hdPackFolder, setDir))) {
+				if(!e.is_regular_file()) continue;
+				const string ext = StringUtilities::ToLower(e.path().extension().string());
+				if(ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp") names.push_back(e.path().filename().string());
+			}
+		} catch(...) { logError("2DTexture : dossier introuvable : " + setDir); }
+		std::sort(names.begin(), names.end());
+		auto words = [](string s) { s = StringUtilities::ToLower(s); std::vector<string> w; string cur; for(char ch : s) { if(std::isalnum((unsigned char)ch)) cur += ch; else { if(!cur.empty()) w.push_back(cur); cur.clear(); } } if(!cur.empty()) w.push_back(cur); return w; };
+		string nGL, nDX, fAlb;
+		for(const string& nm : names) {
+			const std::vector<string> w = words(nm);
+			auto has = [&](std::initializer_list<const char*> lst) { for(const string& x : w) for(const char* y : lst) if(x == y) return true; return false; };
+			const string rel = setDir + ((setDir.back() == '/' || setDir.back() == '\\') ? "" : "\\") + nm;
+			if(has({ "preview", "thumb", "sphere", "cube" })) continue;
+			if(has({ "normal", "normalgl", "normaldx", "nor", "nrm", "normalmap", "norm" })) { string& slot = has({ "normaldx", "dx", "directx" }) ? nDX : nGL; if(slot.empty()) slot = rel; }
+			else if(has({ "roughness", "rough", "rgh" })) { if(fRough.empty()) fRough = rel; }
+			else if(has({ "ambientocclusion", "occlusion", "ao", "occ" })) { if(fAo.empty()) fAo = rel; }
+			else if(has({ "displacement", "disp", "height", "bump", "depth", "metalness", "metallic", "metal", "gloss", "glossiness", "emission", "emissive", "arm", "orm" })) continue;
+			else if(has({ "basecolor", "albedo", "diffuse", "diff", "color", "col", "colour" })) { if(fAlb.empty()) fAlb = rel; }
+		}
+		if(fNormal.empty()) {
+			if(!nGL.empty() && normalConv != 1) { fNormal = nGL; if(normalConv < 0) normalConv = 0; }
+			else if(!nDX.empty()) { fNormal = nDX; if(normalConv < 0) normalConv = 1; }
+		}
+		if(tex.empty()) tex = fAlb;
+	}
 	if(tex.empty()) {
 		logError("2DTexture : parametre texture=fichier.png manquant");
 		return;
@@ -3763,6 +3799,46 @@ void HdPackLoader::ProcessTexture2DTag(vector<string>& tokens, vector<HdPackCond
 		found = bitmapInfo;
 	}
 	info.Texture = found;
+	// Materiau PBR : normale, AO et rugosite reunies dans une image (taille de la normale, sinon de la premiere carte trouvee)
+	if(!fNormal.empty() || !fRough.empty() || !fAo.empty()) {
+		auto readImg = [&](const string& f, std::vector<uint32_t>& px, uint32_t& w, uint32_t& h) -> bool {
+			if(f.empty()) return false;
+			std::vector<uint8_t> raw;
+			if(!LoadFile(f, raw)) { logError("2DTexture : carte introuvable : " + f); return false; }
+			if(PNGHelper::ReadPNG(raw, px, w, h)) return true;
+			if(SnesHdDecodeImageFallback(raw, px, w, h)) return true;
+			logError("2DTexture : format d'image non lu : " + f);
+			return false;
+		};
+		std::vector<uint32_t> pn, pr, pa; uint32_t wn = 0, hn = 0, wr = 0, hr = 0, wa = 0, ha = 0;
+		const bool hasN = readImg(fNormal, pn, wn, hn), hasR = readImg(fRough, pr, wr, hr), hasA = readImg(fAo, pa, wa, ha);
+		if(normalConv < 0) normalConv = 0;
+		const float roughDef = std::clamp(num("rough", 0.8f), 0.0f, 1.0f);
+		uint32_t W = hasN ? wn : (hasR ? wr : wa), H = hasN ? hn : (hasR ? hr : ha);
+		if((hasN || hasR || hasA) && W > 0 && H > 0) {
+			auto m = std::make_shared<std::vector<uint32_t>>((size_t)W * H);
+			auto at = [](const std::vector<uint32_t>& p, uint32_t pw, uint32_t ph, uint32_t x, uint32_t y, uint32_t W, uint32_t H) {
+				return p[(size_t)((uint64_t)y * ph / H) * pw + (size_t)((uint64_t)x * pw / W)];
+			};
+			for(uint32_t y = 0; y < H; y++) {
+				for(uint32_t x = 0; x < W; x++) {
+					uint32_t nx = 128, ny = 128, ao = 255, ro = (uint32_t)(roughDef * 255.0f + 0.5f);
+					if(hasN) { const uint32_t c = at(pn, wn, hn, x, y, W, H); nx = (c >> 16) & 0xFF; ny = (c >> 8) & 0xFF; if(normalConv == 1) ny = 255 - ny; }
+					if(hasR) ro = (at(pr, wr, hr, x, y, W, H) >> 16) & 0xFF;
+					if(hasA) ao = (at(pa, wa, ha, x, y, W, H) >> 16) & 0xFF;
+					(*m)[(size_t)y * W + x] = (ro << 24) | (nx << 16) | (ny << 8) | ao;
+				}
+			}
+			info.Mat = m; info.MatW = W; info.MatH = H;
+			info.NStrength = std::clamp(num("strength", 1.0f), 0.0f, 5.0f);
+			info.AoStrength = std::clamp(num("aostrength", 1.0f), 0.0f, 2.0f);
+			info.Specular = std::clamp(num("specular", 0.5f), 0.0f, 4.0f);
+			info.FlowX = num("flowx", 0.0f); info.FlowY = num("flowy", 0.0f);
+			info.HasFlow2 = !str("flow2x").empty() || !str("flow2y").empty();
+			info.Flow2X = num("flow2x", 0.0f); info.Flow2Y = num("flow2y", 0.0f);
+			info.Flow2Scale = std::clamp(num("flow2scale", 1.37f), 0.05f, 20.0f);
+		}
+	}
 	_data->Textures2D[prio].push_back(info);
 }
 

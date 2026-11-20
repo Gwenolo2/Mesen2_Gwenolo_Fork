@@ -191,6 +191,7 @@ private:
 	uint32_t _dioN = 0, _dioFail = 0;
 	// Fonds de L0 dessines par le GPU (doc 52) : identifiants (priorite, index) et parametres du plan
 	struct DioGpuBg { int Prio = 0, Index = 0; const uint32_t* Pix = nullptr; uint32_t W = 0, H = 0; float OffX = 0, OffY = 0, Bright = 1.0f; bool TileX = false, TileY = false; float Incl = 0.0f; int TexPrio = 0; int32_t RawX = 0, RawY = 0; };
+	float _dioFloorMargin = -1.0f; // <DioramaView> floormargin= (topDown), -1 = defaut
 	bool _dioDrawing = false; // vrai pendant RunDioramaLayers : <2DTexture> diorama=off ignore ; hors diorama, diorama=only ignore
 	DioGpuBg _dioGpuBg[4];
 	int _dioGpuBgN = 0;
