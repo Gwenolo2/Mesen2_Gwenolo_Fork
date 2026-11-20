@@ -159,6 +159,9 @@ private:
 	vector<uint8_t> _dioLDirty[2];
 	bool _dioLFull = true;
 	uint64_t _dioLKey = 0;
+	vector<uint8_t> _dioT2oHide;               // Tile2Obj (doc 53) : pixels dont la tile est remplacee par un modele (diorama seulement)
+	vector<HdDioramaObjectRule> _dioT2oRules;  // Tile2Obj : instances de cette image
+	void DetectTile2Obj();
 	vector<float> _dioObjSpin;       // H1 : angle de rotation continue (degres) de chaque regle <DioramaObject>
 	vector<uint32_t> _dioNrm[10];       // G6d : normales (L2, L3, groupes 1 a 4), meme taille que les couches
 	vector<uint8_t> _dioNrmLines[10];  // G6d : 1 = la ligne NES a recu une normale

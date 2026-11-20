@@ -2328,6 +2328,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 		}
 	}
 
+	if(!_hdData->Tile2ObjRules.empty()) DetectTile2Obj(); else if(!_dioT2oRules.empty() || !_dioT2oHide.empty()) { _dioT2oRules.clear(); _dioT2oHide.clear(); }
 	lap(1);
 	//Passe 2 (parallele) : dessin. Chaque ligne NES ecrit ses propres lignes HD, sans recouvrement.
 	auto drawLine = [&](uint32_t i) {
@@ -2695,6 +2696,51 @@ void HdNesPack<scale>::DrawNormalLayer(HdPpuTileInfo &tileInfo, HdPackTileInfo &
 // Meme logique de choix que DrawPixel (bloc scale x scale d'un pixel NES), repartie sur les couches.
 // L0 et L1 sont dessinees meme quand la tile de fond est opaque (elles sont alors cachees : l'identite est inchangee,
 // et le diorama pourra les montrer si la tile est decalee en profondeur).
+// Tile2Obj (doc 53) : cherche chaque motif (group=, grid=) sur l'ecran. Les coins de tile seuls peuvent ancrer un motif (OffsetX/OffsetY = 0).
+// Pour chaque motif trouve : ses pixels sont masques dans le diorama (la tile n'est plus dessinee dans les couches 3D) et une instance
+// de modele est creee au centre du motif, base sur son bord bas (moins elevation=). Les conditions [cond] sont evaluees ici.
+template<uint32_t scale>
+void HdNesPack<scale>::DetectTile2Obj()
+{
+	_dioT2oHide.assign(256 * 240, 0);
+	_dioT2oRules.clear();
+	if(!_hdScreenInfo) return;
+	for(const HdDioramaTile2ObjRule& r : _hdData->Tile2ObjRules) {
+		bool ok = true;
+		for(HdPackCondition* c : r.Conditions) {
+			if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; }
+		}
+		if(!ok || r.Parts.empty() || r.Group.empty()) continue;
+		const int gw = r.GridW, gh = r.GridH;
+		for(int y = 0; y + 8 * gh <= 240; y++) {
+			for(int x = 0; x + 8 * gw <= 256; x++) {
+				const HdPpuPixelInfo& p0 = _hdScreenInfo->ScreenTiles[((uint32_t)y << 8) | (uint32_t)x];
+				if(p0.Tile.OffsetX != 0 || p0.Tile.OffsetY != 0) continue;
+				bool match = true;
+				for(int j = 0; j < gh && match; j++) {
+					for(int i = 0; i < gw && match; i++) {
+						const HdPpuPixelInfo& q = _hdScreenInfo->ScreenTiles[((uint32_t)(y + 8 * j) << 8) | (uint32_t)(x + 8 * i)];
+						if(q.Tile.OffsetX != 0 || q.Tile.OffsetY != 0 || (uint32_t)q.Tile.TileIndex != r.Group[j * gw + i]) match = false;
+						else if(!r.AnyPalette && q.Tile.PaletteColors != r.Palette) match = false;
+					}
+				}
+				if(!match) continue;
+				for(int yy = 0; yy < 8 * gh; yy++) for(int xx = 0; xx < 8 * gw; xx++) _dioT2oHide[((y + yy) << 8) | (x + xx)] = 1;
+				for(const HdDioramaTile2ObjPart& part : r.Parts) { // une instance par materiau (texture propre)
+				HdDioramaObjectRule o;
+				o.Mesh = part.Mesh; o.Tex = part.Tex; o.Color = r.Color;
+				o.X = (float)x + 4.0f * (float)gw;
+				o.Y = (float)(y + 8 * gh) - r.Elevation;
+				o.Z = 0.0f;
+				o.Scale = r.Scale; o.RotY = r.RotY; o.RotX = r.RotX; o.RotZ = r.RotZ; o.Radius = r.Radius;
+				o.FromTile2Obj = true; o.BottomY = (float)(y + 8 * gh); o.Elevation = r.Elevation;
+				_dioT2oRules.push_back(o);
+				}
+			}
+		}
+	}
+}
+
 template<uint32_t scale>
 void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelInfo, size_t offset, uint32_t screenWidth, const HdBgConfig* lineCfg)
 {
@@ -2782,7 +2828,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 	drawBgs(1, l1);
 
 	if(hdPackTileInfo) {
-		if(!hdPackTileInfo->DioIgnore) DrawTileLayer(pixelInfo.Tile, *hdPackTileInfo, (l4 && hdPackTileInfo->DioOffCamera) ? l4 : tileTarget, screenWidth);
+		if(!hdPackTileInfo->DioIgnore && !(pixelIndex < _dioT2oHide.size() && _dioT2oHide[pixelIndex])) DrawTileLayer(pixelInfo.Tile, *hdPackTileInfo, (l4 && hdPackTileInfo->DioOffCamera) ? l4 : tileTarget, screenWidth);
 		// doc 53 : worldtex=on : le fond L0 est recalcule ici aux memes coordonnees (meme DrawBackgroundLayer, donc memes ramx / ramy),
 		// puis copie sur les pixels opaques du groupe. La forme de la tile sert de masque.
 		if(worldGroup >= 0 && lineCfg && !hdPackTileInfo->DioIgnore && !(l4 && hdPackTileInfo->DioOffCamera)) {
@@ -3599,17 +3645,22 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 		int n = 0;
 		bool any = false;
 		const float tSec = hdScreenInfo ? (float)hdScreenInfo->FrameNumber / 60.0f : 0.0f;
-		auto addLight = [&](const HdDioramaLightRule& r, float px, float py) {
+		auto addLight = [&](const HdDioramaLightRule& r, float px, float py, bool onFloor) {
 			if(n >= 8) return;
 			HdDioramaLight& l = scene.Lights.L[n++];
 			const float fk = r.Flicker > 0.0f ? 1.0f - r.Flicker * 0.5f * (1.0f + std::sin(r.FlickerSpeed * tSec)) : 1.0f;
 			l.Type = r.Type;
 			rgb(r.Color, r.Intensity * fk, l.Col);
 			if(r.Type == 2) {
-				l.Pos[0] = px; l.Pos[1] = py; l.Pos[2] = r.Z; l.Radius = r.Radius; l.Glow = r.Glow * fk; l.GlowRadius = r.GlowRadius;
+				if(_dioTopDown && onFloor) { // topDown, lumiere de tile : posee sur le sol (Y = -|y| au-dessus, profondeur = verticale de l'image)
+					l.Pos[0] = px; l.Pos[1] = -std::fabs(r.Y); l.Pos[2] = scene.H * 0.5f - py;
+				} else { l.Pos[0] = px; l.Pos[1] = py; l.Pos[2] = r.Z; } l.Radius = r.Radius; l.Glow = r.Glow * fk; l.GlowRadius = r.GlowRadius;
 			} else {
-				const float len = std::sqrt(r.Dx * r.Dx + r.Dy * r.Dy + r.Dz * r.Dz);
-				l.Pos[0] = -r.Dx / len; l.Pos[1] = -r.Dy / len; l.Pos[2] = -r.Dz / len; // vers la lumiere
+				// topDown : soleil venant du dessus par defaut (0.3, 1.0, 0.3), sauf dx/dy/dz ecrits dans le pack
+				const bool topSun = _dioTopDown && !r.DirGiven;
+				const float sdx = topSun ? 0.3f : r.Dx, sdy = topSun ? 1.0f : r.Dy, sdz = topSun ? 0.3f : r.Dz;
+				const float len = std::sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+				l.Pos[0] = -sdx / len; l.Pos[1] = -sdy / len; l.Pos[2] = -sdz / len; // vers la lumiere
 			}
 		};
 		bool anyTile = false;
@@ -3622,10 +3673,12 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			if(!ok) continue;
 			any = true;
 			if(r.Type == 1) { rgb(r.Color, r.Intensity, scene.Lights.Ambient); continue; }
-			addLight(r, r.X, r.Y);
+			// topDown : le sol est a Y = 0 et le haut est negatif : lumiere au-dessus du sol par defaut (y=-60), sauf y= ecrit
+			addLight(r, r.X, (_dioTopDown && !r.PosYGiven) ? -std::fabs(r.Y) : r.Y, false);
 		}
 		if(anyTile && hdScreenInfo) {
 			std::vector<uint32_t> seen; // (regle, origine x, origine y) deja ajoutes
+			std::vector<float> nearLights; // groupes de 6 : regle, origine x, origine y, nombre de tiles, somme des x et des y (position moyenne)
 			const size_t nRules = _hdData->DioramaLightRules.size();
 			for(int y = 0; y < 240 && n < 8; y++) {
 				for(int x = 0; x < 256 && n < 8; x++) {
@@ -3646,13 +3699,31 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 							}
 							if(!ok) continue;
 							any = true;
-							addLight(r, (float)ox + 4.0f + (spr.HorizontalMirroring ? -r.OffX : r.OffX), (float)oy + 4.0f - (float)yStart + (spr.VerticalMirroring ? -r.OffY : r.OffY));
+							// tiles voisines d'un meme motif (miroir) : une lumiere par motif, placee au centre moyen des tiles
+							const float lpx = (float)ox + 4.0f + (spr.HorizontalMirroring ? -r.OffX : r.OffX);
+							const float lpy = (float)oy + 4.0f - (float)yStart + (spr.VerticalMirroring ? -r.OffY : r.OffY);
+							bool near = false;
+							for(size_t q = 0; q + 5 < nearLights.size() && !near; q += 6) {
+								if(nearLights[q] == (float)ri && std::abs(nearLights[q + 1] - (float)ox) <= 16.0f && std::abs(nearLights[q + 2] - (float)oy) <= 16.0f) {
+									nearLights[q + 3] += 1.0f; nearLights[q + 4] += lpx; nearLights[q + 5] += lpy; near = true;
+								}
+							}
+							if(!near) {
+								nearLights.push_back((float)ri); nearLights.push_back((float)ox); nearLights.push_back((float)oy);
+								nearLights.push_back(1.0f); nearLights.push_back(lpx); nearLights.push_back(lpy);
+							}
 						}
 					}
 				}
 			}
+			// une lumiere par groupe, a la position moyenne de ses tiles
+			for(size_t q = 0; q + 5 < nearLights.size(); q += 6) {
+				const HdDioramaLightRule& gr = _hdData->DioramaLightRules[(size_t)nearLights[q]];
+				const float cnt = nearLights[q + 3];
+				addLight(gr, nearLights[q + 4] / cnt, nearLights[q + 5] / cnt, true);
+			}
 		}
-		scene.Lights.Active = any;
+				scene.Lights.Active = any;
 		static bool lightLogged = false;
 		if(any && !lightLogged) {
 			lightLogged = true;
@@ -3661,9 +3732,11 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 	}
 	// H1 : objets 3D de decor (doc 45) : regles <DioramaObject> dont la condition est vraie (8 au plus)
 	scene.Objects.Count = 0;
-	if(!_hdData->DioramaObjectRules.empty()) {
-		const vector<HdDioramaObjectRule>& orules = _hdData->DioramaObjectRules;
-		if(_dioObjSpin.size() != orules.size()) _dioObjSpin.assign(orules.size(), 0.0f);
+	if(!_hdData->DioramaObjectRules.empty() || !_dioT2oRules.empty()) {
+		vector<const HdDioramaObjectRule*> orules; // <DioramaObject>, puis instances <Tile2Obj> de cette image
+		for(const HdDioramaObjectRule& q : _hdData->DioramaObjectRules) orules.push_back(&q);
+		for(const HdDioramaObjectRule& q : _dioT2oRules) orules.push_back(&q);
+		if(_dioObjSpin.size() < orules.size()) _dioObjSpin.resize(orules.size(), 0.0f);
 		int on = 0;
 		vector<int32_t> wvals; // valeurs surveillees de cette image (INT32_MIN = adresse non lue), pour scrollx= / scrolly=
 		if(hdScreenInfo) {
@@ -3680,8 +3753,8 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 				wvals.push_back(v);
 			}
 		}
-		for(size_t i = 0; i < orules.size() && on < 8; i++) {
-			const HdDioramaObjectRule& r = orules[i];
+		for(size_t i = 0; i < orules.size() && on < HdDioMaxObjects; i++) {
+			const HdDioramaObjectRule& r = *orules[i];
 			if(!r.Mesh || r.Mesh->size() < 24) continue;
 			bool ok = true;
 			for(HdPackCondition* c : r.Conditions) {
@@ -3705,6 +3778,9 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			}
 			o.Color[0] = ((r.Color >> 16) & 0xFF) / 255.0f; o.Color[1] = ((r.Color >> 8) & 0xFF) / 255.0f; o.Color[2] = (r.Color & 0xFF) / 255.0f;
 			o.Pos[0] = r.X - scx; o.Pos[1] = r.Y - scy; o.Pos[2] = r.Z; o.RefZ = r.RefZ; o.Occlude = r.Occlude;
+			if(r.FromTile2Obj && _dioTopDown) { // Tile2Obj en topDown : pose sur le sol, dans le meme repere que les couches a plat (sans perspective : kz = 1)
+				o.Pos[0] = r.X; o.Pos[1] = scene.H * 0.5f - r.Elevation; o.Pos[2] = scene.H * 0.5f - r.BottomY; o.RefZ = -o.Pos[2];
+			}
 			o.Scale = r.Scale;
 			o.Lit = r.Lit;
 			o.Shadow = r.Shadow;

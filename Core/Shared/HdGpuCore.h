@@ -139,10 +139,12 @@ struct HdDioramaObject
 	float Rot[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
 };
 
+const int HdDioMaxObjects = 256; // Tile2Obj (doc 53) : nombre d'objets 3D actifs par image (etait 8)
+
 struct HdDioramaObjects
 {
 	int Count = 0;
-	HdDioramaObject O[8];
+	HdDioramaObject O[HdDioMaxObjects];
 };
 
 // Fond <background> dessine par le GPU a la place de L0 (doc 52) : texture du PNG repetee sur un grand plan a la profondeur de L0

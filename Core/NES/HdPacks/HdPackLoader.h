@@ -101,6 +101,7 @@ private:
 	void ProcessDioramaNormalTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	HdPackBitmapInfo* LoadAuxBitmap(string name); // PNG hors de la liste des <img> (reutilise celui d'un <img> de meme nom)
 	void ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	std::map<string, std::shared_ptr<vector<float>>> _dioObjCache; // H1 : .obj deja lus
 	void ProcessDioramaDepthTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	bool ParseDioramaDepthOptions(vector<string>& tokens, HdDioramaDepthGroup& group);

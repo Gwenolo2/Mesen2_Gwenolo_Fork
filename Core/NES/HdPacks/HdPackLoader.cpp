@@ -451,6 +451,9 @@ bool HdPackLoader::LoadPack()
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 18)) == "<dioramaoffcamera>") {
 				tokens = StringUtilities::Split(lineContent.substr(18), ',');
 				ProcessDioramaOffCameraTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 10)) == "<tile2obj>") {
+				tokens = StringUtilities::Split(lineContent.substr(10), ',');
+				ProcessDioramaTile2ObjTag(tokens, conditions);
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<dioramaobject>") {
 				tokens = StringUtilities::Split(lineContent.substr(15), ',');
 				ProcessDioramaObjectTag(tokens, conditions);
@@ -2506,12 +2509,13 @@ HdPackBitmapInfo* HdPackLoader::LoadAuxBitmap(string name)
 
 // H1 : lecture d'un .obj (v, vt, vn, f ; polygones triangules en eventail, indices negatifs acceptes). Y vers le haut, v de texture
 // retourne (v = 1 - v dans le fichier). Sans normales dans le fichier : normale de la face. Le .mtl est ignore.
-static std::shared_ptr<vector<float>> HdLoadObjMesh(const vector<uint8_t>& raw, string& err)
+static std::shared_ptr<vector<float>> HdLoadObjMesh(const vector<uint8_t>& raw, string& err, std::map<string, std::shared_ptr<vector<float>>>* byMat = nullptr)
 {
 	vector<float> vp, vn, vt;
 	auto out = std::make_shared<vector<float>>();
 	std::istringstream in(string(raw.begin(), raw.end()));
 	string line;
+	string curMat; // usemtl courant (cle des parties par materiau)
 	auto resolve = [](long i, size_t count) -> long { return i > 0 ? i - 1 : (long)count + i; };
 	while(std::getline(in, line)) {
 		if(!line.empty() && line.back() == '\r') line.pop_back();
@@ -2521,6 +2525,7 @@ static std::shared_ptr<vector<float>> HdLoadObjMesh(const vector<uint8_t>& raw, 
 		if(k == "v") { float a = 0, b = 0, c = 0; ls >> a >> b >> c; vp.push_back(a); vp.push_back(b); vp.push_back(c); }
 		else if(k == "vn") { float a = 0, b = 0, c = 0; ls >> a >> b >> c; vn.push_back(a); vn.push_back(b); vn.push_back(c); }
 		else if(k == "vt") { float a = 0, b = 0; ls >> a >> b; vt.push_back(a); vt.push_back(1.0f - b); }
+		else if(k == "usemtl") { string m; ls >> m; curMat = m; }
 		else if(k == "f") {
 			struct Idx { long v = -1, t = -1, n = -1; };
 			vector<Idx> face;
@@ -2548,6 +2553,7 @@ static std::shared_ptr<vector<float>> HdLoadObjMesh(const vector<uint8_t>& raw, 
 					const float l = std::sqrt(nx * nx + ny * ny + nz * nz);
 					if(l > 1e-12f) { fn[0] = nx / l; fn[1] = ny / l; fn[2] = nz / l; }
 				}
+				const size_t before = out->size();
 				for(int c = 0; c < 3; c++) {
 					const Idx& ix = tri[c];
 					out->push_back(vp[ix.v * 3]); out->push_back(vp[ix.v * 3 + 1]); out->push_back(vp[ix.v * 3 + 2]);
@@ -2555,6 +2561,11 @@ static std::shared_ptr<vector<float>> HdLoadObjMesh(const vector<uint8_t>& raw, 
 					else { out->push_back(fn[0]); out->push_back(fn[1]); out->push_back(fn[2]); }
 					if(ix.t >= 0 && (size_t)ix.t < vt.size() / 2) { out->push_back(vt[ix.t * 2]); out->push_back(vt[ix.t * 2 + 1]); }
 					else { out->push_back(0.0f); out->push_back(0.0f); }
+				}
+				if(byMat) {
+					auto& dst = (*byMat)[curMat];
+					if(!dst) dst = std::make_shared<vector<float>>();
+					dst->insert(dst->end(), out->begin() + before, out->end());
 				}
 				if(out->size() / 8 > 300000) { err = "modele trop gros (300000 sommets au plus)"; return nullptr; }
 			}
@@ -2682,6 +2693,160 @@ void HdPackLoader::ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPack
 		if(!r.Tex) return; // erreur deja journalisee
 	}
 	_data->DioramaObjectRules.push_back(r);
+}
+
+// <Tile2Obj> (doc 53) : <Tile2Obj>modele.obj,tile=HASH[,palette=*|RRGGBBAA][,tex=..][,color=RRGGBB][,scale=..|height=..][,elevation=..][,rotation=..]
+// Etape 1 : lecture seule (la regle est stockee). Le rendu des instances vient ensuite.
+void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) {
+		logError("Tile2Obj : fichier .obj attendu en premier, ligne ignoree.");
+		return;
+	}
+	HdDioramaTile2ObjRule r;
+	r.Conditions = conditions;
+	const string file = StringUtilities::Trim(tokens[0]);
+	string texName;
+	bool hasTile = false;
+	for(size_t i = 1; i < tokens.size(); i++) {
+		const string opt = StringUtilities::Trim(tokens[i]);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		if(eq == string::npos) { logError("Tile2Obj : option sans '=' : " + opt + ", ligne ignoree."); return; }
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(opt.substr(0, eq)));
+		const string raw = StringUtilities::Trim(opt.substr(eq + 1));
+		const string val = StringUtilities::ToLower(raw);
+		float f = 0.0f;
+		if(key == "tile") {
+			char* endp = nullptr;
+			const unsigned long v = strtoul(val.c_str(), &endp, 16);
+			if(val.empty() || endp == val.c_str() || *endp != 0 || v > 0xFFFFul) { logError("Tile2Obj : tile doit etre un hash hexa (4 chiffres) : " + val + ", ligne ignoree."); return; }
+			r.TileHash = (uint32_t)v; r.Group.assign(1, (uint32_t)v); r.GridW = r.GridH = 1; hasTile = true;
+		} else if(key == "group") {
+			r.Group.clear();
+			string part;
+			for(size_t k = 0; k <= raw.size(); k++) {
+				if(k == raw.size() || raw[k] == '|') {
+					const string hs = StringUtilities::ToLower(StringUtilities::Trim(part));
+					char* endp = nullptr;
+					const unsigned long gv = strtoul(hs.c_str(), &endp, 16);
+					if(hs.empty() || endp == hs.c_str() || *endp != 0 || gv > 0xFFFFul) { logError("Tile2Obj : group doit etre une liste de hashs hexa separes par | : " + raw + ", ligne ignoree."); return; }
+					r.Group.push_back((uint32_t)gv);
+					part.clear();
+				} else {
+					part += raw[k];
+				}
+			}
+			hasTile = true;
+		} else if(key == "grid") {
+			const size_t xp = val.find('x');
+			char* e1 = nullptr; char* e2 = nullptr;
+			const long gc = xp == string::npos ? 0 : strtol(val.substr(0, xp).c_str(), &e1, 10);
+			const long gr = xp == string::npos ? 0 : strtol(val.substr(xp + 1).c_str(), &e2, 10);
+			if(xp == string::npos || gc < 1 || gr < 1 || gc > 8 || gr > 8 || *e1 != 0 || *e2 != 0) { logError("Tile2Obj : grid doit etre CxL, par exemple grid=2x2 (1 a 8) : " + val + ", ligne ignoree."); return; }
+			r.GridW = (int)gc; r.GridH = (int)gr;
+		} else if(key == "palette") {
+			if(val == "*") { r.AnyPalette = true; }
+			else {
+				char* endp = nullptr;
+				const unsigned long v = strtoul(val.c_str(), &endp, 16);
+				if(val.empty() || endp == val.c_str() || *endp != 0) { logError("Tile2Obj : palette doit etre * ou RRGGBBAA hexa : " + val + ", ligne ignoree."); return; }
+				r.AnyPalette = false; r.Palette = (uint32_t)v;
+			}
+		} else if(key == "tex") {
+			texName = raw;
+		} else if(key == "color") {
+			string h = val;
+			if(!h.empty() && h[0] == '#') h = h.substr(1);
+			char* endp = nullptr;
+			const unsigned long v = h.size() == 6 ? strtoul(h.c_str(), &endp, 16) : 0;
+			if(h.size() != 6 || endp == h.c_str() || *endp != 0) { logError("Tile2Obj : color doit etre RRGGBB : " + val + ", ligne ignoree."); return; }
+			r.Color = (uint32_t)v;
+		} else {
+			if(!LightParseFloat(val, f)) { logError("Tile2Obj : valeur numerique attendue pour " + key + " : " + val + ", ligne ignoree."); return; }
+			if(key == "scale") { if(f <= 0.0f || f > 4096.0f) { logError("Tile2Obj : scale doit etre de 0 a 4096 : " + val + ", ligne ignoree."); return; } r.Scale = f; }
+			else if(key == "height") { if(f <= 0.0f || f > 4096.0f) { logError("Tile2Obj : height doit etre de 0 a 4096 pixels NES : " + val + ", ligne ignoree."); return; } r.Height = f; }
+			else if(key == "elevation") r.Elevation = f;
+			else if(key == "rotation") r.RotY = f;
+			else if(key == "rotx") r.RotX = f;
+			else if(key == "rotz") r.RotZ = f;
+			else { logError("Tile2Obj : option inconnue : " + key + ", ligne ignoree."); return; }
+		}
+	}
+	if(!hasTile) { logError("Tile2Obj : tile=HASH ou group=H1|H2|.. obligatoire, ligne ignoree."); return; }
+	if(r.Group.size() != (size_t)(r.GridW * r.GridH)) { logError("Tile2Obj : group a " + std::to_string(r.Group.size()) + " hash(s), grid demande " + std::to_string(r.GridW * r.GridH) + ", ligne ignoree."); return; }
+	{
+		vector<uint8_t> raw;
+		if(!LoadFile(file, raw)) { logError("Tile2Obj : fichier introuvable : " + file + ", ligne ignoree."); return; }
+		string err;
+		std::map<string, std::shared_ptr<vector<float>>> byMat;
+		auto all = HdLoadObjMesh(raw, err, &byMat);
+		if(!all) { logError("Tile2Obj : " + file + " : " + err + ", ligne ignoree."); return; }
+		MessageManager::Log("[HDPack] <Tile2Obj> " + file + " : " + std::to_string(all->size() / 24) + " triangle(s), " + std::to_string(byMat.size()) + " materiau(x)");
+		{
+			float minY = 1e30f, maxY = -1e30f, m2 = 0.0f; // boite en y et rayon autour de l'origine (tout le modele)
+			for(size_t i = 0; i + 7 < all->size(); i += 8) {
+				const float* v = all->data() + i;
+				minY = std::min(minY, v[1]); maxY = std::max(maxY, v[1]);
+				m2 = std::max(m2, v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+			}
+			const float extY = maxY - minY;
+			if(r.Height > 0.0f && extY > 0.0f) r.Scale = r.Height / extY; // height= : la hauteur du modele vaut height pixels NES
+			r.Radius = std::sqrt(m2) * r.Scale;
+		}
+		// textures : tex= pour tous les materiaux ; sinon map_Kd du .mtl pour chaque materiau ; sinon <nom du .obj>.png du meme dossier
+		const size_t slash = file.find_last_of("\\/");
+		const string objDir = (slash == string::npos) ? string() : file.substr(0, slash + 1);
+		const string objTxt(raw.begin(), raw.end());
+		std::map<string, string> mapOf; // materiau -> chemin de la texture (relatif au pack)
+		const size_t ml = objTxt.find("mtllib ");
+		if(ml != string::npos) {
+			const size_t me = objTxt.find_first_of("\r\n", ml);
+			const string mtlName = StringUtilities::Trim(objTxt.substr(ml + 7, me == string::npos ? string::npos : me - ml - 7));
+			vector<uint8_t> mtlRaw;
+			if(!mtlName.empty() && LoadFile(objDir + mtlName, mtlRaw)) {
+				std::istringstream mi(string(mtlRaw.begin(), mtlRaw.end()));
+				string mline, curM;
+				while(std::getline(mi, mline)) {
+					if(!mline.empty() && mline.back() == '\r') mline.pop_back();
+					std::istringstream ls(mline);
+					string k;
+					ls >> k;
+					if(k == "newmtl") { string n; ls >> n; curM = n; }
+					else if(k == "map_Kd") {
+						const size_t p = mline.find("map_Kd");
+						const string n = StringUtilities::Trim(mline.substr(p + 6));
+						vector<uint8_t> probe;
+						if(!n.empty() && LoadFile(objDir + n, probe)) mapOf[curM] = objDir + n;
+					}
+				}
+			}
+		}
+		HdPackBitmapInfo* explicitTex = nullptr;
+		HdPackBitmapInfo* defaultTex = nullptr;
+		if(!texName.empty()) {
+			explicitTex = LoadAuxBitmap(texName);
+			if(!explicitTex) return; // erreur deja journalisee
+		} else {
+			string base = file.substr(objDir.size());
+			if(base.size() > 4) base = base.substr(0, base.size() - 4);
+			vector<uint8_t> probe;
+			if(LoadFile(objDir + base + ".png", probe)) defaultTex = LoadAuxBitmap(objDir + base + ".png");
+		}
+		for(auto& kv : byMat) {
+			HdDioramaTile2ObjPart part;
+			part.Mesh = kv.second;
+			if(explicitTex) part.Tex = explicitTex;
+			else {
+				auto it = mapOf.find(kv.first);
+				if(it != mapOf.end()) part.Tex = LoadAuxBitmap(it->second);
+				if(!part.Tex) part.Tex = defaultTex;
+			}
+			r.Parts.push_back(part);
+		}
+		if(r.Parts.empty()) { logError("Tile2Obj : " + file + " : aucune face lue, ligne ignoree."); return; }
+	}
+	_data->Tile2ObjRules.push_back(r);
 }
 
 // <DioramaNormal>albedo.png,normal.png (doc 44, G6d) : carte de normales. Les tiles dont l'image est albedo.png (les <tile> de ce PNG) recoivent
@@ -3030,6 +3195,7 @@ void HdPackLoader::ProcessDioramaLightTag(vector<string>& tokens, vector<HdPackC
 			r.GlowRadius = f;
 		} else if(key == "x" || key == "y" || key == "z" || key == "dx" || key == "dy" || key == "dz") {
 			if(!LightParseFloat(val, f) || f < -4096.0f || f > 4096.0f) { logError("DioramaLight : " + key + " doit etre un nombre de -4096 a 4096 : " + val + ", ligne ignoree."); return; }
+			if(key[0] == 'd') r.DirGiven = true; else if(key == "y") r.PosYGiven = true;
 			if(key == "x") r.X = f; else if(key == "y") r.Y = f; else if(key == "z") r.Z = f;
 			else if(key == "dx") r.Dx = f; else if(key == "dy") r.Dy = f; else r.Dz = f;
 		} else {

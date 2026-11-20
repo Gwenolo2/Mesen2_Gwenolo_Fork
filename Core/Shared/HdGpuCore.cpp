@@ -479,6 +479,8 @@ void FogSide(float mode, float d, float fog, float dist, vec4 col)
 	if(f > gFogF) { gFogF = f; gFogCol = col; }
 }
 uniform float uZ;       // G6a : profondeur de la tranche (meme variable que dans le sommet)
+uniform int uFlat;     // doc 53 (topDown) : 1 = couche a plat (sol) (meme variable que dans le sommet)
+uniform float uIncC, uIncS; // doc 53 : cos et sin de l'inclinaison du plan a plat (meme variable que dans le sommet)
 uniform float uKFix;    // G6a : echelle imposee (meme variable que dans le sommet)
 uniform float uD;       // G6a : focale (meme variable que dans le sommet)
 uniform int uLightOn;   // G6a : 1 = lumieres de scene actives
@@ -653,7 +655,12 @@ void main()
 		float px = uExt != 0 ? vUV.x : uR.x + vUV.x * uR.z;
 		vec3 P = vec3((px - 0.5) * uSize.x * kk + uSize.x * 0.5, (gPlaneY - 0.5) * uSize.y * kk + uSize.y * 0.5, uZ);
 		vec3 N = vec3(0.0, 0.0, -1.0);
-		if(uDepth > 0.0) {
+		// doc 53 (topDown) : couche a plat = sol. Position comme au sommet (plan XZ, hauteur -uZ) et normale vers le haut, sinon la lumiere ne touche pas le sol.
+		if(uFlat != 0) {
+			P = vec3((px - 0.5) * uSize.x + uSize.x * 0.5, -uZ * uIncC + (gPlaneY - 0.5) * uSize.y * uIncS, uZ * uIncS - (gPlaneY - 0.5) * uSize.y * uIncC);
+			N = vec3(0.0, -uIncC, -uIncS);
+		}
+		if(uDepth > 0.0 && uFlat == 0) {
 			ivec2 sz = textureSize(uTex, 0);
 			ivec2 p = clamp(ivec2(uv0 * vec2(sz)), ivec2(0), sz - ivec2(1));
 			int b = max(int(uScale + 0.5), 1);
@@ -1357,7 +1364,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	// tranche par pixel NES de profondeur (128 intervalles au plus). Toutes les tranches de toutes les couches sont triees
 	// du plus loin au plus pres ; a profondeur egale, la couche de plus petit numero d'abord (tri stable).
 	struct Slice { float Z; int Layer; float InvN; float Depth; };
-	Slice slices[(4 + HdDioMaxGroups) * 129 + 16]; // (+ objets 3D H1, couche 100 + numero) couches 0 a 3 = L0..L3, couches 4 a 7 = groupes <DioramaDepth> (G3e)
+	Slice slices[(4 + HdDioMaxGroups) * 129 + 16 + HdDioMaxObjects]; // (+ objets 3D H1, couche 100 + numero) couches 0 a 3 = L0..L3, couches 4 a 7 = groupes <DioramaDepth> (G3e)
 	int sliceCount = 0;
 	for(int layer = 0; layer < 4 + HdDioMaxGroups; layer++) {
 		if(layer >= 4 && !hasExtra[layer - 4]) continue;
@@ -1379,7 +1386,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	for(int bi = 0; bi < sc.BgCount && bi < 4; bi++) { // fonds de L0 dessines par le GPU : juste devant la face avant de L0
 		slices[sliceCount++] = { sc.PlaneZ[0] - 0.001f * (float)(bi + 1), 300 + bi, 1.0f, 0.0f };
 	}
-	for(int oi = 0; oi < sc.Objects.Count && oi < 8; oi++) { // H1 : objets 3D, ranges avec les tranches selon leur profondeur
+	for(int oi = 0; oi < sc.Objects.Count && oi < HdDioMaxObjects; oi++) { // H1 : objets 3D, ranges avec les tranches selon leur profondeur
 		slices[sliceCount++] = { sc.Objects.O[oi].Occlude ? 1.0e9f : sc.Objects.O[oi].Pos[2], 100 + oi, 1.0f, 0.0f };
 	}
 	// doc 53 : couches a plat (sol, murs) d'abord, du plus bas au plus haut ; puis les plans verticaux (sprites), du plus loin au plus pres

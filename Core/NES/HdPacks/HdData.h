@@ -996,6 +996,7 @@ struct HdDioramaLightRule
 	int Type = 0;            // 1 ambiante, 2 ponctuelle, 3 soleil
 	float X = 128, Y = 60, Z = -60;   // ponctuelle : position (pixels NES de la scene)
 	float Dx = 0.3f, Dy = 0.5f, Dz = 1.0f; // soleil : direction de propagation de la lumiere
+	bool DirGiven = false, PosYGiven = false; // dx/dy/dz ou y ecrits dans le pack (sinon defauts topDown)
 	uint32_t Color = 0xFFFFFF;
 	float Intensity = 1.0f;
 	float Radius = 256.0f;
@@ -1111,7 +1112,35 @@ struct HdDioramaObjectRule
 	bool Lit = true;                     // lit=off : l'objet n'est pas eclaire par <DioramaLight> (couleur de la texture telle quelle)
 	bool HasWindow = false; float Window = 0.0f; // window=N : seuls les triangles a moins de N pixels NES de l'ecran (dans le niveau, avec scrollx=) sont dessines
 	float Radius = 0.0f;                 // distance maximale d'un sommet a l'origine du modele x scale (pixels NES), pour ne pas dessiner un objet hors ecran
+	bool FromTile2Obj = false;           // instance <Tile2Obj> : en topDown, posee sur le sol (BottomY = bas du motif en pixels NES, Elevation = hauteur)
+	float BottomY = 0.0f, Elevation = 0.0f;
 	HdDioramaExpr ScrollX, ScrollY;      // scrollx= / scrolly= : defilement du niveau (pixels) ; position a l'ecran = x - scrollx
+	vector<HdPackCondition*> Conditions;
+};
+
+// <Tile2Obj> (doc 53) : une tile est remplacee par un modele .obj, pose a la position de chaque tile visible (rendu : etape suivante)
+// <Tile2Obj> : une partie du modele = un materiau (usemtl) de .obj, avec sa texture
+struct HdDioramaTile2ObjPart
+{
+	std::shared_ptr<vector<float>> Mesh; // 8 flottants par sommet, comme <DioramaObject>
+	HdPackBitmapInfo* Tex = nullptr;     // texture du materiau (map_Kd), ou tex=, ou <nom>.png
+};
+
+struct HdDioramaTile2ObjRule
+{
+	vector<HdDioramaTile2ObjPart> Parts; // une partie par materiau du .obj
+	uint32_t Color = 0xFFFFFF;           // color=RRGGBB
+	uint32_t TileHash = 0;               // tile=HASH (hexa)
+	vector<uint32_t> Group;              // motif : hashs dans l'ordre de lecture (tile=HASH = un seul), group=H1|H2|..
+	int GridW = 1, GridH = 1;            // grid=CxL : taille du motif en tiles de 8 px
+	bool AnyPalette = true;              // palette=* (defaut), sinon palette=RRGGBBAA hexa
+	uint32_t Palette = 0;
+	float Scale = 16.0f;                 // pixels NES par unite du .obj (scale=, ou deduit de height=)
+	float Height = 0.0f;                 // height= : hauteur du modele en pixels NES (0 = non)
+	float Elevation = 0.0f;              // elevation= : hauteur au-dessus du sol (pixels NES)
+	float RotY = 0.0f;                   // rotation= : degres autour de la verticale
+	float RotX = 0.0f, RotZ = 0.0f;      // rotx= / rotz= : degres (axes du modele)
+	float Radius = 0.0f;                 // rayon du modele a l'echelle, pour le test d'ecran
 	vector<HdPackCondition*> Conditions;
 };
 
@@ -1201,6 +1230,7 @@ public:
 	vector<HdDioramaShadowRule> DioramaShadowRules; // G6c
 	vector<HdDioramaNormalPair> DioramaNormalPairs; // G6d
 	vector<HdDioramaObjectRule> DioramaObjectRules; // H1
+	vector<HdDioramaTile2ObjRule> Tile2ObjRules;    // doc 53 : <Tile2Obj>
 	vector<HdDioramaPadRule> DioramaPadRules;       // manette -> camera
 	vector<string> DioramaCameraNames;              // cameras declarees (minuscules), 16 au plus
 	vector<HdDioramaCameraLine> DioramaCameraLines;
