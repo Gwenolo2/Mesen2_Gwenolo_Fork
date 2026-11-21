@@ -5,7 +5,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <Nullable>enable</Nullable>
     <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
-    <AssemblyName>Mesen</AssemblyName>
+    <AssemblyName>Mesen_Gwenolo_Fork</AssemblyName>
     <RootNamespace>Mesen</RootNamespace>
     <StartupObject>Mesen.Program</StartupObject>
   </PropertyGroup>
@@ -96,7 +96,7 @@
 		</RestoreSources>
 	</PropertyGroup>
 	<ItemGroup>
-		<TrimmerRootAssembly Include="Mesen" />
+		<TrimmerRootAssembly Include="Mesen_Gwenolo_Fork" />
 		<TrimmerRootAssembly Include="AvaloniaEdit" />
 		<TrimmerRootAssembly Include="Avalonia.MarkupExtension" />
 		<TrimmerRootAssembly Include="Dock.Avalonia" />
@@ -648,15 +648,15 @@
   </ItemGroup>
 
 	<Target Name="PreBuildWindows" BeforeTargets="PreBuildEvent" Condition="'$(RuntimeIdentifier)'=='win-x64'">
-		<Exec Command="cd &quot;$(OutDir)&quot;&#xD;&#xA;rd Dependencies /s /q&#xD;&#xA;md Dependencies&#xD;&#xA;xcopy /s &quot;$(ProjectDir)Dependencies\*&quot; Dependencies&#xD;&#xA;copy libHarfBuzzSharp.dll Dependencies&#xD;&#xA;copy libSkiaSharp.dll Dependencies&#xD;&#xA;copy MesenCore.dll Dependencies&#xD;&#xA;cd Dependencies&#xD;&#xA;del ..\Dependencies.zip&#xD;&#xA;powershell Compress-Archive -Path * -DestinationPath '..\Dependencies.zip' -Force&#xD;&#xA;copy ..\Dependencies.zip &quot;$(ProjectDir)&quot;" />
+		<Exec Command="cd &quot;$(OutDir)&quot;&#xD;&#xA;rd Dependencies /s /q&#xD;&#xA;md Dependencies&#xD;&#xA;xcopy /s &quot;$(ProjectDir)Dependencies\*&quot; Dependencies&#xD;&#xA;copy libHarfBuzzSharp.dll Dependencies&#xD;&#xA;copy libSkiaSharp.dll Dependencies&#xD;&#xA;copy MesenCore_Gwenolo_Fork.dll Dependencies&#xD;&#xA;cd Dependencies&#xD;&#xA;del ..\Dependencies.zip&#xD;&#xA;powershell Compress-Archive -Path * -DestinationPath '..\Dependencies.zip' -Force&#xD;&#xA;copy ..\Dependencies.zip &quot;$(ProjectDir)&quot;" />
 	</Target>
 
 	<Target Name="PreBuildLinux" BeforeTargets="PreBuildEvent" Condition="'$(RuntimeIdentifier)'=='linux-x64' Or '$(RuntimeIdentifier)'=='linux-arm64'">
-    <Exec Command="cd $(OutDir)&#xD;&#xA;rm -rf Dependencies&#xD;&#xA;mkdir Dependencies&#xD;&#xA;cp -R $(ProjectDir)/Dependencies/* Dependencies&#xD;&#xA;cp libHarfBuzzSharp.so Dependencies&#xD;&#xA;cp libSkiaSharp.so Dependencies&#xD;&#xA;cp MesenCore.so Dependencies&#xD;&#xA;cd Dependencies&#xD;&#xA;rm ../Dependencies.zip&#xD;&#xA;zip -r ../Dependencies.zip *&#xD;&#xA;cp ../Dependencies.zip $(ProjectDir)" />
+    <Exec Command="cd $(OutDir)&#xD;&#xA;rm -rf Dependencies&#xD;&#xA;mkdir Dependencies&#xD;&#xA;cp -R $(ProjectDir)/Dependencies/* Dependencies&#xD;&#xA;cp libHarfBuzzSharp.so Dependencies&#xD;&#xA;cp libSkiaSharp.so Dependencies&#xD;&#xA;cp MesenCore_Gwenolo_Fork.so Dependencies&#xD;&#xA;cd Dependencies&#xD;&#xA;rm ../Dependencies.zip&#xD;&#xA;zip -r ../Dependencies.zip *&#xD;&#xA;cp ../Dependencies.zip $(ProjectDir)" />
   </Target>
   
 	<Target Name="PreBuildOsx" BeforeTargets="PreBuildEvent" Condition="'$(RuntimeIdentifier)'=='osx-x64' Or '$(RuntimeIdentifier)'=='osx-arm64'">
-    <Exec Command="cp ./Assets/MesenIcon.icns $(OutDir)&#xD;&#xA;cd $(OutDir)&#xD;&#xA;rm -R Dependencies&#xD;&#xA;mkdir Dependencies&#xD;&#xA;cp -R $(ProjectDir)/Dependencies/* Dependencies&#xD;&#xA;cp libHarfBuzzSharp.dylib Dependencies&#xD;&#xA;cp libSkiaSharp.dylib Dependencies&#xD;&#xA;cp MesenCore.dylib Dependencies&#xD;&#xA;cd Dependencies&#xD;&#xA;rm ../Dependencies.zip&#xD;&#xA;zip -r ../Dependencies.zip *&#xD;&#xA;cp ../Dependencies.zip $(ProjectDir)" />
+    <Exec Command="cp ./Assets/MesenIcon.icns $(OutDir)&#xD;&#xA;cd $(OutDir)&#xD;&#xA;rm -R Dependencies&#xD;&#xA;mkdir Dependencies&#xD;&#xA;cp -R $(ProjectDir)/Dependencies/* Dependencies&#xD;&#xA;cp libHarfBuzzSharp.dylib Dependencies&#xD;&#xA;cp libSkiaSharp.dylib Dependencies&#xD;&#xA;cp MesenCore_Gwenolo_Fork.dylib Dependencies&#xD;&#xA;cd Dependencies&#xD;&#xA;rm ../Dependencies.zip&#xD;&#xA;zip -r ../Dependencies.zip *&#xD;&#xA;cp ../Dependencies.zip $(ProjectDir)" />
   </Target>
 
 </Project>

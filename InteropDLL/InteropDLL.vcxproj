@@ -70,7 +70,7 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
-    <TargetName>MesenCore</TargetName>
+    <TargetName>MesenCore_Gwenolo_Fork</TargetName>
     <OutDir>$(SolutionDir)\bin\win-$(PlatformTarget)\$(Configuration)\</OutDir>
     <IntDir>obj\$(Platform)\$(Configuration)\</IntDir>
     <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
@@ -78,7 +78,7 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <TargetName>MesenCore</TargetName>
+    <TargetName>MesenCore_Gwenolo_Fork</TargetName>
     <OutDir>$(SolutionDir)\bin\win-$(PlatformTarget)\$(Configuration)\</OutDir>
     <IntDir>obj\$(Platform)\$(Configuration)\</IntDir>
     <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
@@ -86,7 +86,7 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='PGO Profile|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <TargetName>MesenCore</TargetName>
+    <TargetName>MesenCore_Gwenolo_Fork</TargetName>
     <OutDir>$(SolutionDir)\bin\win-$(PlatformTarget)\$(Configuration)\</OutDir>
     <IntDir>obj\$(Platform)\$(Configuration)\</IntDir>
     <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
@@ -94,7 +94,7 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='PGO Optimize|x64'">
     <LinkIncremental>false</LinkIncremental>
-    <TargetName>MesenCore</TargetName>
+    <TargetName>MesenCore_Gwenolo_Fork</TargetName>
     <OutDir>$(SolutionDir)\bin\win-$(PlatformTarget)\PGO Profile\</OutDir>
     <IntDir>obj\$(Platform)\PGO Profile\</IntDir>
     <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
@@ -181,8 +181,8 @@
 xcopy /y /q "$(TargetDir)$(TargetName).pdb" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"
 xcopy /y /q "$(VCToolsInstallDir)bin\Hostx64\x64\pgort140.dll" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"
 xcopy /y /q "$(VCToolsInstallDir)bin\Hostx64\x64\pgort140.dll" "$(SolutionDir)UI\Dependencies\"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$dirs='$(OutDir)',(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Mesen2'),'$(SolutionDir)bin\win-$(PlatformTarget)\Release'; foreach($d in $dirs){ Get-ChildItem -LiteralPath $d -Filter 'MesenCore!*.pgc' -ErrorAction SilentlyContinue | Remove-Item -Force; }; $bak='$(SolutionDir)bin\win-$(PlatformTarget)\PGO_Data'; if(Test-Path -LiteralPath $bak){ Remove-Item -LiteralPath $bak -Recurse -Force }; Write-Host 'PGO : anciennes mesures supprimees, jouez puis fermez Mesen normalement'"</Command>
-      <Message>PGO Profile : copie de MesenCore.dll (instrumentee) + pgort140.dll vers bin\win-x64\Release pour Mesen.exe</Message>
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$dirs='$(OutDir)',(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Mesen2'),'$(SolutionDir)bin\win-$(PlatformTarget)\Release'; foreach($d in $dirs){ Get-ChildItem -LiteralPath $d -Filter 'MesenCore_Gwenolo_Fork!*.pgc' -ErrorAction SilentlyContinue | Remove-Item -Force; }; $bak='$(SolutionDir)bin\win-$(PlatformTarget)\PGO_Data'; if(Test-Path -LiteralPath $bak){ Remove-Item -LiteralPath $bak -Recurse -Force }; Write-Host 'PGO : anciennes mesures supprimees, jouez puis fermez Mesen normalement'"</Command>
+      <Message>PGO Profile : copie de MesenCore_Gwenolo_Fork.dll (instrumentee) + pgort140.dll vers bin\win-x64\Release pour Mesen_Gwenolo_Fork.exe</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='PGO Optimize|x64'">
@@ -214,10 +214,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$dirs='$(OutDir)',(Join-
       <Command>xcopy /y /q "$(TargetDir)$(TargetName).dll" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"
 xcopy /y /q "$(TargetDir)$(TargetName).pdb" "$(SolutionDir)bin\win-$(PlatformTarget)\Release\"
 if exist "$(SolutionDir)UI\Dependencies\pgort140.dll" del /q "$(SolutionDir)UI\Dependencies\pgort140.dll"</Command>
-      <Message>PGO Optimize : copie de MesenCore.dll (optimisee) vers bin\win-x64\Release pour Mesen.exe</Message>
+      <Message>PGO Optimize : copie de MesenCore_Gwenolo_Fork.dll (optimisee) vers bin\win-x64\Release pour Mesen_Gwenolo_Fork.exe</Message>
     </PostBuildEvent>
     <PreLinkEvent>
-      <Command>powershell -NoProfile -ExecutionPolicy Bypass -Command "$out='$(OutDir)'; $bak='$(SolutionDir)bin\win-$(PlatformTarget)\PGO_Data'; if(-not (Test-Path -LiteralPath (Join-Path $out 'MesenCore.pgd')) -and (Test-Path -LiteralPath (Join-Path $bak 'MesenCore.pgd'))){ Copy-Item -Path (Join-Path $bak '*') -Destination $out -Force; Write-Host 'PGO : MesenCore.pgd absent (nettoyage ?) - mesures restaurees depuis bin\win-x64\PGO_Data' }; $dirs=(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Mesen2'),'$(SolutionDir)bin\win-$(PlatformTarget)\Release'; foreach($d in $dirs){ Get-ChildItem -LiteralPath $d -Filter 'MesenCore!*.pgc' -ErrorAction SilentlyContinue | ForEach-Object { $i=1; while(Test-Path -LiteralPath (Join-Path $out ('MesenCore!'+$i+'.pgc'))){$i++}; $t=Join-Path $out ('MesenCore!'+$i+'.pgc'); Move-Item -LiteralPath $_.FullName -Destination $t -Force; Write-Host ('PGO : mesures recuperees '+$_.FullName+' vers '+$t) } }; $c=(Get-ChildItem -LiteralPath $out -Filter 'MesenCore!*.pgc' -ErrorAction SilentlyContinue | Measure-Object).Count; Write-Host ('PGO : '+$c+' fichier(s) de mesure utilises'); if($c -eq 0){ Write-Host 'PGO ATTENTION : aucune mesure trouvee, la DLL ne sera pas optimisee par profil' }; if(Test-Path -LiteralPath (Join-Path $out 'MesenCore.pgd')){ New-Item -ItemType Directory -Force -Path $bak | Out-Null; Copy-Item -LiteralPath (Join-Path $out 'MesenCore.pgd') -Destination $bak -Force; Get-ChildItem -LiteralPath $out -Filter 'MesenCore!*.pgc' | Copy-Item -Destination $bak -Force; Write-Host 'PGO : mesures sauvegardees dans bin\win-x64\PGO_Data' }"</Command>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -Command "$out='$(OutDir)'; $bak='$(SolutionDir)bin\win-$(PlatformTarget)\PGO_Data'; if(-not (Test-Path -LiteralPath (Join-Path $out 'MesenCore_Gwenolo_Fork.pgd')) -and (Test-Path -LiteralPath (Join-Path $bak 'MesenCore_Gwenolo_Fork.pgd'))){ Copy-Item -Path (Join-Path $bak '*') -Destination $out -Force; Write-Host 'PGO : MesenCore_Gwenolo_Fork.pgd absent (nettoyage ?) - mesures restaurees depuis bin\win-x64\PGO_Data' }; $dirs=(Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Mesen2'),'$(SolutionDir)bin\win-$(PlatformTarget)\Release'; foreach($d in $dirs){ Get-ChildItem -LiteralPath $d -Filter 'MesenCore_Gwenolo_Fork!*.pgc' -ErrorAction SilentlyContinue | ForEach-Object { $i=1; while(Test-Path -LiteralPath (Join-Path $out ('MesenCore_Gwenolo_Fork!'+$i+'.pgc'))){$i++}; $t=Join-Path $out ('MesenCore_Gwenolo_Fork!'+$i+'.pgc'); Move-Item -LiteralPath $_.FullName -Destination $t -Force; Write-Host ('PGO : mesures recuperees '+$_.FullName+' vers '+$t) } }; $c=(Get-ChildItem -LiteralPath $out -Filter 'MesenCore_Gwenolo_Fork!*.pgc' -ErrorAction SilentlyContinue | Measure-Object).Count; Write-Host ('PGO : '+$c+' fichier(s) de mesure utilises'); if($c -eq 0){ Write-Host 'PGO ATTENTION : aucune mesure trouvee, la DLL ne sera pas optimisee par profil' }; if(Test-Path -LiteralPath (Join-Path $out 'MesenCore_Gwenolo_Fork.pgd')){ New-Item -ItemType Directory -Force -Path $bak | Out-Null; Copy-Item -LiteralPath (Join-Path $out 'MesenCore_Gwenolo_Fork.pgd') -Destination $bak -Force; Get-ChildItem -LiteralPath $out -Filter 'MesenCore_Gwenolo_Fork!*.pgc' | Copy-Item -Destination $bak -Force; Write-Host 'PGO : mesures sauvegardees dans bin\win-x64\PGO_Data' }"</Command>
       <Message>PGO Optimize : recuperation des fichiers de mesure .pgc</Message>
     </PreLinkEvent>
   </ItemDefinitionGroup>

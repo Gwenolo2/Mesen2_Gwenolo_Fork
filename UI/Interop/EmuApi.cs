@@ -15,7 +15,7 @@ namespace Mesen.Interop
 {
 	public class EmuApi
 	{
-		public const string DllName = "MesenCore.dll";
+		public const string DllName = "MesenCore_Gwenolo_Fork.dll"; // fork : nom propre, pas de collision avec la DLL du Mesen standard (dossier Documents\\Mesen2)
 		private const string DllPath = EmuApi.DllName;
 
 		[DllImport(DllPath)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool TestDll();

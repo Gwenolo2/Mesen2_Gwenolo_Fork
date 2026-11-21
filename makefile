@@ -29,12 +29,12 @@ UNAME_S := $(shell uname -s)
 
 ifeq ($(UNAME_S),Linux)
 	MESENOS := linux
-	SHAREDLIB := MesenCore.so
+	SHAREDLIB := MesenCore_Gwenolo_Fork.so
 endif
 
 ifeq ($(UNAME_S),Darwin)
 	MESENOS := osx
-	SHAREDLIB := MesenCore.dylib
+	SHAREDLIB := MesenCore_Gwenolo_Fork.dylib
 	LTO := false
 	STATICLINK := false
 	LINKCHECKUNRESOLVED :=
@@ -232,7 +232,7 @@ pgo:
 	./buildPGO.sh
 
 run:
-	$(OUTFOLDER)/$(MESENPLATFORM)/publish/Mesen
+	$(OUTFOLDER)/$(MESENPLATFORM)/publish/Mesen_Gwenolo_Fork
 
 clean:
 	rm -r -f $(COREOBJ)

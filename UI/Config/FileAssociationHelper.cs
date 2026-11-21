@@ -229,12 +229,12 @@ namespace Mesen.Config
 			if(associate) {
 				ProcessModule? mainModule = Process.GetCurrentProcess().MainModule;
 				if(mainModule != null) {
-					Registry.SetValue(@"HKEY_CURRENT_USER\Software\Classes\Mesen\shell\open\command", null, mainModule.FileName + " \"%1\"");
-					Registry.SetValue(key, null, "Mesen");
+					Registry.SetValue(@"HKEY_CURRENT_USER\Software\Classes\Mesen_Gwenolo_Fork\shell\open\command", null, mainModule.FileName + " \"%1\"");
+					Registry.SetValue(key, null, "Mesen_Gwenolo_Fork");
 				}
 			} else {
 				object? regKey = Registry.GetValue(key, null, "");
-				if(regKey != null && regKey.Equals("Mesen")) {
+				if(regKey != null && regKey.Equals("Mesen_Gwenolo_Fork")) {
 					Registry.SetValue(key, null, "");
 				}
 			}

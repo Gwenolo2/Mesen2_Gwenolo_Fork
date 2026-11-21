@@ -26,7 +26,7 @@ namespace Mesen
 		public static string OriginalFolder { get; private set; }
 		public static string[] CommandLineArgs { get; private set; } = Array.Empty<string>();
 
-		public static string ExePath => Process.GetCurrentProcess().MainModule?.FileName ?? Path.Join(Path.GetDirectoryName(AppContext.BaseDirectory), "Mesen.exe");
+		public static string ExePath => Process.GetCurrentProcess().MainModule?.FileName ?? Path.Join(Path.GetDirectoryName(AppContext.BaseDirectory), "Mesen_Gwenolo_Fork.exe");
 
 		static Program()
 		{
