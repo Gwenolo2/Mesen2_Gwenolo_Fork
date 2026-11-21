@@ -602,3 +602,20 @@ struct HdPackSpritePaletteCondition : public HdPackCondition
 };
 
 
+
+// [fork NES] <setVariable> (doc 57) : vraie quand la variable $nom a la valeur d'index Index (creee par <background>$nom)
+struct HdPackVariableCondition : public HdPackCondition
+{
+	HdPackVariable* Var = nullptr;
+	int Index = 0;
+
+	HdPackConditionType GetConditionType() override { return HdPackConditionType::Variable; }
+	string GetConditionName() override { return "variable"; }
+	string ToString() override { return "$" + (Var ? Var->Name : string("?")) + "=" + std::to_string(Index); }
+
+protected:
+	bool InternalCheckCondition(int x, int y, HdPpuTileInfo* tile) override
+	{
+		return Var != nullptr && Var->Current == Index;
+	}
+};

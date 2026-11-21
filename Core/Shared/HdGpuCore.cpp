@@ -1751,8 +1751,8 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			slices[sliceCount++] = { layerZ + depth, layer, invN, depth };
 		}
 	}
-	for(int bi = 0; bi < sc.BgCount && bi < 4; bi++) { // fonds de L0 dessines par le GPU : juste devant la face avant de L0
-		slices[sliceCount++] = { sc.PlaneZ[0] - 0.001f * (float)(bi + 1), 300 + bi, 1.0f, 0.0f };
+	for(int bi = 0; bi < sc.BgCount && bi < 8; bi++) { // fonds dessines par le GPU : juste devant la face avant de L0, ou a la profondeur de leur groupe
+		slices[sliceCount++] = { sc.Bg[bi].HasZ ? sc.Bg[bi].Z - 0.001f * (float)(bi + 1) : sc.PlaneZ[0] - 0.001f * (float)(bi + 1), 300 + bi, 1.0f, 0.0f };
 	}
 	if(sc.Mist.Active && sc.FlatMask == 0) { // <DioramaMist> side : nappes rangees avec les plans selon leur profondeur (couche 400 + numero)
 		const int n = std::min(sc.Mist.Count, 8);

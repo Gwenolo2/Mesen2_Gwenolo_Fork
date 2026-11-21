@@ -3021,6 +3021,7 @@
     <ClInclude Include="Gameboy\GbHdVideoFilter.h" />
     <ClInclude Include="Gameboy\HdPacks\GbHdPackBuilder.h" />
     <ClInclude Include="Gameboy\HdPacks\GbHdPackLoader.h" />
+    <ClInclude Include="Gameboy\HdPacks\GbHdDiorama.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Shared\Video\RotateFilter.cpp">
@@ -3402,6 +3403,7 @@
       <Filter>SNES\HdPacks</Filter>
     </ClCompile>
     <ClCompile Include="Gameboy\GbHdVideoFilter.cpp" />
+    <ClCompile Include="Gameboy\GbHdDiorama.cpp" />
     <ClCompile Include="Gameboy\HdPacks\GbHdPackBuilder.cpp" />
     <ClCompile Include="Gameboy\HdPacks\GbHdPackLoader.cpp" />
   </ItemGroup>

@@ -7,6 +7,9 @@
 #include "Gameboy/GbDefaultVideoFilter.h"
 #include "Gameboy/HdPacks/GbHdPackLoader.h"
 #include "Gameboy/HdPacks/GbHdThreadPool.h"
+#include "Shared/HdDayNight.h"
+
+struct HdDioramaConfig;
 
 class Emulator;
 struct GbHdPixelInfo;
@@ -68,11 +71,60 @@ private:
 	// <2DSpriteLight> : halos au centre des tiles de sprite reconnues
 	void RenderSpriteLights(uint32_t* out, const std::vector<GbHdSpriteInfo>* sprites, const std::vector<uint8_t>* mem);
 
+	// ---- Diorama Game Boy (doc 56, GbHdDiorama.cpp) : memes balises et meme moteur GPU (HdGpuCore) que le diorama NES ----
+	// Couches (ARGB premultiplie, taille de la sortie) : L0 couleur 0 du fond + <background> arriere, L1 sprites derriere le fond (OAM
+	// priorite), L2 tiles de fond + <background> intermediaires, L3 sprites + <background> avant. _dioFix : fenetre (HUD) a plat.
+	std::vector<uint32_t> _dioL[4];
+	std::vector<uint32_t> _dioFix;
+	uint32_t _dioFixY0 = 0, _dioFixRows = 0; // lignes HD de la fenetre
+	uint32_t _dioBackdrop = 0xFF000000;      // couleur 0 du fond (hors des plans)
+	bool _dioGpuTried = false, _dioGpuOk = false;
+	int _dioFail = 0;
+	bool _dioTopDown = false;
+	float _dioFloorMargin = -1.0f;
+	float _dioWX = 0.0f, _dioWY = 0.0f; // defilement cumule (SCX / SCY deplies) : repere du monde des nuages, brumes, particules
+	int _dioLastSX = -1, _dioLastSY = -1;
+	float _camFrom[4] = {}, _camTo[4] = {}, _camCur[4] = {};
+	float _camT = 0.0f, _camDur = 1.0f;
+	bool _camInit = false;
+	int _camDefault = -1, _camManual = -1;
+	std::vector<uint8_t> _camKeyDown;
+	bool _camKeyWarned = false;
+	float _padYaw = 0.0f, _padPitch = 0.0f, _padZoom = 0.0f;
+	uint32_t _dioOrbit = 0;
+	float _dioSkyX = 0.0f, _dioSkyY = 0.0f;
+	const void* _dioSkyCubeKey = nullptr;
+	std::vector<uint32_t> _dioSkyCube;
+	uint32_t _dioSkyCubeF = 0;
+	std::vector<uint8_t> _dioFoot;
+	std::vector<float> _dioObjSpin;
+	struct P3Part { float X = 0, Y = 0, Z = 0, VX = 0, VY = 0, VZ = 0, Age = 0, Life = 0, Size = 1, Seed1 = 0, Seed2 = 0, EVX = 0, EVY = 0; };
+	struct P3State { std::vector<P3Part> Parts; bool Init = false; bool TopDown = false; float Time = 0, SpawnAcc = 0; uint32_t Rng = 0x9E3779B9; };
+	std::vector<P3State> _p3State;
+	std::vector<float> _p3Out[4];
+	// <DayNight> (doc 55 / 56)
+	std::vector<HdDayNightState> _dnState;
+	HdDayNightOut _dn;
+	bool _dnDioApplied = false;
+	const std::vector<uint8_t>* _dioMem = nullptr; // memoire de l'image (conditions des regles diorama)
+	// <background> dessines par le GPU (comme le doc 52 NES) : plus d'echantillonnage par pixel ni d'envoi d'image. Kind : 0 arriere
+	// (devant L0), 1 intermediaire (devant L2), 2 avant (devant L3) ; OffX / OffY en pixels HD
+	struct DioBgGpu { uint32_t Image = 0; int64_t OffX = 0, OffY = 0; float Bright = 1.0f; bool TileX = false, TileY = false; int Kind = 0; };
+	std::vector<DioBgGpu> _dioBgGpu;
+
+	bool DioramaActive() const;
+	bool DioramaSkyWanted();
+	void DioramaCamera(const HdDioramaConfig& cfg, float& yaw, float& pitch, float& dist, float& zoom);
+	bool DioramaSubmit(uint32_t* out);
+	void UpdateDayNight();
+	void ApplyDayNight2D(uint32_t* out, const GbHdPixelInfo* info);
+
 protected:
 	void OnBeforeApplyFilter() override;
 	FrameInfo GetFrameInfo() override;
 
 public:
 	GbHdVideoFilter(Emulator* emu, const GbHdPackData& pack);
+	~GbHdVideoFilter();
 	void ApplyFilter(uint16_t* ppuOutputBuffer) override;
 };

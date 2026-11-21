@@ -636,6 +636,7 @@
     <ClInclude Include="Gameboy\GbPpu.h" />
     <ClInclude Include="Gameboy\HdPacks\GbHdPackBuilder.h" />
     <ClInclude Include="Gameboy\HdPacks\GbHdPackLoader.h" />
+    <ClInclude Include="Gameboy\HdPacks\GbHdDiorama.h" />
     <ClInclude Include="Gameboy\APU\GbSquareChannel.h" />
     <ClInclude Include="Gameboy\GbTimer.h" />
     <ClInclude Include="Gameboy\GbTypes.h" />
@@ -842,6 +843,7 @@
     <ClCompile Include="Gameboy\GbControlManager.cpp" />
     <ClCompile Include="Gameboy\GbDefaultVideoFilter.cpp" />
     <ClCompile Include="Gameboy\GbHdVideoFilter.cpp" />
+    <ClCompile Include="Gameboy\GbHdDiorama.cpp" />
     <ClCompile Include="GBA\APU\GbaApu.cpp" />
     <ClCompile Include="GBA\APU\GbaNoiseChannel.cpp" />
     <ClCompile Include="GBA\APU\GbaSquareChannel.cpp" />

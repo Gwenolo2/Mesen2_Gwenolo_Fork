@@ -1924,6 +1924,26 @@ void HdNesPack<scale>::OnBeforeApplyFilter()
 		condition->Initialize(_hdScreenInfo, this);
 	}
 
+	// [fork NES] <setVariable> (doc 57) : valeur courante de chaque variable, la derniere regle vraie gagne
+	static int varLogs = 0;
+	for(unique_ptr<HdPackVariable>& var : _hdData->Variables) {
+		var->Current = -1; // recalcule a chaque image : aucune regle vraie = aucune valeur
+		for(const HdPackVariable::Rule& r : var->Rules) {
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) {
+				if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; }
+			}
+			if(ok) var->Current = r.ValueIndex;
+		}
+		if(var->Current != var->LoggedValue) {
+			if(varLogs < 60) {
+				varLogs++;
+				MessageManager::Log("[HD-VAR] $" + var->Name + " = " + (var->Current >= 0 ? var->Values[var->Current] : string("(aucune)")));
+			}
+			var->LoggedValue = var->Current;
+		}
+	}
+
 	if(_hdData->Palette.size() == 0x40) {
 		memcpy(_palette, _hdData->Palette.data(), 0x40 * sizeof(uint32_t));
 	} else {
@@ -1942,6 +1962,25 @@ void HdNesPack<scale>::OnBeforeApplyFilter()
 			}
 		}
 		_activeBgCount[layer] = activeCount;
+
+		// [fork NES] diagnostic (setVariable) : journal quand le fond actif d'un calque change
+		{
+			static int bgLogs = 0;
+			static int32_t lastKey[5] = { -2, -2, -2, -2, -2 };
+			const int32_t key = activeCount > 0 ? (int32_t)(_bgConfig[layer * 10].BgPriority * 1000 + _bgConfig[layer * 10].BackgroundIndex) : -1;
+			if(key != lastKey[layer]) {
+				lastKey[layer] = key;
+				if(bgLogs < 80) {
+					bgLogs++;
+					string what = "aucun fond";
+					if(activeCount > 0) {
+						const HdBackgroundInfo& ab = _hdData->BackgroundsByPriority[_bgConfig[layer * 10].BgPriority][_bgConfig[layer * 10].BackgroundIndex];
+						what = ab.Data ? ab.Data->PngName : string("?");
+					}
+					MessageManager::Log("[HD-BG] calque " + std::to_string(layer) + " : " + what);
+				}
+			}
+		}
 
 		//Decodage des PNG des <background> actifs ici (sequentiel), plus dans la boucle des lignes
 		for(uint32_t i = 0; i < activeCount; i++) {
@@ -3077,7 +3116,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 			if(c.BackgroundIndex < 0) continue;
 			const int t = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex].DioTarget;
 			if(t == -2) continue;
-			if(cls == 0 && _dioGpuBgN > 0 && (t == -1 || t == 0) && IsDioGpuBg(c.BgPriority, c.BackgroundIndex)) continue; // dessine par le GPU
+			if(_dioGpuBgN > 0 && IsDioGpuBg(c.BgPriority, c.BackgroundIndex)) continue; // dessine par le GPU (L0 ou groupe sans epaisseur)
 			uint32_t* tgt = defTarget;
 			if(t >= 0 && t <= 3) {
 				tgt = t == 0 ? l0 : (t == 1 ? l1 : (t == 2 ? l2 : l3));
@@ -3224,39 +3263,68 @@ void HdNesPack<scale>::RunDioramaLayers(HdScreenInfo* hdScreenInfo, const uint32
 	// Fonds de L0 dessines par le GPU (doc 52) : si tous les fonds de L0 ont le meme defilement sur toutes les lignes (ramx= / ramy=,
 	// ou fond fixe), le GPU les dessine comme un plan repete a la profondeur de L0 (marges infinies, aucun envoi d'image) ; sinon,
 	// dessin par le processeur comme avant. Pas pendant le controle d'identite GPU / processeur (compare).
+	// Etendu (2026-11-21) aux fonds des groupes <DioramaDepth> sans epaisseur, toutes bandes de priorite : plan a la profondeur du groupe,
+	// plus d'image de groupe a construire ni a envoyer. 8 fonds au plus. Les effets lies au z par pixel (<2DOverlay>, <video>,
+	// <2DPerspective>) gardent le dessin par le processeur ; <DayNight> n'en a pas besoin (teinte dans la scene).
 	_dioGpuBgN = 0;
-	if(_dioGpuOk && _activeBgCount[0] > 0 && _activeBgCount[0] <= 4 && !_zEnabled && !_hdData->HasIgnore2D && _hdData->Diorama.T[0] <= 0.0f && yEnd > yStart && yEnd <= 240) {
-		const int nAct = _activeBgCount[0];
+	int nActAll = 0;
+	for(int cls = 0; cls < 5; cls++) nActAll += _activeBgCount[cls];
+	const bool zNeeded = !_hdData->Videos.empty() || !_hdData->Overlays.empty() || !_hdData->Perspectives.empty();
+	if(_dioGpuOk && nActAll > 0 && !zNeeded && !_hdData->HasIgnore2D && yEnd > yStart && yEnd <= 240) {
+		// ligne de reference dans la zone de jeu (aux 2/3 de l'image) : une barre d'etat a defilement separe (Zelda 2, SMB) ne la fausse pas
 		HdBgConfig first[50], lc[50];
-		ComputeLineBgConfig(hdScreenInfo->ScreenTiles[yStart << 8], (uint8_t)yStart, first);
+		const uint32_t yRef = yStart + (yEnd - yStart) * 2 / 3;
+		ComputeLineBgConfig(hdScreenInfo->ScreenTiles[yRef << 8], (uint8_t)yRef, first);
+		const size_t nGroups = std::min<size_t>(_hdData->DioramaDepthGroups.size(), (size_t)DioGroups);
 		bool allOk = true;
-		bool cand[4] = { false, false, false, false };
+		bool cand[50] = {};
 		int nCand = 0;
-		for(int k = 0; k < nAct && allOk; k++) {
-			const HdBgConfig& c = first[k];
-			if(c.BackgroundIndex < 0) continue;
-			const HdBackgroundInfo& bi = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
-			if(!(bi.DioTarget == -1 || bi.DioTarget == 0)) continue; // un autre plan : sans effet sur L0
-			const uint32_t pw = bi.Data ? bi.Data->Width : 0, ph = bi.Data ? bi.Data->Height : 0;
-			if(bi.BlendMode != HdPackBlendMode::Alpha || pw == 0 || ph == 0 || (bi.TileX && (pw % hdScale) != 0) || (bi.TileY && (ph % hdScale) != 0) || // taille multiple de l'echelle : seulement pour un fond repete (periode en pixels NES)
-				DioGpuTexCount(bi.Priority) > 4 || (!bi.TileX && bi.Left != 0) || (!bi.TileY && bi.Top != 0)) { allOk = false; break; }
-			cand[k] = true; nCand++;
-		}
-		if(allOk && nCand > 0) {
-			for(uint32_t y = yStart + 1; y < yEnd && allOk; y++) {
-				ComputeLineBgConfig(hdScreenInfo->ScreenTiles[y << 8], (uint8_t)y, lc);
-				for(int k = 0; k < nAct; k++) {
-					if(lc[k].BackgroundIndex != first[k].BackgroundIndex || lc[k].BgPriority != first[k].BgPriority) { allOk = false; break; }
-					if(cand[k] && (lc[k].BgScrollX != first[k].BgScrollX || lc[k].BgScrollY != first[k].BgScrollY)) { allOk = false; break; }
+		for(int cls = 0; cls < 5 && allOk; cls++) {
+			for(int i = 0; i < _activeBgCount[cls] && allOk; i++) {
+				const int k = cls * HdNesPack::PriorityLevelsPerLayer + i;
+				const HdBgConfig& c = first[k];
+				if(c.BackgroundIndex < 0) continue;
+				const HdBackgroundInfo& bi = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
+				const int t = bi.DioTarget;
+				const bool toL0 = (t == 0 || (t == -1 && cls == 0)) && _hdData->Diorama.T[0] <= 0.0f;
+				const bool toGroup = !_dioTopDown && t >= 4 && (size_t)(t - 4) < nGroups && _hdData->DioramaDepthGroups[t - 4].T <= 0.0f; // side seulement
+				if(!toL0 && !toGroup) continue; // autre plan (L1..L3, groupe epais) : dessin par le processeur
+				const uint32_t pw = bi.Data ? bi.Data->Width : 0, ph = bi.Data ? bi.Data->Height : 0;
+				if(bi.BlendMode != HdPackBlendMode::Alpha || pw == 0 || ph == 0 || (bi.TileX && (pw % hdScale) != 0) || (bi.TileY && (ph % hdScale) != 0) || // taille multiple de l'echelle : seulement pour un fond repete (periode en pixels NES)
+					DioGpuTexCount(bi.Priority) > 4 || (!bi.TileX && bi.Left != 0) || (!bi.TileY && bi.Top != 0)) {
+					if(toL0) { allOk = false; break; } // L0 : tout ou rien (les fonds de L0 se superposent dans une seule image)
+					continue; // groupe : ce fond reste dessine par le processeur
 				}
+				if(nCand >= 8) continue;
+				cand[k] = true; nCand++;
 			}
 		}
 		if(allOk && nCand > 0) {
-			for(int k = 0; k < nAct; k++) {
+			// meme fond et meme defilement que la ligne de reference sur au moins 80 % des lignes (une barre d'etat a defilement fixe,
+			// en general opaque, est toleree : le fond y prend le defilement de la zone de jeu) ; sinon le fond (ou, pour L0, tous les
+			// fonds de L0) reste au processeur
+			int same[50] = {};
+			const int nLines = (int)(yEnd - yStart);
+			for(uint32_t y = yStart; y < yEnd; y++) {
+				ComputeLineBgConfig(hdScreenInfo->ScreenTiles[y << 8], (uint8_t)y, lc);
+				for(int k = 0; k < 50; k++) {
+					if(cand[k] && lc[k].BackgroundIndex == first[k].BackgroundIndex && lc[k].BgPriority == first[k].BgPriority && lc[k].BgScrollX == first[k].BgScrollX && lc[k].BgScrollY == first[k].BgScrollY) same[k]++;
+				}
+			}
+			for(int k = 0; k < 50; k++) {
+				if(!cand[k] || same[k] * 5 >= nLines * 4) continue;
+				const int t = _hdData->BackgroundsByPriority[first[k].BgPriority][first[k].BackgroundIndex].DioTarget;
+				if(t >= 4) { cand[k] = false; nCand--; }
+				else { for(int q = 0; q < 50; q++) { if(cand[q] && _hdData->BackgroundsByPriority[first[q].BgPriority][first[q].BackgroundIndex].DioTarget < 4) { cand[q] = false; nCand--; } } }
+			}
+		}
+		if(allOk && nCand > 0) {
+			for(int k = 0; k < 50; k++) {
 				if(!cand[k]) continue;
 				const HdBgConfig& c = first[k];
 				HdBackgroundInfo& bi = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
 				DioGpuBg& g = _dioGpuBg[_dioGpuBgN++];
+				g.Group = bi.DioTarget >= 4 ? bi.DioTarget - 4 : -1;
 				g.Prio = c.BgPriority; g.Index = c.BackgroundIndex;
 				g.Incl = bi.DioIncl;
 				g.Pix = bi.data(); g.W = bi.Data->Width; g.H = bi.Data->Height;
@@ -3830,6 +3898,8 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 		const DioGpuBg& g = _dioGpuBg[i];
 		HdDioramaBgPlane& bp = scene.Bg[i];
 		bp.Pix = g.Pix; bp.W = g.W; bp.H = g.H; bp.OffX = g.OffX; bp.OffY = g.OffY; bp.Bright = g.Bright; bp.TileX = g.TileX; bp.TileY = g.TileY;
+		bp.HasZ = g.Group >= 0 && (size_t)g.Group < _hdData->DioramaDepthGroups.size(); // fond de groupe : a la profondeur du groupe
+		if(bp.HasZ) bp.Z = _hdData->DioramaDepthGroups[g.Group].Z;
 		bp.Flat = _dioTopDown; const float incR = g.Incl * 3.14159265f / 180.0f; bp.InclC = std::cos(incR); bp.InclS = std::sin(incR); // doc 53
 		// <2DTexture> : remplacement de couleur fait par le shader du fond (4 regles au plus, diorama=off exclues)
 		bp.CtN = 0;

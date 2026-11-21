@@ -5,6 +5,8 @@
 #include <fstream>
 #include <sstream>
 #include "Gameboy/HdPacks/GbHdPackLoader.h"
+#include "Gameboy/HdPacks/GbHdDiorama.h"
+#include "NES/HdPacks/HdPackLoader.h"
 #include "Utilities/FolderUtilities.h"
 #include "Shared/MessageManager.h"
 #include "Utilities/HdFlatJson.h"
@@ -578,6 +580,32 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 				}
 			}
 
+			{
+				// Diorama et <DayNight> (doc 56) : lus par le chargeur NES (memes balises, memes options), conditions Game Boy adaptees
+				std::string low = Lower(line);
+				if(low.compare(0, 15, "<dioramawindow>") == 0) {
+					if(!outData.Dio) outData.Dio = std::make_shared<GbHdDiorama>();
+					const std::string v = Lower(Trim(line.substr(15)));
+					outData.Dio->WindowFixed = !(v == "scene" || v == "off" || v == "3d");
+					MessageManager::Log(std::string("[HD-GB-LOAD] <DioramaWindow> : fenetre ") + (outData.Dio->WindowFixed ? "a plat devant la scene" : "dans la scene (couche des tiles)"));
+					continue;
+				}
+				if(low.compare(0, 8, "<diorama") == 0 || low.compare(0, 10, "<daynight>") == 0 || low.compare(0, 13, "<3dparticles>") == 0) {
+					if(!outData.Dio) outData.Dio = std::make_shared<GbHdDiorama>();
+					GbHdDiorama& dio = *outData.Dio;
+					for(const auto& kv : outData.Conditions) { dio.Named(kv.first, false); dio.Named(kv.first, true); }
+					std::vector<HdPackCondition*> conds;
+					for(const GbHdTerm& t : terms) {
+						if(t.Name == "hmirror" || t.Name == "vmirror") continue; // sans tile : ignores
+						conds.push_back(dio.Named(t.Name, t.Negated));
+					}
+					if(!HdPackLoader::ParseForeignDioramaLine(packFolder, line, conds, dio.ByName, dio.Data)) {
+						MessageManager::Log("[HD-GB-LOAD] balise diorama non prise en charge sur Game Boy : " + line);
+						ignoredLines++;
+					}
+					continue;
+				}
+			}
 			{
 				std::string low = Lower(line);
 				size_t tagLen = 0;

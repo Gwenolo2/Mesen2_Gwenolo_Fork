@@ -9,6 +9,7 @@
 #include "Gameboy/GbHdVideoFilter.h"
 #include "Gameboy/GbConstants.h"
 #include "Gameboy/GbPpu.h"
+#include "Gameboy/HdPacks/GbHdDiorama.h"
 #include "Shared/MessageManager.h"
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/PNGHelper.h"
@@ -76,6 +77,11 @@ GbHdVideoFilter::GbHdVideoFilter(Emulator* emu, const GbHdPackData& pack) : GbDe
 	// Threads crees une seule fois : coeurs - 2 (emulation + systeme), borne a [1, 8], appelant compris
 	_pool.Start(std::clamp((int)std::thread::hardware_concurrency() - 2, 1, 8));
 	LoadImages();
+	// Diorama / <DayNight> (doc 56) : les conditions des regles evaluent les termes Game Boy avec la memoire de l'image
+	if(_pack.Dio) {
+		_pack.Dio->Eval = [this](const std::vector<GbHdTerm>& t) { return EvaluateTerms(t, 0, _dioMem, 0, 0, false); };
+		_pack.Dio->EvalOwner = this;
+	}
 }
 
 void GbHdVideoFilter::LoadImages()
@@ -486,6 +492,20 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 		_pack.BgmRequest->store(request, std::memory_order_relaxed);
 	}
+	// Diorama / <DayNight> (doc 56) : memoire de l'image pour les conditions, avance des cycles jour / nuit, defilement cumule
+	_dioMem = mem;
+	_dnDioApplied = false;
+	UpdateDayNight();
+	if(frameData && _pack.Dio) {
+		const int sx = frameData->ScrollX, sy = frameData->ScrollY;
+		if(_dioLastSX >= 0) {
+			int ddx = ((sx - _dioLastSX) % 256 + 256) % 256; if(ddx > 128) ddx -= 256;
+			int ddy = ((sy - _dioLastSY) % 256 + 256) % 256; if(ddy > 128) ddy -= 256;
+			if(std::abs(ddx) <= 64) _dioWX += (float)ddx;
+			if(std::abs(ddy) <= 64) _dioWY += (float)ddy;
+		} else { _dioWX = (float)sx; _dioWY = (float)sy; }
+		_dioLastSX = sx; _dioLastSY = sy;
+	}
 	const uint32_t outWidth = GbConstants::ScreenWidth * _scale;
 	const uint32_t screenH = GbConstants::ScreenHeight;
 
@@ -584,6 +604,181 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			spriteTiles[k][0] = FindTile(s.Hash[0], s.Palette, s.Flags, mem, s.X, s.Y + ((s.Height == 16 && (s.Flags & 4)) ? 8 : 0), true);
 			spriteTiles[k][1] = (s.Height == 16) ? FindTile(s.Hash[1], s.Palette, s.Flags, mem, s.X, s.Y + ((s.Flags & 4) ? 0 : 8), true) : GbHdTileMatch();
 		}
+	}
+
+	// ---- Diorama (doc 56) : couches separees envoyees au GPU a la place du rendu 2D (meme regles de visibilite que le rendu 2D) ----
+	bool dioDone = false;
+	if(info && DioramaActive()) {
+		const size_t N = (size_t)outWidth * screenH * _scale;
+		for(auto& L : _dioL) L.assign(N, 0u);
+		const bool winFixed = _pack.Dio->WindowFixed;
+		if(winFixed) _dioFix.assign(N, 0u);
+		const bool l0Clear = DioramaSkyWanted(); // ciel : la couleur 0 du fond laisse voir la skybox
+		_dioBackdrop = ColorFromRgb555(info[0].BgZero) | 0xFF000000u;
+		auto prem = [](uint32_t c) -> uint32_t {
+			const uint32_t a = c >> 24;
+			if(a == 255) return c;
+			if(a == 0) return 0;
+			return (a << 24) | ((((c >> 16) & 0xFF) * a + 127) / 255 << 16) | ((((c >> 8) & 0xFF) * a + 127) / 255 << 8) | (((c & 0xFF) * a + 127) / 255);
+		};
+		auto over = [](uint32_t& d, uint32_t s) { // s premultiplie sur d premultiplie
+			const uint32_t sa = s >> 24;
+			if(sa == 255) { d = s; return; }
+			if(sa == 0) return;
+			const uint32_t k = 255 - sa;
+			uint32_t r = 0;
+			for(uint32_t sh = 0; sh <= 24; sh += 8) r |= std::min(255u, ((s >> sh) & 0xFF) + (((d >> sh) & 0xFF) * k + 127) / 255) << sh;
+			d = r;
+		};
+		// fonds <background> (alpha et luminosite) poses en premultiplie sur d ; skipBelow : fonds de Z inferieur ignores
+		// <background> dessines par le GPU : opaques (alpha 1), luminosite <= 1 ; arriere en side et topDown, intermediaires et avant en side
+		_dioBgGpu.clear();
+		std::vector<BgLayer> backCpu, midCpu, frontCpu;
+		auto routeBg = [&](const std::vector<BgLayer>& src, std::vector<BgLayer>& cpu, int kind) {
+			for(const BgLayer& l : src) {
+				const bool ok = l.Bg->Alpha >= 0.999 && l.Bg->Luminosity <= 1.0 && (kind == 0 || !_dioTopDown) && _dioBgGpu.size() < 8 &&
+					l.Image < _images.size() && !_images[l.Image].empty() && _imageWidths[l.Image] > 0 && _imageHeights[l.Image] > 0;
+				if(!ok) { cpu.push_back(l); continue; }
+				DioBgGpu g; g.Image = l.Image; g.OffX = l.OffX; g.OffY = l.OffY; g.Bright = (float)l.Bg->Luminosity; g.TileX = l.Bg->TileX; g.TileY = l.Bg->TileY; g.Kind = kind;
+				_dioBgGpu.push_back(g);
+			}
+		};
+		routeBg(backLayers, backCpu, 0);
+		routeBg(midLayers, midCpu, 1);
+		routeBg(frontLayers, frontCpu, 2);
+		auto paintPrem = [&](const std::vector<BgLayer>& ls, uint32_t hx, uint32_t hy, uint32_t& d, int skipBelow) {
+			for(const BgLayer& l : ls) {
+				if(l.Bg->Z < skipBelow) continue;
+				uint32_t bpx = 0;
+				if(!SampleBackgroundPixel(l.Image, *l.Bg, l.OffX, l.OffY, hx, hy, bpx) || (bpx >> 24) == 0) continue;
+				const uint32_t a = (uint32_t)std::lround((double)(bpx >> 24) * l.Bg->Alpha);
+				if(a == 0) continue;
+				over(d, prem((AdjustLuminosity(bpx, l.Bg->Luminosity) & 0x00FFFFFFu) | (std::min(a, 255u) << 24)));
+			}
+		};
+		const int dioBands = (_pool.Size() > 1) ? _pool.Size() : 1;
+		const uint32_t dioRows = (screenH + dioBands - 1) / dioBands;
+		auto dioBand = [&](int b) {
+			const uint32_t y0 = (uint32_t)b * dioRows, y1 = std::min(screenH, y0 + dioRows);
+			for(uint32_t y = y0; y < y1; y++) {
+				for(uint32_t x = 0; x < GbConstants::ScreenWidth; x++) {
+					const uint32_t offset = y * GbConstants::ScreenWidth + x;
+					const GbHdPixelInfo& p = info[offset];
+					const uint32_t sdColor = GetPixel(ppuOutputBuffer, offset) | 0xFF000000u;
+					// tile de fond du pixel : la sienne, ou celle sous le sprite
+					const bool isSpr = p.Layer == 2;
+					const bool hasTile = p.Layer == 1 || (isSpr && p.ULayer);
+					const uint64_t th = isSpr ? p.UHash : p.Hash;
+					const uint32_t tpal = isSpr ? p.UPalette : p.Palette;
+					const uint8_t tfl = isSpr ? p.UFlags : p.Flags, trow = isSpr ? p.URow : p.Row, tcol = isSpr ? p.UCol : p.Col;
+					const uint8_t tcolor = isSpr ? p.UColor : p.BgColor;
+					const bool win = hasTile && (isSpr ? p.UWindow : p.Window);
+					GbHdTileMatch m;
+					if(hasTile) m = FindTile(th, tpal, tfl, mem, (int32_t)x - (int32_t)tcol, (int32_t)y - (int32_t)trow, true);
+					const uint32_t backdrop = ColorFromRgb555(p.BgZero) | 0xFF000000u;
+					// couleur SD de la tile : pixel du PPU, ou couleur du fond sous le sprite
+					const uint32_t tileSd = isSpr ? (ColorFromRgb555(p.Fallback) | 0xFF000000u) : sdColor;
+					for(uint32_t dy = 0; dy < _scale; dy++) {
+						const uint32_t hy = y * _scale + dy;
+						for(uint32_t dx = 0; dx < _scale; dx++) {
+							const uint32_t hx = x * _scale + dx;
+							const size_t idx = (size_t)hy * outWidth + hx;
+							uint32_t l0 = l0Clear ? 0u : backdrop;
+							paintPrem(backCpu, hx, hy, l0, INT32_MIN);
+							uint32_t t = 0;
+							if(hasTile) {
+								uint32_t px = 0;
+								if(m.Ref && SamplePixel(*m.Ref, m.MirrorH, m.MirrorV, tcol, trow, dx, dy, px)) t = prem(px);
+								else if(!m.Ref && tcolor != 0 && !_pack.DisableOriginalTiles) t = tileSd;
+							}
+							paintPrem(midCpu, hx, hy, t, INT32_MIN);
+							if(win && winFixed) {
+								uint32_t f = backdrop;
+								over(f, t);
+								_dioFix[idx] = f;
+								_dioL[0][idx] = l0;
+							} else {
+								_dioL[0][idx] = l0;
+								_dioL[2][idx] = t;
+							}
+						}
+					}
+				}
+			}
+		};
+		_pool.Run(dioBands, dioBand);
+		// sprites : L1 (priorite fond OAM) ou L3, memes regles de visibilite que la passe 2 ; sprite sans tile HD : pixels SD du PPU
+		if(sprites) {
+			const int32_t screenW = (int32_t)GbConstants::ScreenWidth;
+			for(size_t k = 0; k < sprites->size(); k++) {
+				const GbHdSpriteInfo& s = (*sprites)[k];
+				std::vector<uint32_t>& L = _dioL[s.BgPriority ? 1 : 3];
+				for(int32_t r = 0; r < s.Height; r++) {
+					const int32_t sy = s.Y + r;
+					if(sy < 0 || sy >= (int32_t)screenH) continue;
+					const int32_t vr = (s.Flags & 4) ? (s.Height - 1 - r) : r;
+					const uint64_t hash = s.Hash[vr >> 3];
+					const uint32_t row = (uint32_t)(r & 7);
+					const GbHdTileMatch& m = spriteTiles[k][vr >> 3];
+					for(int32_t c = 0; c < 8; c++) {
+						const int32_t sx = s.X + c;
+						if(sx < 0 || sx >= screenW) continue;
+						const uint32_t offset = (uint32_t)sy * GbConstants::ScreenWidth + (uint32_t)sx;
+						const GbHdPixelInfo& p = info[offset];
+						const bool owned = p.Layer == 2 && p.Hash == hash && p.Palette == s.Palette && p.Flags == s.Flags;
+						bool allowed = true;
+						if(p.Layer == 2) allowed = owned;
+						else if(p.Layer == 1) allowed = p.BgPriority ? p.BgColor == 0 : (!s.BgPriority || p.BgColor == 0);
+						if(!allowed) continue;
+						if(m.Ref) {
+							for(uint32_t dy = 0; dy < _scale; dy++) {
+								for(uint32_t dx = 0; dx < _scale; dx++) {
+									uint32_t px = 0;
+									if(SamplePixel(*m.Ref, m.MirrorH, m.MirrorV, (uint32_t)c, row, dx, dy, px) && (px >> 24)) {
+										over(L[((size_t)sy * _scale + dy) * outWidth + (size_t)sx * _scale + dx], prem(px));
+									}
+								}
+							}
+						} else if(owned) {
+							const uint32_t col = GetPixel(ppuOutputBuffer, offset) | 0xFF000000u;
+							for(uint32_t dy = 0; dy < _scale; dy++) {
+								for(uint32_t dx = 0; dx < _scale; dx++) L[((size_t)sy * _scale + dy) * outWidth + (size_t)sx * _scale + dx] = col;
+							}
+						}
+					}
+				}
+			}
+		}
+		// fonds devant les sprites : L3 (sous spriteZ + 10, une tile GBC prioritaire reste devant)
+		if(!frontCpu.empty()) {
+			for(uint32_t y = 0; y < screenH; y++) {
+				for(uint32_t x = 0; x < GbConstants::ScreenWidth; x++) {
+					const GbHdPixelInfo& p = info[y * GbConstants::ScreenWidth + x];
+					const int skipBelow = (p.Layer == 1 && p.BgPriority && p.BgColor != 0) ? tileHighZ : INT32_MIN;
+					for(uint32_t dy = 0; dy < _scale; dy++) {
+						for(uint32_t dx = 0; dx < _scale; dx++) {
+							const uint32_t hx = x * _scale + dx, hy = y * _scale + dy;
+							paintPrem(frontCpu, hx, hy, _dioL[3][(size_t)hy * outWidth + hx], skipBelow);
+						}
+					}
+				}
+			}
+		}
+		// lignes HD de la fenetre (HUD)
+		_dioFixY0 = 0; _dioFixRows = 0;
+		if(winFixed) {
+			int first = -1, last = -1;
+			for(uint32_t y = 0; y < screenH; y++) {
+				bool any = false;
+				for(uint32_t x = 0; x < GbConstants::ScreenWidth && !any; x++) {
+					const GbHdPixelInfo& p = info[y * GbConstants::ScreenWidth + x];
+					any = (p.Layer == 1 && p.Window) || (p.Layer == 2 && p.ULayer && p.UWindow);
+				}
+				if(any) { if(first < 0) first = (int)y; last = (int)y; }
+			}
+			if(first >= 0) { _dioFixY0 = (uint32_t)first * _scale; _dioFixRows = (uint32_t)(last - first + 1) * _scale; }
+		}
+		dioDone = DioramaSubmit(out);
 	}
 
 	// Bandes de lignes SD, une par thread. Chaque bande dessine son fond, ses sprites puis ses premiers plans :
@@ -745,7 +940,10 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		}
 	};
 
-	_pool.Run(bands, renderBand);
+	if(!dioDone) {
+		_pool.Run(bands, renderBand);
+		ApplyDayNight2D(out, info); // <DayNight>, mode normal (en diorama : teinte dans la scene)
+	}
 
 	// <2DSpriteLight> : halos des sprites, sur l'image composee (avant les overlays, comme SNES)
 	if(!_pack.SpriteLights.empty() && sprites) {

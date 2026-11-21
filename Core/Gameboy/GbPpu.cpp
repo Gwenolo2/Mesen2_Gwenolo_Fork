@@ -464,7 +464,7 @@ void GbPpu::RunDrawCycle()
 					WriteObjPixel(((sprite.Attributes & 0x10) ? 4 : 0) | colorIndex);
 				}
 				_lastPixelType = GbPixelType::Object;
-				RecordHdPixel(sprite, 2, BgRawColor(entry), BgZeroColor(entry));
+				RecordHdPixel(sprite, 2, BgRawColor(entry), BgZeroColor(entry), (cfg.DisableBackground || (!_state.CgbEnabled && !_state.BgEnabled) || _insertGlitchBgPixel) ? nullptr : &entry);
 			} else {
 				if(!cfg.DisableBackground) {
 					if(_state.CgbEnabled) {
@@ -530,7 +530,7 @@ uint16_t GbPpu::BgRawColor(const GbFifoEntry& e)
 	return LcdReadBgPalette(_state.BgPalette & 0x03) & 0x7FFF;
 }
 
-void GbPpu::RecordHdPixel(const GbFifoEntry& e, uint8_t layer, uint16_t fallback, uint16_t bgZero)
+void GbPpu::RecordHdPixel(const GbFifoEntry& e, uint8_t layer, uint16_t fallback, uint16_t bgZero, const GbFifoEntry* under)
 {
 	if(_hdCur == nullptr) {
 		return;
@@ -546,6 +546,14 @@ void GbPpu::RecordHdPixel(const GbFifoEntry& e, uint8_t layer, uint16_t fallback
 	p.BgPriority = (layer == 1 && (e.Attributes & 0x80)) ? 1 : 0;
 	p.Fallback = fallback;
 	p.BgZero = bgZero;
+	p.Window = (layer == 1) ? e.HdWin : 0;
+	// diorama (doc 56) : tile de fond sous le sprite
+	if(under) {
+		p.ULayer = 1; p.UHash = under->HdHash; p.UPalette = under->HdPalette; p.UFlags = under->HdFlags; p.URow = under->HdRow; p.UCol = under->HdCol;
+		p.UColor = under->Color; p.UPriority = (under->Attributes & 0x80) ? 1 : 0; p.UWindow = under->HdWin;
+	} else {
+		p.ULayer = 0;
+	}
 }
 
 void GbPpu::WriteBgPixel(uint8_t colorIndex)
@@ -740,6 +748,7 @@ void GbPpu::ClockTileFetcher()
 				_bgFetcher.HdPalette = _state.CgbEnabled ? (uint32_t)(attributes & 0x07) : (uint32_t)_state.BgPalette;
 				_bgFetcher.HdFlags = (uint8_t)(((attributes & 0x20) ? 2 : 0) | ((attributes & 0x40) ? 4 : 0));
 				_bgFetcher.HdRow = (uint8_t)(yOffset & 0x07);
+				_bgFetcher.HdWin = _fetchWindow ? 1 : 0;
 			}
 
 			if(GbHdPackBuilder::IsActive()) {
@@ -841,6 +850,7 @@ void GbPpu::PushTileToPixelFifo()
 		_bgFifo.Content[i].HdPalette = _bgFetcher.HdPalette;
 		_bgFifo.Content[i].HdFlags = _bgFetcher.HdFlags;
 		_bgFifo.Content[i].HdRow = _bgFetcher.HdRow;
+		_bgFifo.Content[i].HdWin = _bgFetcher.HdWin;
 		_bgFifo.Content[i].HdCol = (uint8_t)i;
 	}
 

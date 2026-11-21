@@ -10,6 +10,8 @@
 #include <vector>
 #include "Shared/HdWatchExpr.h"
 
+struct GbHdDiorama; // diorama (doc 56), Gameboy/HdPacks/GbHdDiorama.h
+
 // Position d'une tile dans une image d'atlas (en pixels HD)
 struct GbHdTileRef
 {
@@ -270,6 +272,8 @@ struct GbHdPackData
 	std::map<int, GbHdBgmTrack> BgmFiles;
 	std::vector<GbHdConditionalBgm> ConditionalBgms;
 	std::shared_ptr<std::atomic<int32_t>> BgmRequest;
+	// Diorama et <DayNight> (doc 56) : regles au format NES, partagees entre le pack et la copie du filtre ; nullptr = aucune
+	std::shared_ptr<GbHdDiorama> Dio;
 	bool IsLoaded = false;
 };
 

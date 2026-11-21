@@ -170,6 +170,7 @@ enum class HdPackConditionType
 	PositionCheckY,
 	OriginPositionCheckX,
 	OriginPositionCheckY,
+	Variable,
 };
 
 struct HdPackCondition
@@ -224,6 +225,29 @@ protected:
 	bool _useCache = false;
 
 	virtual bool InternalCheckCondition(int x, int y, HdPpuTileInfo* tile) = 0;
+};
+
+// [fork NES] <setVariable> (doc 57) : variable qui choisit, a chaque image, une valeur de chemin de PNG ($nom dans <background>)
+struct HdPackVariable
+{
+	struct Rule
+	{
+		vector<HdPackCondition*> Conditions;
+		int ValueIndex = 0;
+	};
+	string Name;
+	vector<string> Values;
+	vector<Rule> Rules;
+	int Current = -1; // index dans Values ; -1 = aucune regle vraie
+	int LoggedValue = -2;
+
+	int IndexOf(const string& v)
+	{
+		for(size_t i = 0; i < Values.size(); i++) {
+			if(Values[i] == v) return (int)i;
+		}
+		return -1;
+	}
 };
 
 struct HdPackBitmapInfo
@@ -1292,6 +1316,7 @@ public:
 	vector<unique_ptr<HdPackBitmapInfo>> AuxBitmaps; // G6d / H1 : PNG des normales et des objets 3D, hors de la liste des <img> (dont l'ordre numerote les images des tiles)
 	vector<unique_ptr<HdPackTileInfo>> Tiles;
 	vector<unique_ptr<HdPackCondition>> Conditions;
+	vector<unique_ptr<HdPackVariable>> Variables; // [fork NES] <setVariable> (doc 57)
 	vector<unique_ptr<NesHdVideoInfo>> Videos;
 	vector<unique_ptr<NesHdOverlayInfo>> Overlays;
 	vector<unique_ptr<NesHdLiquidInfo>> Liquids; // <2DLiquid>

@@ -409,6 +409,9 @@ bool HdPackLoader::LoadPack()
 			} else if(lineContent.substr(0, 12) == "<background>") {
 				tokens = StringUtilities::Split(lineContent.substr(12), ',');
 				ProcessBackgroundTag(tokens, conditions);
+			} else if(lineContent.substr(0, 13) == "<setVariable>") {
+				tokens = StringUtilities::Split(lineContent.substr(13), ',');
+				ProcessSetVariableTag(tokens, conditions);
 			} else if(lineContent.substr(0, 11) == "<condition>") {
 				tokens = StringUtilities::Split(lineContent.substr(11), ',');
 				ProcessConditionTag(tokens, false);
@@ -1287,8 +1290,74 @@ HdPackConditionOperator HdPackLoader::ParseConditionOperator(string& opString)
 	return HdPackConditionOperator::Invalid;
 }
 
+// [fork NES] <setVariable>nom,valeur (doc 57) : declare une valeur possible de la variable $nom (chemin de PNG) ; la derniere regle vraie gagne a chaque image
+void HdPackLoader::ProcessSetVariableTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.size() < 2) {
+		logError("setVariable : syntaxe <setVariable>nom,valeur, ligne ignoree.");
+		return;
+	}
+	const string name = StringUtilities::Trim(tokens[0]);
+	const string value = StringUtilities::Trim(tokens[1]);
+	if(name.empty() || name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != string::npos) {
+		logError("setVariable : nom invalide (lettres, chiffres et _ seulement) : " + name + ", ligne ignoree.");
+		return;
+	}
+	if(value.empty() || value[0] == '$') {
+		logError("setVariable : la valeur doit etre un chemin de PNG (pas une autre variable) : " + value + ", ligne ignoree.");
+		return;
+	}
+	// [fork NES] toutes les conditions sont acceptees ; les conditions liees a un pixel (tileNearby, spriteNearby, mirroirs, position) sont evaluees sans pixel (voir doc 03)
+	HdPackVariable* var = nullptr;
+	for(unique_ptr<HdPackVariable>& v : _data->Variables) {
+		if(v->Name == name) { var = v.get(); break; }
+	}
+	if(!var) {
+		_data->Variables.push_back(unique_ptr<HdPackVariable>(new HdPackVariable()));
+		var = _data->Variables.back().get();
+		var->Name = name;
+	}
+	int idx = var->IndexOf(value);
+	if(idx < 0) {
+		var->Values.push_back(value);
+		idx = (int)var->Values.size() - 1;
+	}
+	HdPackVariable::Rule rule;
+	rule.Conditions = conditions;
+	rule.ValueIndex = idx;
+	var->Rules.push_back(rule);
+}
+
 void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCondition*> conditions)
 {
+	// [fork NES] <background>$nom (doc 57) : une variante par valeur de <setVariable>$nom, chacune conditionnee par la valeur courante
+	{
+		const string first = StringUtilities::Trim(tokens.empty() ? string() : tokens[0]);
+		if(first.size() > 1 && first[0] == '$') {
+			const string vname = first.substr(1);
+			HdPackVariable* var = nullptr;
+			for(unique_ptr<HdPackVariable>& v : _data->Variables) {
+				if(v->Name == vname) { var = v.get(); break; }
+			}
+			if(!var || var->Values.empty()) {
+				logError("Background : variable $" + vname + " inconnue (declarer <setVariable>" + vname + ",... avant cette ligne), fond ignore.");
+				return;
+			}
+			for(size_t k = 0; k < var->Values.size(); k++) {
+				vector<string> variantTokens = tokens;
+				variantTokens[0] = var->Values[k];
+				vector<HdPackCondition*> variantConds = conditions;
+				unique_ptr<HdPackVariableCondition> vc(new HdPackVariableCondition());
+				vc->Var = var;
+				vc->Index = (int)k;
+				vc->Name = "$" + vname + "=" + std::to_string(k);
+				variantConds.push_back(vc.get());
+				_data->Conditions.push_back(std::move(vc));
+				ProcessBackgroundTag(variantTokens, variantConds);
+			}
+			return;
+		}
+	}
 	// Options nommees ramx=expr / ramy=expr (valeurs $nom de <watchMemoryAddress>) : retirees avant la lecture positionnelle
 	HdWatchExpr bgExprX, bgExprY;
 	for(size_t ti = 1; ti < tokens.size(); ) {
@@ -1436,6 +1505,7 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 				case HdPackConditionType::MemoryCheck:
 				case HdPackConditionType::MemoryCheckConstant:
 				case HdPackConditionType::FrameRange:
+				case HdPackConditionType::Variable: // [fork NES] variante de <background>$nom (doc 57)
 					backgroundInfo.Conditions.push_back(condition);
 					break;
 
@@ -4310,4 +4380,36 @@ void HdPackLoader::ProcessLiquidTag(vector<string>& tokens, vector<HdPackConditi
 	}
 
 	_data->Liquids.push_back(std::move(liquid));
+}
+
+// Diorama des autres consoles (Game Boy, doc 56) : memes analyses que les balises du hires.txt NES. Les balises liees aux tiles NES
+// (<Tile2Obj>, <Sprite2Obj>, <DioramaDepth>, <DioramaOffCamera>, <DioramaNormal>, <DioramaShadow>, lumieres de tile) ne sont pas
+// prises en charge ici.
+bool HdPackLoader::ParseForeignDioramaLine(const string& folder, const string& line, const vector<HdPackCondition*>& conditions, const unordered_map<string, HdPackCondition*>& condByName, HdPackData& data)
+{
+	HdPackLoader L;
+	L._data = &data;
+	L._loadFromZip = false;
+	L._hdPackFolder = folder;
+	L._conditionsByName = condByName;
+	const string low = StringUtilities::ToLower(line);
+	vector<string> tokens;
+	auto is = [&](const char* tag) { const size_t n = strlen(tag); return low.size() >= n && low.compare(0, n, tag) == 0; };
+	auto split = [&](size_t n) { tokens = StringUtilities::Split(line.substr(n), ','); };
+	if(is("<dioramalight>")) { split(14); L.ProcessDioramaLightTag(tokens, conditions); }
+	else if(is("<dioramacameradefault>")) { split(22); L.ProcessDioramaCameraDefaultTag(tokens, conditions); }
+	else if(is("<dioramacamerakeys>")) { split(19); L.ProcessDioramaCameraKeysTag(tokens, conditions); }
+	else if(is("<dioramacamera>")) { split(15); L.ProcessDioramaCameraTag(tokens, conditions); }
+	else if(is("<dioramaobject>")) { split(15); L.ProcessDioramaObjectTag(tokens, conditions); }
+	else if(is("<daynight>")) { split(10); L.ProcessDayNightTag(tokens, conditions); }
+	else if(is("<3dparticles>")) { split(13); L.ProcessDiorama3DParticlesTag(tokens, conditions); }
+	else if(is("<dioramamist>")) { split(13); L.ProcessDioramaMistTag(tokens, conditions); }
+	else if(is("<dioramaclouds>")) { split(15); L.ProcessDioramaCloudsTag(tokens, conditions); }
+	else if(is("<dioramafog>")) { split(12); L.ProcessDioramaFogTag(tokens, conditions); }
+	else if(is("<dioramaview>")) { split(13); L.ProcessDioramaViewTag(tokens, conditions); }
+	else if(is("<dioramapad>")) { split(12); L.ProcessDioramaPadTag(tokens, conditions); }
+	else if(is("<dioramaskybox>")) { split(15); L.ProcessDioramaSkyboxTag(tokens, conditions); }
+	else if(is("<diorama>")) { split(9); L.ProcessDioramaTag(tokens, conditions); }
+	else return false;
+	return true;
 }

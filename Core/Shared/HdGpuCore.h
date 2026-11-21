@@ -184,11 +184,12 @@ struct HdDioramaBgPlane
 	bool TileX = false, TileY = false;
 	bool Flat = false; float InclC = 1.0f, InclS = 0.0f; // doc 53 : fond a plat (topDown) et cos / sin de son inclinaison
 	HdDioramaColorTex Ct[4]; int CtN = 0;                  // <2DTexture> : remplacements de couleur
+	bool HasZ = false; float Z = 0.0f;                     // fond d'un groupe <DioramaDepth> : plan a la profondeur du groupe (sinon devant L0)
 };
 
 struct HdDioramaScene
 {
-	HdDioramaBgPlane Bg[4]; int BgCount = 0;  // fonds de L0 dessines par le GPU, du plus loin au plus pres
+	HdDioramaBgPlane Bg[8]; int BgCount = 0;  // fonds dessines par le GPU (L0 et groupes <DioramaDepth> sans epaisseur), du plus loin au plus pres
 	float BgYStart = 0;                       // premiere ligne NES de l'image des couches (position absolue du fond)
 	float BgMargin = 1024.0f;                 // demi-marge du plan (pixels NES) autour de l'ecran
 	HdDioramaSky Sky;

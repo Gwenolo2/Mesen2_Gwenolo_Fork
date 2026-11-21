@@ -139,6 +139,7 @@ struct GbFifoEntry
 	uint8_t HdFlags = 0;
 	uint8_t HdRow = 0;
 	uint8_t HdCol = 0;
+	uint8_t HdWin = 0; // 1 = pixel de la fenetre (window), pour le diorama (doc 56)
 };
 
 struct GbPpuFifo
@@ -173,6 +174,7 @@ struct GbPpuFetcher
 	uint32_t HdPalette = 0;
 	uint8_t HdFlags = 0;
 	uint8_t HdRow = 0;
+	uint8_t HdWin = 0;
 };
 
 struct GbPpuState : public BaseState

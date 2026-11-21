@@ -33,6 +33,12 @@ struct GbHdPixelInfo
 	uint16_t BgZero = 0;   // RGB555 de la couleur 0 de la palette de fond (<disableOriginalTiles>)
 	uint16_t Fallback = 0; // RGB555 affiche si la tile HD est transparente (fond : couleur 0 ; sprite : fond sous le pixel)
 	uint8_t BgPriority = 0; // 1 = tile de fond avec le bit de priorite GBC (0x80) : au-dessus des sprites
+	// Diorama (doc 56) : Window = pixel de la fenetre ; U* = tile de fond SOUS un pixel de sprite (Layer = 2), pour la couche des tiles
+	uint8_t Window = 0;
+	uint8_t ULayer = 0; // 1 = U* valides
+	uint8_t UFlags = 0, URow = 0, UCol = 0, UColor = 0, UPriority = 0, UWindow = 0;
+	uint32_t UPalette = 0;
+	uint64_t UHash = 0;
 };
 
 // Donnees HD transmises avec chaque image : tampon des pixels et liste des sprites
@@ -120,7 +126,7 @@ private:
 	__forceinline void WriteObjPixel(uint8_t colorIndex);
 	uint16_t BgZeroColor(const GbFifoEntry& e);
 	uint16_t BgRawColor(const GbFifoEntry& e);
-	__forceinline void RecordHdPixel(const GbFifoEntry& e, uint8_t layer, uint16_t fallback, uint16_t bgZero);
+	__forceinline void RecordHdPixel(const GbFifoEntry& e, uint8_t layer, uint16_t fallback, uint16_t bgZero, const GbFifoEntry* under = nullptr);
 
 	__forceinline void ProcessPpuCycle();
 

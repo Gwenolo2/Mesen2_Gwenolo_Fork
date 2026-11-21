@@ -12,6 +12,10 @@ class HdPackLoader
 public:
 	static bool LoadHdNesPack(string definitionFile, HdPackData &outData);
 	static bool LoadHdNesPack(VirtualFile &romFile, HdPackData &outData);
+	// Diorama des autres consoles (Game Boy, doc 56) : analyse une ligne de balise diorama (sans son prefixe [conditions]) avec les
+	// memes regles que le NES, dans data. conditions : conditions de la ligne (adaptateurs de la console) ; condByName : conditions
+	// nommees (pour until= de <DayNight>). Faux si la balise n'est pas une balise diorama prise en charge.
+	static bool ParseForeignDioramaLine(const string& folder, const string& line, const vector<HdPackCondition*>& conditions, const unordered_map<string, HdPackCondition*>& condByName, HdPackData& data);
 
 
 
@@ -66,6 +70,7 @@ private:
 	HdPackConditionOperator ParseConditionOperator(string& opString);
 	void ProcessTileTag(vector<string> &tokens, vector<HdPackCondition*> conditions, bool hFlip = false, bool vFlip = false);
 	void ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCondition*> conditions);
+	void ProcessSetVariableTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessIgnore2DTag(vector<string> &tokens, vector<HdPackCondition*> conditions);
 	void ProcessAdditionTag(vector<string>& tokens);
 	void ProcessFallbackTag(vector<string>& tokens);
