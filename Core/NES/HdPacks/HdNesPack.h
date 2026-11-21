@@ -164,6 +164,20 @@ private:
 	vector<uint8_t> _dioT2oHide;               // Tile2Obj (doc 53) : pixels dont la tile est remplacee par un modele (diorama seulement)
 	vector<HdDioramaObjectRule> _dioT2oRules;  // Tile2Obj : instances de cette image
 	void DetectTile2Obj();
+	void DetectSprite2Obj();
+	std::unordered_map<uint64_t, std::shared_ptr<vector<float>>> _s2oBuf;          // <Sprite2Obj> anime : sommets deformes (regle, silhouette, partie)
+	std::unordered_map<std::string, std::pair<uint32_t, float>> _s2oTime;          // id= -> (derniere image, temps du clip en secondes)
+	std::vector<float> _s2oPal;                                                   // palette d'os de la silhouette en cours
+	uint32_t _s2oVersion = 0;
+	vector<uint8_t> _s2oMask; // <Sprite2Obj> : par pixel NES, regle (+1) dont la silhouette a ete remplacee par un objet (0 = aucune)
+	bool S2oHidden(uint32_t pixelIndex, const HdPpuTileInfo& t) const // sprite cache : sa silhouette est un objet et sa tile est dans la regle (hide=on)
+	{
+		if(pixelIndex >= _s2oMask.size() || _s2oMask[pixelIndex] == 0) return false;
+		const HdDioramaTile2ObjRule& r = _hdData->Sprite2ObjRules[_s2oMask[pixelIndex] - 1];
+		if(!r.Hide || (!r.AnyPalette && r.Palette != t.PaletteColors)) return false;
+		for(uint32_t h : r.Group) { if(h == (uint32_t)t.TileIndex) return true; }
+		return false;
+	}
 	vector<float> _dioObjSpin;       // H1 : angle de rotation continue (degres) de chaque regle <DioramaObject>
 	vector<uint32_t> _dioNrm[10];       // G6d : normales (L2, L3, groupes 1 a 4), meme taille que les couches
 	vector<uint8_t> _dioNrmLines[10];  // G6d : 1 = la ligne NES a recu une normale

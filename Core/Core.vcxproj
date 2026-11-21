@@ -463,6 +463,7 @@
     <ClInclude Include="NES\HdPacks\HdAudioDevice.h" />
     <ClInclude Include="NES\HdPacks\HdData.h" />
     <ClInclude Include="NES\HdPacks\HdNesPack.h" />
+    <ClInclude Include="NES\HdPacks\HdGltfSkin.h" />
     <ClInclude Include="NES\HdPacks\HdNesPpu.h" />
     <ClInclude Include="NES\HdPacks\HdPackConditions.h" />
     <ClInclude Include="NES\HdPacks\HdPackLoader.h" />

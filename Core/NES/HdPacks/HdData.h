@@ -1112,9 +1112,12 @@ struct HdDioramaViewRule
 	float FloorMargin = -1.0f;                     // floormargin= : etendue du sol GPU autour de l'ecran (pixels NES) ; -1 = defaut (1024)
 };
 
+struct SnesHdModelMesh; // glTF (lecteur SNES, SnesHdGltf.cpp)
+
 struct HdDioramaObjectRule
 {
 	std::shared_ptr<vector<float>> Mesh; // 8 flottants par sommet (position, normale, uv), triangles deplies
+	uint32_t MeshVersion = 0;            // <Sprite2Obj> anime : change quand les sommets ont ete recalcules (renvoi au GPU)
 	HdPackBitmapInfo* Tex = nullptr;     // texture PNG (optionnelle)
 	uint32_t Color = 0xFFFFFF;           // couleur multipliee a la texture (sans texture : couleur de l'objet)
 	float X = 128, Y = 120, Z = 0;       // position (pixels NES de la scene, comme <DioramaLight>)
@@ -1128,6 +1131,7 @@ struct HdDioramaObjectRule
 	bool HasWindow = false; float Window = 0.0f; // window=N : seuls les triangles a moins de N pixels NES de l'ecran (dans le niveau, avec scrollx=) sont dessines
 	float Radius = 0.0f;                 // distance maximale d'un sommet a l'origine du modele x scale (pixels NES), pour ne pas dessiner un objet hors ecran
 	bool CastShadow = false;             // castshadow=on (Tile2Obj, topDown) : ombre projetee sur le sol
+	bool MirrorX = false, MirrorY = false; // <Sprite2Obj> : objet retourne en miroir (sprite hmirror / vmirror)
 	bool FromTile2Obj = false;           // instance <Tile2Obj> : en topDown, posee sur le sol (BottomY = bas du motif en pixels NES, Elevation = hauteur)
 	float BottomY = 0.0f, Elevation = 0.0f;
 	HdDioramaExpr ScrollX, ScrollY;      // scrollx= / scrolly= : defilement du niveau (pixels) ; position a l'ecran = x - scrollx
@@ -1158,6 +1162,11 @@ struct HdDioramaTile2ObjRule
 	float RotX = 0.0f, RotZ = 0.0f;      // rotx= / rotz= : degres (axes du modele)
 	float Radius = 0.0f;                 // rayon du modele a l'echelle, pour le test d'ecran
 	bool CastShadow = false;             // castshadow=on : ombre projetee sur le sol (topDown, avec <DioramaShadow>)
+	// <Sprite2Obj> : tile= liste de tous les hashs du personnage (Group) ; id= nom de l'objet ; facing= miroir selon le sprite ; hide= cache le sprite
+	string Id; bool Facing = true; bool Hide = true;
+	// glTF (.glb / .gltf) : modele avec squelette ; PartTris = triangles du modele de chaque partie ; anim= clip (-1 = pose de repos)
+	std::shared_ptr<SnesHdModelMesh> Gltf; vector<vector<uint32_t>> PartTris; int AnimIndex = -1; float AnimSpeed = 1.0f;
+	float AnimTime = -1.0f; // animtime= : clip fige a cet instant (secondes) ; le temps du personnage (id=) n'avance pas
 	vector<HdPackCondition*> Conditions;
 };
 
@@ -1247,6 +1256,7 @@ public:
 	vector<HdDioramaShadowRule> DioramaShadowRules; // G6c
 	vector<HdDioramaNormalPair> DioramaNormalPairs; // G6d
 	vector<HdDioramaObjectRule> DioramaObjectRules; // H1
+	vector<HdDioramaTile2ObjRule> Sprite2ObjRules;  // <Sprite2Obj> : silhouettes de sprites remplacees par des objets 3D
 	vector<HdDioramaTile2ObjRule> Tile2ObjRules;    // doc 53 : <Tile2Obj>
 	vector<HdDioramaPadRule> DioramaPadRules;       // manette -> camera
 	vector<string> DioramaCameraNames;              // cameras declarees (minuscules), 16 au plus

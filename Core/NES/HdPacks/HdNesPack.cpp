@@ -8,6 +8,7 @@
 #include <filesystem>
 #include "NES/HdPacks/HdNesPack.h"
 #include "NES/HdPacks/HdPackLoader.h"
+#include "NES/HdPacks/HdGltfSkin.h"
 #include "NES/NesConsole.h"
 #include "NES/BaseMapper.h"
 #include "NES/NesDefaultVideoFilter.h"
@@ -2346,6 +2347,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	}
 
 	if(!_hdData->Tile2ObjRules.empty()) DetectTile2Obj(); else if(!_dioT2oRules.empty() || !_dioT2oHide.empty()) { _dioT2oRules.clear(); _dioT2oHide.clear(); }
+	if(!_hdData->Sprite2ObjRules.empty()) DetectSprite2Obj(); else _s2oMask.clear(); // apres Tile2Obj : ajoute ses instances
 	lap(1);
 	//Passe 2 (parallele) : dessin. Chaque ligne NES ecrit ses propres lignes HD, sans recouvrement.
 	auto drawLine = [&](uint32_t i) {
@@ -2760,6 +2762,108 @@ void HdNesPack<scale>::DetectTile2Obj()
 	}
 }
 
+// <Sprite2Obj> : chaque silhouette (sprites qui se touchent) qui contient au moins une tile de la liste devient un objet 3D,
+// centre en x sur la silhouette, pieds en bas ; retourne en miroir si la plupart de ses tiles reconnues le sont (facing=on).
+template<uint32_t scale>
+void HdNesPack<scale>::DetectSprite2Obj()
+{
+	_s2oMask.assign((size_t)256 * 240, 0);
+	if(!_hdScreenInfo) return;
+	std::vector<uint8_t> seen((size_t)256 * 240, 0);
+	std::vector<int> stack, comp;
+	const uint32_t frame = _hdScreenInfo->FrameNumber;
+	for(size_t ri = 0; ri < _hdData->Sprite2ObjRules.size() && ri < 255; ri++) {
+		const HdDioramaTile2ObjRule& r = _hdData->Sprite2ObjRules[ri];
+		int inst = 0; // numero de la silhouette de cette regle dans l'image
+		if(r.Parts.empty() || r.Group.empty()) continue;
+		std::fill(seen.begin(), seen.end(), (uint8_t)0); // silhouettes deja vues par cette regle ; _s2oMask : deja prises par une regle precedente
+		auto matches = [&](const HdPpuTileInfo& t) {
+			if(!r.AnyPalette && r.Palette != t.PaletteColors) return false;
+			for(uint32_t h : r.Group) { if(h == (uint32_t)t.TileIndex) return true; }
+			return false;
+		};
+		for(int y = 0; y < 240; y++) {
+			for(int x = 0; x < 256; x++) {
+				const int i0 = (y << 8) | x;
+				if(seen[i0] || _s2oMask[i0]) continue;
+				const HdPpuPixelInfo& p = _hdScreenInfo->ScreenTiles[i0];
+				int mk = -1;
+				for(int k = 0; k < p.SpriteCount && mk < 0; k++) if(matches(p.Sprite[k])) mk = k;
+				if(mk < 0) continue;
+				HdPpuTileInfo condTile = p.Sprite[mk]; // tile de reference pour les conditions ([hmirror], [vmirror], ...)
+				// silhouette : pixels couverts par des sprites qui se touchent (4-voisins)
+				int minX = x, maxX = x, minY = y, maxY = y, nMatch = 0, nH = 0, nV = 0;
+				stack.clear(); comp.clear(); stack.push_back(i0); seen[i0] = 1;
+				while(!stack.empty()) {
+					const int c = stack.back(); stack.pop_back(); comp.push_back(c);
+					const int cy = c >> 8, cx = c & 255;
+					minX = std::min(minX, cx); maxX = std::max(maxX, cx); minY = std::min(minY, cy); maxY = std::max(maxY, cy);
+					const HdPpuPixelInfo& q = _hdScreenInfo->ScreenTiles[c];
+					for(int k = 0; k < q.SpriteCount; k++) {
+						if(!matches(q.Sprite[k])) continue;
+						nMatch++;
+						if(q.Sprite[k].HorizontalMirroring) nH++;
+						if(q.Sprite[k].VerticalMirroring) nV++;
+					}
+					const int nr[4] = { cy - 1, cy + 1, cy, cy }, nx[4] = { cx, cx, cx - 1, cx + 1 };
+					for(int k = 0; k < 4; k++) {
+						if(nr[k] < 0 || nr[k] >= 240 || nx[k] < 0 || nx[k] > 255) continue;
+						const int j = (nr[k] << 8) | nx[k];
+						if(seen[j] || _s2oMask[j] || _hdScreenInfo->ScreenTiles[j].SpriteCount == 0) continue;
+						seen[j] = 1; stack.push_back(j);
+					}
+				}
+				// conditions [ ] de la regle, evaluees pour cette silhouette (avec sa tile : hmirror, vmirror...)
+				bool condOk = true;
+				for(HdPackCondition* c : r.Conditions) {
+					if(!c->CheckCondition(x, y, &condTile)) { condOk = false; break; }
+				}
+				if(!condOk) continue; // la silhouette reste libre pour une regle suivante
+				for(int c : comp) _s2oMask[c] = (uint8_t)(ri + 1);
+				const float foot = (float)(maxY + 1);
+				// glTF anime : palette d'os au temps du personnage (id=), puis sommets deformes dans un tampon propre a la silhouette
+				const bool animated = r.Gltf && r.AnimIndex >= 0 && r.PartTris.size() == r.Parts.size();
+				if(animated) {
+					float animT = r.AnimTime; // animtime= : pose figee, le temps du personnage reste tel quel (reprise sans saut)
+					if(animT < 0.0f) {
+						const string key = r.Id.empty() ? ("#" + std::to_string(ri)) : r.Id;
+						auto& st = _s2oTime[key];
+						if(st.first != frame) { st.second += r.AnimSpeed * (float)std::min<uint32_t>(frame - st.first, 4u) / 60.0f; st.first = frame; }
+						animT = st.second;
+					}
+					const SnesHdModelRig* rig = r.Gltf->Rig.get();
+					if(rig) rig->Evaluate(r.AnimIndex, animT, _s2oPal); else _s2oPal.clear();
+					_s2oVersion++;
+				}
+				for(size_t pi = 0; pi < r.Parts.size(); pi++) { // une instance par materiau
+					const HdDioramaTile2ObjPart& part = r.Parts[pi];
+					HdDioramaObjectRule o;
+					o.Mesh = part.Mesh; o.Tex = part.Tex; o.Color = r.Color;
+					if(animated) {
+						std::shared_ptr<vector<float>>& buf = _s2oBuf[((uint64_t)ri << 32) | ((uint64_t)inst << 8) | (uint64_t)pi];
+						if(!buf) buf = std::make_shared<vector<float>>();
+						HdGltfSkinPart(*r.Gltf, r.PartTris[pi], &_s2oPal, *buf);
+						o.Mesh = buf; o.MeshVersion = _s2oVersion;
+					}
+					o.X = (float)(minX + maxX + 1) * 0.5f;
+					o.Y = foot - r.Elevation;
+					o.Z = _hdData->Diorama.Z[3]; // vue side : plan des sprites (L3)
+					o.Scale = r.Scale; o.RotY = r.RotY; o.RotX = r.RotX; o.RotZ = r.RotZ; o.Radius = r.Radius;
+					o.FromTile2Obj = true; o.BottomY = foot; o.Elevation = r.Elevation; o.CastShadow = r.CastShadow;
+					o.MirrorX = r.Facing && nH * 2 > nMatch;
+					o.MirrorY = r.Facing && nV * 2 > nMatch;
+					if(o.MirrorY) { // retourne en haut / bas : le modele pend sous son origine, qui passe en haut de la silhouette
+						o.Y = (float)minY - r.Elevation;
+						o.Elevation = r.Elevation + (foot - (float)minY);
+					}
+					_dioT2oRules.push_back(o);
+				}
+				inst++;
+			}
+		}
+	}
+}
+
 template<uint32_t scale>
 void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &pixelInfo, size_t offset, uint32_t screenWidth, const HdBgConfig* lineCfg)
 {
@@ -2837,6 +2941,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 				if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
 					lowestBgSprite = k;
 				}
+				if(!_s2oMask.empty() && S2oHidden(pixelIndex, pixelInfo.Sprite[k])) continue; // <Sprite2Obj> : remplace par un objet 3D
 				if(sprites[k]) {
 					if(!sprites[k]->DioIgnore) DrawTileLayer(pixelInfo.Sprite[k], *sprites[k], (l4 && sprites[k]->DioOffCamera) ? l4 : l1, screenWidth);
 				} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
@@ -2889,6 +2994,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 	if(hasSprite) {
 		for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
 			if(!pixelInfo.Sprite[k].BackgroundPriority && lowestBgSprite > k) {
+				if(!_s2oMask.empty() && S2oHidden(pixelIndex, pixelInfo.Sprite[k])) continue; // <Sprite2Obj> : remplace par un objet 3D
 				if(sprites[k]) {
 					if(!sprites[k]->DioIgnore) DrawTileLayer(pixelInfo.Sprite[k], *sprites[k], (l4 && sprites[k]->DioOffCamera) ? l4 : l3, screenWidth);
 				} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
@@ -3858,6 +3964,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			_dioObjSpin[i] = std::fmod(_dioObjSpin[i] + r.Spin, 360.0f);
 			HdDioramaObject& o = scene.Objects.O[on++];
 			o.Verts = r.Mesh->data();
+			o.Version = r.MeshVersion;
 			o.VertCount = (uint32_t)(r.Mesh->size() / 8);
 			o.TexPix = nullptr; o.TexW = 0; o.TexH = 0;
 			if(r.Tex) {
@@ -3892,6 +3999,11 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			float t1[9];
 			mul(Ry, Rx, t1);
 			mul(t1, Rz, o.Rot);
+			if(r.MirrorX || r.MirrorY) { // <Sprite2Obj> : miroir horizontal / vertical de la scene, applique apres la rotation
+				const float M[9] = { r.MirrorX ? -1.0f : 1.0f, 0, 0, 0, r.MirrorY ? -1.0f : 1.0f, 0, 0, 0, 1 };
+				float t2[9]; mul(M, o.Rot, t2);
+				for(int q = 0; q < 9; q++) o.Rot[q] = t2[q];
+			}
 		}
 		scene.Objects.Count = on;
 		static int objLast = -1; // journal a chaque changement du nombre d'objets actifs (ex. changement d'ecran)

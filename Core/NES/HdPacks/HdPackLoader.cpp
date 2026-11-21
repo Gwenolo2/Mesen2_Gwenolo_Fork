@@ -7,6 +7,8 @@
 #include "NES/HdPacks/HdPackLoader.h"
 #include "NES/HdPacks/HdPackConditions.h"
 #include "NES/HdPacks/HdNesPack.h"
+#include "NES/HdPacks/HdGltfSkin.h"
+#include "SNES/HdPacks/SnesHdGltf.h"
 #include "NES/NesConsole.h"
 #include "Shared/MessageManager.h"
 #include "Utilities/ZipReader.h"
@@ -454,6 +456,9 @@ bool HdPackLoader::LoadPack()
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 10)) == "<tile2obj>") {
 				tokens = StringUtilities::Split(lineContent.substr(10), ',');
 				ProcessDioramaTile2ObjTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 12)) == "<sprite2obj>") {
+				tokens = StringUtilities::Split(lineContent.substr(12), ',');
+				ProcessDioramaTile2ObjTag(tokens, conditions, true);
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<dioramaobject>") {
 				tokens = StringUtilities::Split(lineContent.substr(15), ',');
 				ProcessDioramaObjectTag(tokens, conditions);
@@ -2697,7 +2702,7 @@ void HdPackLoader::ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPack
 
 // <Tile2Obj> (doc 53) : <Tile2Obj>modele.obj,tile=HASH[,palette=*|RRGGBBAA][,tex=..][,color=RRGGBB][,scale=..|height=..][,elevation=..][,rotation=..]
 // Etape 1 : lecture seule (la regle est stockee). Le rendu des instances vient ensuite.
-void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPackCondition*> conditions, bool sprite)
 {
 	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) {
 		logError("Tile2Obj : fichier .obj attendu en premier, ligne ignoree.");
@@ -2706,7 +2711,7 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 	HdDioramaTile2ObjRule r;
 	r.Conditions = conditions;
 	const string file = StringUtilities::Trim(tokens[0]);
-	string texName;
+	string texName, animName;
 	bool hasTile = false;
 	for(size_t i = 1; i < tokens.size(); i++) {
 		const string opt = StringUtilities::Trim(tokens[i]);
@@ -2717,7 +2722,33 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 		const string raw = StringUtilities::Trim(opt.substr(eq + 1));
 		const string val = StringUtilities::ToLower(raw);
 		float f = 0.0f;
-		if(key == "tile") {
+		if(sprite && (key == "tile" || key == "group")) { // <Sprite2Obj> : tile=H1|H2|.. (toutes les tiles du personnage, toutes etapes d'animation)
+			r.Group.clear();
+			string part;
+			for(size_t k = 0; k <= raw.size(); k++) {
+				if(k == raw.size() || raw[k] == '|') {
+					const string hs = StringUtilities::ToLower(StringUtilities::Trim(part));
+					char* endp = nullptr;
+					const unsigned long gv = strtoul(hs.c_str(), &endp, 16);
+					if(hs.empty() || endp == hs.c_str() || *endp != 0 || gv > 0xFFFFul) { logError("Sprite2Obj : tile doit etre une liste de hashs hexa separes par | : " + raw + ", ligne ignoree."); return; }
+					r.Group.push_back((uint32_t)gv);
+					part.clear();
+				} else {
+					part += raw[k];
+				}
+			}
+			hasTile = true;
+		} else if(sprite && key == "id") {
+			r.Id = raw;
+		} else if(key == "anim") {
+			animName = raw;
+		} else if(sprite && (key == "facing" || key == "hide")) {
+			bool b = false;
+			if(val == "on" || val == "1" || val == "yes") b = true;
+			else if(val == "off" || val == "0" || val == "no") b = false;
+			else { logError("Sprite2Obj : " + key + " doit etre on ou off : " + val + ", ligne ignoree."); return; }
+			if(key == "facing") r.Facing = b; else r.Hide = b;
+		} else if(key == "tile") {
 			char* endp = nullptr;
 			const unsigned long v = strtoul(val.c_str(), &endp, 16);
 			if(val.empty() || endp == val.c_str() || *endp != 0 || v > 0xFFFFul) { logError("Tile2Obj : tile doit etre un hash hexa (4 chiffres) : " + val + ", ligne ignoree."); return; }
@@ -2769,6 +2800,8 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 		} else {
 			if(!LightParseFloat(val, f)) { logError("Tile2Obj : valeur numerique attendue pour " + key + " : " + val + ", ligne ignoree."); return; }
 			if(key == "scale") { if(f <= 0.0f || f > 4096.0f) { logError("Tile2Obj : scale doit etre de 0 a 4096 : " + val + ", ligne ignoree."); return; } r.Scale = f; }
+			else if(key == "animtime") { if(f < 0.0f || f > 3600.0f) { logError("Tile2Obj : animtime doit etre de 0 a 3600 secondes : " + val + ", ligne ignoree."); return; } r.AnimTime = f; }
+			else if(key == "animspeed") { if(f < 0.0f || f > 16.0f) { logError("Tile2Obj : animspeed doit etre de 0 a 16 : " + val + ", ligne ignoree."); return; } r.AnimSpeed = f; }
 			else if(key == "height") { if(f <= 0.0f || f > 4096.0f) { logError("Tile2Obj : height doit etre de 0 a 4096 pixels NES : " + val + ", ligne ignoree."); return; } r.Height = f; }
 			else if(key == "elevation") r.Elevation = f;
 			else if(key == "rotation") r.RotY = f;
@@ -2778,8 +2811,72 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 		}
 	}
 	if(!hasTile) { logError("Tile2Obj : tile=HASH ou group=H1|H2|.. obligatoire, ligne ignoree."); return; }
-	if(r.Group.size() != (size_t)(r.GridW * r.GridH)) { logError("Tile2Obj : group a " + std::to_string(r.Group.size()) + " hash(s), grid demande " + std::to_string(r.GridW * r.GridH) + ", ligne ignoree."); return; }
-	{
+	if(!sprite && r.Group.size() != (size_t)(r.GridW * r.GridH)) { logError("Tile2Obj : group a " + std::to_string(r.Group.size()) + " hash(s), grid demande " + std::to_string(r.GridW * r.GridH) + ", ligne ignoree."); return; }
+	const string lowFile = StringUtilities::ToLower(file);
+	const bool isGltf = (lowFile.size() > 4 && lowFile.substr(lowFile.size() - 4) == ".glb") || (lowFile.size() > 5 && lowFile.substr(lowFile.size() - 5) == ".gltf");
+	if(isGltf) {
+		// glTF : lecteur du cote SNES (maillages, materiaux, textures embarquees, squelette, animations)
+		std::vector<std::unique_ptr<SnesHdPackBitmapInfo>> gImgs;
+		std::unordered_map<std::string, SnesHdPackBitmapInfo*> gLoaded;
+		std::shared_ptr<SnesHdModelMesh> gm = SnesHdLoadGltfModel(_hdPackFolder, file, gImgs, gLoaded, "NES " + file);
+		if(!gm) { logError("Tile2Obj : " + file + " : glTF non lu (voir la ligne precedente), ligne ignoree."); return; }
+		std::vector<float> pal;
+		if(gm->Rig) gm->Rig->Evaluate(-1, 0.0f, pal);
+		HdPackBitmapInfo* explicitTex = texName.empty() ? nullptr : LoadAuxBitmap(texName);
+		std::map<int, size_t> partOf;
+		std::map<SnesHdPackBitmapInfo*, HdPackBitmapInfo*> texOf;
+		for(uint32_t ti = 0; ti < (uint32_t)gm->Tris.size(); ti++) {
+			const int mi = gm->Tris[ti].Mat;
+			auto it = partOf.find(mi);
+			if(it == partOf.end()) {
+				HdDioramaTile2ObjPart part;
+				part.Mesh = std::make_shared<vector<float>>();
+				SnesHdPackBitmapInfo* sb = (mi >= 0 && (size_t)mi < gm->Mats.size()) ? gm->Mats[(size_t)mi].Texture : nullptr;
+				if(explicitTex) part.Tex = explicitTex;
+				else if(sb && !sb->FileData.empty()) {
+					auto tt = texOf.find(sb);
+					if(tt == texOf.end()) {
+						_data->ImageFileData.push_back(unique_ptr<HdPackBitmapInfo>(new HdPackBitmapInfo()));
+						HdPackBitmapInfo* b = _data->ImageFileData.back().get();
+						b->PngName = sb->PngName; b->FileData = sb->FileData;
+						tt = texOf.emplace(sb, b).first;
+					}
+					part.Tex = tt->second;
+				}
+				it = partOf.emplace(mi, r.Parts.size()).first;
+				r.Parts.push_back(part);
+				r.PartTris.emplace_back();
+			}
+			r.PartTris[it->second].push_back(ti);
+		}
+		float minY = 1e30f, maxY = -1e30f, m2 = 0.0f;
+		for(size_t pi = 0; pi < r.Parts.size(); pi++) {
+			HdGltfSkinPart(*gm, r.PartTris[pi], &pal, *r.Parts[pi].Mesh); // pose de repos
+			const vector<float>& v = *r.Parts[pi].Mesh;
+			for(size_t i = 0; i + 7 < v.size(); i += 8) { minY = std::min(minY, v[i + 1]); maxY = std::max(maxY, v[i + 1]); m2 = std::max(m2, v[i] * v[i] + v[i + 1] * v[i + 1] + v[i + 2] * v[i + 2]); }
+		}
+		if(r.Parts.empty()) { logError("Tile2Obj : " + file + " : aucun triangle, ligne ignoree."); return; }
+		const float extY = maxY - minY;
+		if(r.Height > 0.0f && extY > 0.0f) r.Scale = r.Height / extY;
+		r.Radius = std::sqrt(m2) * r.Scale;
+		r.Gltf = gm;
+		string list;
+		if(gm->Rig) {
+			for(size_t a = 0; a < gm->Rig->Anims.size(); a++) {
+				list += (a ? ", " : "") + std::to_string(a) + "=" + gm->Rig->Anims[a].Name;
+				if(!animName.empty() && StringUtilities::ToLower(gm->Rig->Anims[a].Name) == StringUtilities::ToLower(animName)) r.AnimIndex = (int)a;
+			}
+			if(r.AnimIndex < 0 && !animName.empty()) {
+				char* endp = nullptr;
+				const long ai = strtol(animName.c_str(), &endp, 10);
+				if(endp != animName.c_str() && *endp == 0 && ai >= 0 && (size_t)ai < gm->Rig->Anims.size()) r.AnimIndex = (int)ai;
+				else logError("Tile2Obj : " + file + " : anim=" + animName + " introuvable (clips : " + (list.empty() ? string("aucun") : list) + "), pose de repos.");
+			}
+			if(animName.empty() && !gm->Rig->Anims.empty()) r.AnimIndex = 0;
+		}
+		MessageManager::Log("[HDPack] <" + string(sprite ? "Sprite2Obj" : "Tile2Obj") + "> " + file + " : glTF, " + std::to_string(gm->Tris.size()) + " triangle(s), " + std::to_string(r.Parts.size()) + " partie(s), clips : " + (list.empty() ? string("aucun") : list) + ", joue : " + (r.AnimIndex >= 0 ? std::to_string(r.AnimIndex) : string("pose de repos")));
+	}
+	if(!isGltf) {
 		vector<uint8_t> raw;
 		if(!LoadFile(file, raw)) { logError("Tile2Obj : fichier introuvable : " + file + ", ligne ignoree."); return; }
 		string err;
@@ -2850,7 +2947,7 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 		}
 		if(r.Parts.empty()) { logError("Tile2Obj : " + file + " : aucune face lue, ligne ignoree."); return; }
 	}
-	_data->Tile2ObjRules.push_back(r);
+	if(sprite) _data->Sprite2ObjRules.push_back(r); else _data->Tile2ObjRules.push_back(r);
 }
 
 // <DioramaNormal>albedo.png,normal.png (doc 44, G6d) : carte de normales. Les tiles dont l'image est albedo.png (les <tile> de ce PNG) recoivent

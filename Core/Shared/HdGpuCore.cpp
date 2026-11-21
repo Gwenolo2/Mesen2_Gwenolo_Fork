@@ -1613,6 +1613,21 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		// donnees des sommets en texture (une fois par modele)
 		ObjMesh* mesh = nullptr;
 		for(ObjMesh& e : _objMeshes) { if(e.Key == o.Verts && e.N == o.VertCount) { mesh = &e; break; } }
+		if(mesh && mesh->Version != o.Version) { // modele anime : sommets recalcules, renvoi dans la meme texture
+			const uint32_t rows = (o.VertCount + 255) / 256;
+			std::vector<float> buf((size_t)768 * rows * 4, 0.0f);
+			for(uint32_t i = 0; i < o.VertCount; i++) {
+				float* d = &buf[((size_t)(i / 256) * 768 + (size_t)(i % 256) * 3) * 4];
+				const float* s8 = o.Verts + (size_t)i * 8;
+				d[0] = s8[0]; d[1] = s8[1]; d[2] = s8[2];
+				d[4] = s8[3]; d[5] = s8[4]; d[6] = s8[5];
+				d[8] = s8[6]; d[9] = s8[7];
+			}
+			G.ActiveTexture(GL_TEXTURE0);
+			G.BindTexture(GL_TEXTURE_2D, mesh->Tex);
+			G.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 768, (GLsizei)rows, 0, GL_RGBA, GL_FLOAT, buf.data());
+			mesh->Version = o.Version;
+		}
 		if(!mesh) {
 			const uint32_t rows = (o.VertCount + 255) / 256;
 			std::vector<float> buf((size_t)768 * rows * 4, 0.0f);
@@ -1623,7 +1638,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 				d[4] = s8[3]; d[5] = s8[4]; d[6] = s8[5];
 				d[8] = s8[6]; d[9] = s8[7];
 			}
-			ObjMesh e = { o.Verts, o.VertCount, 0 };
+			ObjMesh e = { o.Verts, o.VertCount, 0, o.Version };
 			G.GenTextures(1, &e.Tex);
 			G.ActiveTexture(GL_TEXTURE0);
 			G.BindTexture(GL_TEXTURE_2D, e.Tex);

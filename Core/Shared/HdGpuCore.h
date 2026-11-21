@@ -127,6 +127,7 @@ struct HdDioramaObject
 {
 	const float* Verts = nullptr;   // 8 flottants par sommet : position, normale, uv ; triangles deplies
 	uint32_t VertCount = 0;
+	uint32_t Version = 0;           // change quand les sommets ont change (modele anime) : renvoi au GPU
 	const uint32_t* TexPix = nullptr; uint32_t TexW = 0, TexH = 0;
 	float Color[3] = { 1, 1, 1 };
 	float Pos[3] = { 0, 0, 0 };
@@ -303,7 +304,7 @@ private:
 	unsigned int _progObj = 0;
 	bool _objProgFailed = false;
 	bool BuildObjProgram();
-	struct ObjMesh { const float* Key; uint32_t N; unsigned int Tex; };
+	struct ObjMesh { const float* Key; uint32_t N; unsigned int Tex; uint32_t Version; };
 	std::vector<ObjMesh> _objMeshes;
 	unsigned int _objDepthTex = 0;
 	uint32_t _objDepthW = 0, _objDepthH = 0;
