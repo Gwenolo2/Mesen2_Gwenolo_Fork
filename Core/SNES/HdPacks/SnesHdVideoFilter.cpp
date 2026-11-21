@@ -2045,8 +2045,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					tx = ov.Turbulence * std::sin(tw * ov.Time + p.Seed1);
 					ty = ov.Turbulence * std::cos(tw * 0.73f * ov.Time + p.Seed2);
 				}
-				p.X += (p.VX + ov.WindX + tx) * ovDt;
-				p.Y += (p.VY + ov.WindY + ty) * ovDt;
+				p.EVX = p.VX + ov.WindX + tx; p.EVY = p.VY + ov.WindY + ty; // vitesse effective (stretch=)
+				p.X += p.EVX * ovDt;
+				p.Y += p.EVY * ovDt;
 				p.Rot += p.Spin * ovDt;
 				p.X = std::fmod(p.X, ov.FieldWidthPx); if(p.X < 0) p.X += ov.FieldWidthPx;
 				p.Y = std::fmod(p.Y, ov.FieldHeightPx); if(p.Y < 0) p.Y += ov.FieldHeightPx;
@@ -2550,9 +2551,18 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			float halfW, halfH;
 			if(tex) { halfW = texW * 0.5f * sizeMul; halfH = texH * 0.5f * sizeMul; }
 			else { halfW = halfH = ov.DotSize * sc * 0.5f * sizeMul; }
-			const bool rotated = (p.Rot != 0.0f || p.Spin != 0.0f);
-			const float radius = rotated ? std::sqrt(halfW * halfW + halfH * halfH) : std::max(halfW, halfH);
-			const float cosR = std::cos(p.Rot), sinR = std::sin(p.Rot);
+			// stretch= : trainee dans le sens du mouvement (longueur = vitesse x stretch, en pixels HD), la tete reste sur la particule
+			float sUx = 0.0f, sUy = 0.0f, sL = 0.0f;
+			if(ov.Stretch > 0.0f) {
+				const float vl = std::sqrt(p.EVX * p.EVX + p.EVY * p.EVY);
+				sL = vl * ov.Stretch * sc;
+				if(sL > 0.5f) { sUx = p.EVX / vl; sUy = p.EVY / vl; } else sL = 0.0f;
+			}
+			const bool strk = sL > 0.0f;
+			const float hl = halfH + sL * 0.5f; // demi-longueur le long du mouvement
+			const bool rotated = strk || (p.Rot != 0.0f || p.Spin != 0.0f);
+			const float radius = strk ? std::sqrt(halfW * halfW + hl * hl) : (rotated ? std::sqrt(halfW * halfW + halfH * halfH) : std::max(halfW, halfH));
+			const float cosR = strk ? sUy : std::cos(p.Rot), sinR = strk ? -sUx : std::sin(p.Rot); // trainee : axe v de la texture = mouvement
 
 			// Position affichee (pixels SNES) : position propre - decalage d'ancrage, dans le champ torique
 			float sx = std::fmod(p.X - ov.OffsetX, fW); if(sx < 0) sx += fW;
@@ -2561,8 +2571,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			// Dessin dans le champ et ses voisins immediats -> aucune couture aux bords
 			for(int cyc = -1; cyc <= 1; cyc++) {
 				for(int cxc = -1; cxc <= 1; cxc++) {
-					const float pcx = (sx + cxc * fW + (float)dstX) * sc;
-					const float pcy = (sy + cyc * fH + (float)dstY) * sc;
+					const float pcx = (sx + cxc * fW + (float)dstX) * sc - sUx * sL * 0.5f;
+					const float pcy = (sy + cyc * fH + (float)dstY) * sc - sUy * sL * 0.5f;
 					int x0 = std::max(0, (int)std::floor(pcx - radius));
 					int x1 = std::min((int)outWidth - 1, (int)std::ceil(pcx + radius));
 					int y0 = std::max((int)bandY0, (int)std::floor(pcy - radius));
@@ -2579,7 +2589,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 							float sa, sr, sg, sb;
 							if(tex) {
 								float u = lx / sizeMul + texW * 0.5f - 0.5f;
-								float v = ly / sizeMul + texH * 0.5f - 0.5f;
+								float v = (strk ? ly * halfH / hl : ly) / sizeMul + texH * 0.5f - 0.5f;
 								if(u < -0.5f || v < -0.5f || u > texW - 0.5f || v > texH - 0.5f) continue;
 								int iu = (int)std::floor(u), iv = (int)std::floor(v);
 								float fu = u - iu, fv = v - iv;
@@ -2595,7 +2605,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								if(acc[0] <= 0.5f) continue;
 								sa = acc[0] / 255.0f; sr = acc[1] / acc[0]; sg = acc[2] / acc[0]; sb = acc[3] / acc[0];
 							} else {
-								float d = std::sqrt(lx * lx + ly * ly) / halfW;
+								const float ly2 = strk ? std::max(0.0f, std::fabs(ly) - sL * 0.5f) : ly; // capsule si trainee
+								float d = std::sqrt(lx * lx + ly2 * ly2) / halfW;
 								if(d >= 1.0f) continue;
 								float s = 1.0f - d * d;
 								sa = s * s; sr = sg = sb = 255.0f;
@@ -2624,7 +2635,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	};
 
 	// Particule prete a dessiner (pixels HD), triee du plus loin au plus proche
-	struct P3Draw { float Cx, Cy, HalfW, HalfH, A, R, G, B, Depth, GroundRow; };
+	struct P3Draw { float Cx, Cy, HalfW, HalfH, A, R, G, B, Depth, GroundRow, Ux = 0, Uy = 0, HalfL = 0; }; // stretch= : U = axe queue -> tete, HalfL = demi-longueur
 	std::vector<std::vector<P3Draw>> p3Draws(hdParts3D.size() * 2);
 	{
 		const float dt = 1.0f / 60.0f;
@@ -2686,8 +2697,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								tx = pi.Turbulence * std::sin(tw * st.Time + p.Seed1);
 								ty = pi.Turbulence * std::cos(tw * 0.73f * st.Time + p.Seed2);
 							}
-							p.X += (p.VX + pi.WindX + tx) * dt;
-							p.Y += (p.VY + pi.WindY + ty) * dt;
+							p.EVX = p.VX + pi.WindX + tx; p.EVY = p.VY + pi.WindY + ty; // vitesse effective (stretch=)
+							p.X += p.EVX * dt;
+							p.Y += p.EVY * dt;
 							p.Z += p.VZ * dt;
 							if(p.Z <= 0.0f) {
 								if(pi.GroundRespawn) p.Z += pi.BoxHeight; else dead = true;
@@ -2749,6 +2761,19 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					d.HalfW = sizePx * 0.5f; d.HalfH = d.HalfW * texAspect;
 					d.A = std::min(a, 1.0f); d.R = lerpC(16); d.G = lerpC(8); d.B = lerpC(0); d.Depth = (float)D;
 					d.GroundRow = (float)(sy + p.Z * ppt); // ligne d'ecran du point de sol sous la particule
+					if(pi.Stretch > 0.0f) {
+						// stretch= : trainee entre la position et la position - vitesse x stretch, projetees a l'ecran
+						double tx2, ty2, tp2;
+						const double tu = u - p.EVX * pi.Stretch, tw2 = w - p.EVY * pi.Stretch, th = std::max(0.0, (double)p.Z - p.VZ * pi.Stretch);
+						if(zn.Project(tu, tw2, th, tx2, ty2, tp2)) {
+							const float ddx = (float)((sx - tx2) * sc), ddy = (float)((sy - ty2) * sc);
+							const float L = std::sqrt(ddx * ddx + ddy * ddy);
+							if(L > 0.5f && L < 512.0f) {
+								d.Ux = ddx / L; d.Uy = ddy / L; d.HalfL = L * 0.5f + d.HalfW;
+								d.Cx -= ddx * 0.5f; d.Cy -= ddy * 0.5f;
+							}
+						}
+					}
 					dl.push_back(d);
 				}
 				std::sort(dl.begin(), dl.end(), [](const P3Draw& a, const P3Draw& b) { return a.Depth > b.Depth; });
@@ -3747,17 +3772,23 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		const int texW = tex ? (int)tex->Width : 0, texH = tex ? (int)tex->Height : 0;
 		const uint8_t z = (uint8_t)std::clamp(pi.ZIndex, 0, 255);
 		for(const P3Draw& d : dl) {
-			int x0 = std::max(0, (int)std::floor(d.Cx - d.HalfW)), x1 = std::min((int)outWidth - 1, (int)std::ceil(d.Cx + d.HalfW));
-			int y0 = std::max(clipY0, (int)std::floor(d.Cy - d.HalfH)), y1 = std::min(clipY1, (int)std::ceil(d.Cy + d.HalfH));
+			const bool strk = d.HalfL > 0.0f; // stretch= : rectangle oriente selon le mouvement
+			const float hw = d.HalfW, hh = strk ? d.HalfL : d.HalfH;
+			const float ex = strk ? std::fabs(d.Ux) * hh + std::fabs(d.Uy) * hw : d.HalfW;
+			const float ey = strk ? std::fabs(d.Uy) * hh + std::fabs(d.Ux) * hw : d.HalfH;
+			int x0 = std::max(0, (int)std::floor(d.Cx - ex)), x1 = std::min((int)outWidth - 1, (int)std::ceil(d.Cx + ex));
+			int y0 = std::max(clipY0, (int)std::floor(d.Cy - ey)), y1 = std::min(clipY1, (int)std::ceil(d.Cy + ey));
 			if(x0 > x1 || y0 > y1) continue;
 			for(int yy = y0; yy <= y1; yy++) {
-				const float dy = (float)yy + 0.5f - d.Cy;
+				const float dy0 = (float)yy + 0.5f - d.Cy;
 				for(int xx = x0; xx <= x1; xx++) {
-					const float dx = (float)xx + 0.5f - d.Cx;
+					const float dx0 = (float)xx + 0.5f - d.Cx;
+					float dx = dx0, dy = dy0; // repere local : x en travers, y le long du mouvement (queue -> tete)
+					if(strk) { dx = dx0 * d.Uy - dy0 * d.Ux; dy = dx0 * d.Ux + dy0 * d.Uy; }
 					float sa, sr, sg, sb;
 					if(tex) {
-						float u = (dx / d.HalfW * 0.5f + 0.5f) * texW - 0.5f;
-						float vv = (dy / d.HalfH * 0.5f + 0.5f) * texH - 0.5f;
+						float u = (dx / hw * 0.5f + 0.5f) * texW - 0.5f;
+						float vv = (dy / hh * 0.5f + 0.5f) * texH - 0.5f;
 						if(u < -0.5f || vv < -0.5f || u > texW - 0.5f || vv > texH - 0.5f) continue;
 						int iu = (int)std::floor(u), iv = (int)std::floor(vv);
 						float fu = u - iu, fv = vv - iv;
@@ -3773,7 +3804,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						if(acc[0] <= 0.5f) continue;
 						sa = acc[0] / 255.0f; sr = acc[1] / acc[0]; sg = acc[2] / acc[0]; sb = acc[3] / acc[0];
 					} else {
-						float dd = std::sqrt(dx * dx + dy * dy) / d.HalfW;
+						const float ey2 = strk ? std::max(0.0f, std::fabs(dy) - (hh - hw)) : dy; // capsule si trainee
+						float dd = std::sqrt(dx * dx + ey2 * ey2) / hw;
 						if(dd >= 1.0f) continue;
 						float s = 1.0f - dd * dd;
 						sa = s * s; sr = sg = sb = 255.0f;

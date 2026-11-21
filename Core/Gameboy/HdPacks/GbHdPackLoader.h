@@ -99,6 +99,7 @@ struct GbHdParticle
 	float Size = 1;           // multiplicateur de taille propre (aleatoire)
 	float Rot = 0, Spin = 0;  // radians, radians / s
 	float Seed1 = 0, Seed2 = 0;
+	float EVX = 0, EVY = 0;   // vitesse effective (vent, turbulence) : trainee stretch=
 };
 
 struct GbHdOverlay
@@ -131,6 +132,7 @@ struct GbHdOverlay
 	float AlphaStart = 1, AlphaEnd = 1, FadeIn = 0.1f, FadeOut = 0.2f;
 	uint32_t ColorStart = 0xFFFFFF, ColorEnd = 0xFFFFFF;
 	float DotSize = 2.0f;                   // diametre du point doux (pixels SD)
+	float Stretch = 0.0f;                   // stretch= : trainee dans le sens du mouvement (secondes ; longueur = vitesse x stretch) ; 0 = aucune
 	bool Prewarm = true;
 
 	// Calques plein ecran : plainscreen, ellipse (zone en fractions de l'image)

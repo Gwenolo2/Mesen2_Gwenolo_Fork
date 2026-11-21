@@ -132,6 +132,7 @@ struct HdDioramaObject
 	float Color[3] = { 1, 1, 1 };
 	float Pos[3] = { 0, 0, 0 };
 	bool Lit = true;                                // eclaire par les lumieres de la scene (H2)
+	float Bright = 1.0f;                            // bright= : multiplie la couleur finale
 	float RefZ = 0;                                 // profondeur du modele (derriere sa face avant) a l'echelle de la vue 2D
 	bool Occlude = false;                           // dessine en premier ; les tranches suivantes sont testees contre sa profondeur (sprites coupes par la geometrie)
 	bool Shadow = true;                             // H3 : recoit les ombres des sprites (G6c)
@@ -142,6 +143,15 @@ struct HdDioramaObject
 };
 
 const int HdDioMaxObjects = 256; // Tile2Obj (doc 53) : nombre d'objets 3D actifs par image (etait 8)
+
+// <3DParticles> (diorama NES) : un lot de particules, 12 flottants chacune (position scene centree x, y, z, taille ; r, g, b, alpha ;
+// trainee x, y, z (stretch=, vecteur tete -> queue inverse), 0), tableau complete par lignes de 256 particules (texture RGBA32F de 768 texels de large).
+struct HdDioramaP3Batch
+{
+	const float* Data = nullptr; uint32_t Count = 0;
+	const uint32_t* TexPix = nullptr; uint32_t TexW = 0, TexH = 0;
+	bool Additive = false; float MinPx = 1.5f;
+};
 
 struct HdDioramaObjects
 {
@@ -156,6 +166,7 @@ struct HdDioramaColorTex
 {
 	const uint32_t* Pix = nullptr; uint32_t W = 0, H = 0;
 	bool HasKey = true; uint32_t Key = 0; // RRGGBB
+	float Tol = 0.0f;                     // tolerance= : ecart maximal par canal (0 a 255)
 	float TexelX = 1.0f, TexelY = 1.0f;   // texels par pixel HD
 	float OffX = 0.0f, OffY = 0.0f;       // decalage (pixels HD) : scroll PPU x ratio x echelle
 	const uint32_t* MatPix = nullptr; uint32_t MatW = 0, MatH = 0; // materiau : R normale x, G normale y, B AO, A rugosite (nullptr = aucun)
@@ -184,6 +195,13 @@ struct HdDioramaScene
 	HdDioramaShadow Shadow;               // G6c : ombres des sprites
 	HdDioramaNormals Normals;             // G6d : cartes de normales
 	HdDioramaObjects Objects;             // H1 : objets 3D de decor
+	HdDioramaP3Batch P3[4]; int P3Count = 0; // <3DParticles> (diorama NES)
+	// <DioramaFog> (doc 54) : brouillard de distance (profondeur au-dela du plan de l'ecran, pixels NES) et brume au sol (hauteur)
+	// <DioramaClouds> (doc 54) : [0] ombres de nuages, [1] taches de brouillard ; Off = position monde du point de l'ecran (0, 0) + derive (pixels NES)
+	struct Cloud { bool Active = false; float Size = 64, Coverage = 0.5f, Soft = 0.15f, Opacity = 0.3f, OffX = 0, OffY = 0, Seed = 1, GroundH = 16; float Col[3] = { 0, 0, 0 }; } Cloud[2];
+	// <DioramaMist> (doc 54) : nappes de brume (plans de From a To ; Off = position monde du point (0, 0) de la scene + derive, par nappe)
+	struct Mist { bool Active = false; int Count = 0; float From = 0, To = 0, Opacity = 0, Size = 64, Coverage = 0.5f, Soft = 0.3f, Seed = 3, Band = 64; float Col[3] = { 1, 1, 1 }; float OffX[8] = {}, OffY[8] = {}; } Mist;
+	struct Fog { bool Active = false; float Start = 0, End = 1, Opacity = 0, Ground = 0, GroundH = 16; float Col[3] = { 0.7f, 0.75f, 0.8f }; } Fog;
 	float W = 256, H = 240;     // taille de la scene (pixels NES)
 	float OutPad = 0.0f;        // widescreen : colonnes NES ajoutees de chaque cote de l'image de sortie (0 = image de la taille des couches)
 	float D = 256;              // distance de la camera au plan Z = 0 (la focale vaut D)
@@ -304,6 +322,8 @@ private:
 	unsigned int _progObj = 0;
 	bool _objProgFailed = false;
 	bool BuildObjProgram();
+	unsigned int _progP3 = 0, _p3DataTex = 0; bool _p3ProgFailed = false; // <3DParticles>
+	bool BuildP3Program();
 	struct ObjMesh { const float* Key; uint32_t N; unsigned int Tex; uint32_t Version; };
 	std::vector<ObjMesh> _objMeshes;
 	unsigned int _objDepthTex = 0;

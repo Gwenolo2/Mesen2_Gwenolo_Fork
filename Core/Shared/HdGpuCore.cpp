@@ -461,6 +461,10 @@ uniform sampler2D uTopTex;   // G3b2 : motif du dessus et du dessous
 uniform sampler2D uSideTex;  // G3b2 : motif des flancs
 uniform int uExt;       // G4a : 1 = quad etendu
 uniform int uStand;     // topDown : silhouette de sprite debout (vUV = fraction du plan)
+uniform int uMist;      // <DioramaMist> : 1 = nappe de brume (bruit uCldA0 / uCldB0 / uCldC0 ; uCldB0.w = bande side)
+uniform vec4 uFog;      // <DioramaFog> : debut, fin (profondeur au-dela du plan de l'ecran), opacite, 1 = actif
+uniform vec3 uFogCol;   // couleur du brouillard
+uniform vec3 uFogGround; // brume au sol : force (0..1), hauteur (pixels NES), 1 = vue topDown (sol a plat), 0 = side (sol en bas de l'ecran)
 uniform float uStandFoot;
 uniform int uExtDebug;   // G4 : 1 = teinte magenta des pixels venus d'une extension
 uniform vec4 uExtMode;  // G4a : mode des cotes haut, bas, gauche, droite (0 aucun, 1 stretch, 2 repeat, 3 mirror, 4 wrap)
@@ -535,6 +539,19 @@ uniform vec4 uCtMp0, uCtMp1, uCtMp2, uCtMp3;  // x 1 = materiau present, y force
 uniform vec3 uCamC;     // position de la camera (axes du sommet : x centre)
 uniform vec4 uCtF0, uCtF1, uCtF2, uCtF3;    // defilement de la normale : couche 1 (x, y), couche 2 (z, w), fraction de la texture
 uniform vec4 uCtG0, uCtG1, uCtG2, uCtG3;    // x 1 = seconde couche de normale, y son echelle
+// --- <DioramaClouds> (plans) ---
+uniform vec4 uCldA0, uCldA1;   // <DioramaClouds> : taille (pixels NES), couverture, douceur, opacite (0 = couche inactive)
+uniform vec4 uCldB0, uCldB1;   // position monde du point (0, 0) de la scene (x, y), graine, hauteur de la brume (fog)
+uniform vec3 uCldC0, uCldC1;   // couleur
+float CldH(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float CldN(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+	return mix(mix(CldH(i), CldH(i + vec2(1.0, 0.0)), u.x), mix(CldH(i + vec2(0.0, 1.0)), CldH(i + vec2(1.0, 1.0)), u.x), u.y); }
+float CldMask(vec2 w, vec4 a, vec4 b) { // 0..1 : part couverte au point monde w (pixels NES)
+	vec2 p = w / max(a.x, 1.0) + b.z * vec2(17.3, 9.1);
+	float n = 0.65 * CldN(p) + 0.35 * CldN(p * 2.03 + vec2(5.2, 1.7));
+	float e = 1.0 - a.y;
+	return smoothstep(e - a.z, e + a.z, n);
+}
 vec4 MatAt(int i, vec2 uv)
 {
 	return i == 0 ? textureLod(uCtM0, uv, 0.0) : (i == 1 ? textureLod(uCtM1, uv, 0.0) : (i == 2 ? textureLod(uCtM2, uv, 0.0) : textureLod(uCtM3, uv, 0.0)));
@@ -554,7 +571,7 @@ bool CtMatch(vec4 tn, vec4 k)
 {
 	if(k.w < 0.5) return tn.a < 0.5 / 255.0;
 	if(tn.a < 0.5 / 255.0) return false;
-	return all(lessThan(abs(tn.rgb * 255.0 - k.rgb), vec3(0.5)));
+	return all(lessThan(abs(tn.rgb * 255.0 - k.rgb), vec3(k.w - 0.5)));   // k.w = 1 + tolerance
 }
 vec4 CtTex(sampler2D s, vec4 p, vec2 hd)
 {
@@ -639,6 +656,16 @@ R"(void main()
 {
 	vec2 uv0 = vUV;   // coordonnee de lecture de la texture
 	gPlaneY = (uExt != 0 || uStand != 0) ? vUV.y : uR.y + vUV.y * uR.w;
+	if(uMist != 0) { // <DioramaMist> : nappe de brume, bords du plan fondus ; side : dense en bas de l'ecran (bande)
+		float mx = (uR.x + vUV.x * uR.z) * uSize.x, my = gPlaneY * uSize.y;
+		float a = CldMask(vec2(mx, my) + uCldB0.xy, uCldA0, uCldB0) * uCldA0.w;
+		a *= clamp(min(min(vUV.x, 1.0 - vUV.x) * uR.z * uSize.x, min(vUV.y, 1.0 - vUV.y) * uR.w * uSize.y) / 48.0, 0.0, 1.0);
+		if(uFlat == 0) a *= 1.0 - smoothstep(0.5 * uCldB0.w, uCldB0.w, (1.0 - gPlaneY) * uSize.y);
+		if(uFog.w > 0.5) a *= 1.0 - clamp((1.0 / max(gl_FragCoord.w, 1e-6) - uD - uFog.x) / max(uFog.y - uFog.x, 1.0), 0.0, 1.0) * uFog.z;
+		oColor = vec4(uCldC0 * a, a);
+		gl_FragDepth = gl_FragCoord.z;
+		return;
+	}
 	bool hole = false;
 	bool remapped = false;
 	if(uExt != 0) {
@@ -707,7 +734,8 @@ R"(void main()
 		float a2 = 1.0 - pow(1.0 - t.a, uInvN);
 		t = vec4(t.rgb * (a2 / t.a), a2);
 	}
-	// G6a : lumieres de scene. Position monde du pixel : plan a l'echelle k de sa tranche, profondeur uZ. Normale : face avant (0, 0, -1) ;
+)"
+R"(	// G6a : lumieres de scene. Position monde du pixel : plan a l'echelle k de sa tranche, profondeur uZ. Normale : face avant (0, 0, -1) ;
 	// sur une tranche arriere, un pixel de bord prend la normale du flanc (haut, bas, gauche, droite).
 	if(uLightOn != 0 && t.a > 0.0 && !hole) {
 		float kk = uKFix > 0.0 ? uKFix : (uD + uZ) / uD;
@@ -831,6 +859,26 @@ R"(void main()
 		if(gFogCol.w > 0.5) t.rgb = mix(t.rgb, gFogCol.rgb * t.a, gFogF);   // brume coloree : la couleur ne touche que les pixels visibles
 		else t *= (1.0 - gFogF);                                               // sans couleur : fondu vers le transparent
 	}
+	// <DioramaClouds> : point monde (pixels NES) ; sprite debout : ses pieds ; ombres (0) puis taches de brouillard (1, attenuees avec la hauteur)
+	if((uCldA0.w > 0.0 || uCldA1.w > 0.0) && t.a > 0.0 && !hole) {
+		float wx = ((uExt != 0 || uStand != 0) ? vUV.x : uR.x + vUV.x * uR.z) * uSize.x;
+		float wy = uStand != 0 ? uStandFoot : gPlaneY * uSize.y;
+		float hgt = uStand != 0 ? (uStandFoot - gPlaneY * uSize.y) : (uFlat != 0 ? (uZ * uIncC - (gPlaneY - 0.5) * uSize.y * uIncS)
+			: (uFogGround.z > 0.5 ? (0.5 - gPlaneY) * uSize.y : (1.0 - gPlaneY) * uSize.y));
+		if(uCldA0.w > 0.0) t.rgb = mix(t.rgb, uCldC0 * t.a, CldMask(vec2(wx, wy) + uCldB0.xy, uCldA0, uCldB0) * uCldA0.w);
+		if(uCldA1.w > 0.0) t.rgb = mix(t.rgb, uCldC1 * t.a, CldMask(vec2(wx, wy) + uCldB1.xy, uCldA1, uCldB1) * uCldA1.w * exp(-max(hgt, 0.0) / max(uCldB1.w, 0.5)));
+	}
+	// <DioramaFog> : brouillard selon la profondeur (gl_FragCoord.w = 1 / c.z) et brume au sol selon la hauteur du point
+	if(uFog.w > 0.5 && t.a > 0.0) {
+		float d = 1.0 / max(gl_FragCoord.w, 1e-6) - uD;
+		float f = clamp((d - uFog.x) / max(uFog.y - uFog.x, 1.0), 0.0, 1.0) * uFog.z;
+		if(uFogGround.x > 0.0) {
+			float hgt = uStand != 0 ? (uStandFoot - gPlaneY * uSize.y) : (uFlat != 0 ? (uZ * uIncC - (gPlaneY - 0.5) * uSize.y * uIncS)
+				: (uFogGround.z > 0.5 ? (0.5 - gPlaneY) * uSize.y : (1.0 - gPlaneY) * uSize.y));   // side : le sol est le bas de l'ecran
+			f = max(f, uFogGround.x * exp(-max(hgt, 0.0) / max(uFogGround.y, 0.5)));
+		}
+		t.rgb = mix(t.rgb, uFogCol * t.a, clamp(f, 0.0, 1.0));
+	}
 	if(uExtDebug != 0 && remapped && !hole) t = t * 0.7 + vec4(0.3, 0.0, 0.3, 0.3);   // controle : zone d'extension en magenta
 	oColor = hole ? vec4(0.0) : vec4(t.rgb * uShade, t.a);   // premultiplie : la couleur seule s'assombrit
 	// topDown : un pixel de sprite prend la profondeur du point ou il serait debout sur le sol (pieds = bas de sa silhouette),
@@ -926,6 +974,13 @@ uniform vec4 uLP0, uLP1, uLP2, uLP3, uLP4, uLP5, uLP6, uLP7;   // xyz position (
 uniform vec4 uLC0, uLC1, uLC2, uLC3, uLC4, uLC5, uLC6, uLC7;   // rgb = couleur x intensite, w = portee
 uniform vec2 uSize;     // taille de la scene (pixels NES)
 uniform vec3 uCam;      // position de la camera (axes centres sur la scene)
+uniform vec4 uFog;      // <DioramaFog> (meme sens que pour les plans)
+uniform vec3 uFogCol;
+uniform vec3 uFogGround;  // force, hauteur, z inutilise ici
+uniform vec2 uCldSz;      // <DioramaClouds> : taille de la scene (pixels NES)
+uniform float uBright;    // bright= : multiplie la couleur finale
+uniform float uFogRef;    // hauteur du sol dans le repere de l'objet : 0 en topDown, H / 2 en side (bas de l'ecran)
+uniform float uD;
 uniform int uShOn;      // H3 : ombres des sprites (meme masque et meme methode que les plans, G6c)
 uniform sampler2D uShTex;
 uniform vec2 uShBand;
@@ -933,6 +988,19 @@ uniform vec4 uShL;
 uniform vec4 uShP;
 uniform vec3 uShCol;
 layout(location = 0) out vec4 oColor;
+// --- <DioramaClouds> (objets) ---
+uniform vec4 uCldA0, uCldA1;   // <DioramaClouds> : taille (pixels NES), couverture, douceur, opacite (0 = couche inactive)
+uniform vec4 uCldB0, uCldB1;   // position monde du point (0, 0) de la scene (x, y), graine, hauteur de la brume (fog)
+uniform vec3 uCldC0, uCldC1;   // couleur
+float CldH(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float CldN(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+	return mix(mix(CldH(i), CldH(i + vec2(1.0, 0.0)), u.x), mix(CldH(i + vec2(0.0, 1.0)), CldH(i + vec2(1.0, 1.0)), u.x), u.y); }
+float CldMask(vec2 w, vec4 a, vec4 b) { // 0..1 : part couverte au point monde w (pixels NES)
+	vec2 p = w / max(a.x, 1.0) + b.z * vec2(17.3, 9.1);
+	float n = 0.65 * CldN(p) + 0.35 * CldN(p * 2.03 + vec2(5.2, 1.7));
+	float e = 1.0 - a.y;
+	return smoothstep(e - a.z, e + a.z, n);
+}
 vec3 LightOne(vec4 lp, vec4 lc, vec3 P, vec3 N)
 {
 	if(lp.w < 1.5) return vec3(0.0);
@@ -956,6 +1024,7 @@ void main()
 			+ LightOne(uLP4, uLC4, P, N) + LightOne(uLP5, uLC5, P, N) + LightOne(uLP6, uLC6, P, N) + LightOne(uLP7, uLC7, P, N);
 		col = min(col * lit, vec3(1.0));
 	}
+	col = min(col * uBright, vec3(1.0));   // bright=
 	if(uShOn != 0) {   // H3 : le rayon du point vers la lumiere coupe le plan des sprites ; le masque y dit si un sprite s'y trouve
 		vec3 P = vPc + vec3(uSize * 0.5, 0.0);
 		vec3 dv = uShL.w > 2.5 ? uShL.xyz : (uShL.xyz - P);
@@ -976,6 +1045,18 @@ void main()
 				col = mix(col, uShCol, clamp(a * uShP.x, 0.0, 1.0));
 			}
 		}
+	}
+	if(uCldA0.w > 0.0 || uCldA1.w > 0.0) { // <DioramaClouds> : position monde du point (topDown : sol x / z ; side : x / y)
+		vec2 w = uFogRef > 0.0 ? vec2(vPc.x + uCldSz.x * 0.5, vPc.y + uCldSz.y * 0.5) : vec2(vPc.x + uCldSz.x * 0.5, uCldSz.y * 0.5 - vPc.z);
+		float hgt = uFogRef - vPc.y;
+		if(uCldA0.w > 0.0) col = mix(col, uCldC0, CldMask(w + uCldB0.xy, uCldA0, uCldB0) * uCldA0.w);
+		if(uCldA1.w > 0.0) col = mix(col, uCldC1, CldMask(w + uCldB1.xy, uCldA1, uCldB1) * uCldA1.w * exp(-max(hgt, 0.0) / max(uCldB1.w, 0.5)));
+	}
+	if(uFog.w > 0.5) { // <DioramaFog> : profondeur au-dela du plan de l'ecran, brume au sol selon la hauteur (-vPc.y)
+		float d = 1.0 / max(gl_FragCoord.w, 1e-6) - uD;
+		float f = clamp((d - uFog.x) / max(uFog.y - uFog.x, 1.0), 0.0, 1.0) * uFog.z;
+		if(uFogGround.x > 0.0) f = max(f, uFogGround.x * exp(-max(uFogRef - vPc.y, 0.0) / max(uFogGround.y, 0.5)));
+		col = mix(col, uFogCol, clamp(f, 0.0, 1.0));
 	}
 	oColor = vec4(col, 1.0);
 }
@@ -1065,6 +1146,94 @@ unsigned int HdGpuCore::BgTexture(const uint32_t* pix, uint32_t w, uint32_t h, b
 
 // G3f : passe de moyenne du surechantillonnage. Triangle plein ecran ; chaque pixel final = moyenne du bloc Aa x Aa de l'image
 // intermediaire (donnees premultipliees : la moyenne de l'alpha et des couleurs est exacte).
+// <3DParticles> (diorama NES) : une particule = 6 sommets (gl_VertexID) ; donnees en texture RGBA32F (2 texels par particule,
+// 256 par ligne) : position scene centree + taille, puis couleur + alpha. Panneau face a la camera, meme projection que les objets 3D.
+static const char* kHdGpuCoreP3Vertex = R"(#version 330 core
+uniform sampler2D uData;
+uniform vec2 uO;
+uniform vec3 uRt0, uRt1, uRt2;
+uniform float uD, uZoom, uScale, uMinPx;
+uniform vec2 uOut;
+out vec2 vUV;
+out vec4 vCol;
+out float vDepth;
+void main()
+{
+	int vi = gl_VertexID; int pid = vi / 6; int ci = vi - pid * 6;
+	vec2 q[6] = vec2[6](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(1.0, 1.0));
+	ivec2 b = ivec2((pid % 256) * 3, pid / 256);
+	vec4 a0 = texelFetch(uData, b, 0), a1 = texelFetch(uData, b + ivec2(1, 0), 0), a2 = texelFetch(uData, b + ivec2(2, 0), 0);
+	vec3 c = vec3(dot(uRt0, a0.xyz), dot(uRt1, a0.xyz), dot(uRt2, a0.xyz)) + vec3(0.0, 0.0, uD);
+	vec4 col = a1;
+	float size = a0.w;
+	if(c.z < 1.0 || col.a <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vUV = vec2(0.0); vCol = vec4(0.0); vDepth = 0.0; return; }
+	float px = size * uD * uZoom * uScale / c.z;   // taille a l'ecran (pixels HD)
+	if(px < uMinPx) { col.a *= px / uMinPx; size *= uMinPx / max(px, 1e-4); }
+	// stretch= : quad allonge entre la tete (position) et la queue (position - trainee), oriente selon le mouvement a l'ecran
+	vec3 S = vec3(dot(uRt0, a2.xyz), dot(uRt1, a2.xyz), dot(uRt2, a2.xyz));
+	vec3 tl = c - S;
+	vec2 dS = tl.z > 1.0 ? (c.xy / c.z - tl.xy / tl.z) * uD * uZoom * uScale : vec2(0.0);
+	float dl = length(dS);
+	if(dl > 0.5) {
+		vec2 n = dS / dl;
+		vec3 A = S * 0.5;
+		vec3 e = normalize(S) * size * 0.5;
+		c = c - A + q[ci].y * (A + e) + vec3(-n.y, n.x, 0.0) * (q[ci].x * size * 0.5);
+	}
+	else c.xy += q[ci] * size * 0.5;
+	vec2 k2 = 2.0 * uScale / uOut;
+	float cx = k2.x * (uO.x * c.z + c.x * uD * uZoom) - c.z;
+	float cy = c.z - k2.y * (uO.y * c.z + c.y * uD * uZoom);
+	float cz = (16384.0 + 1.0) / (16384.0 - 1.0) * c.z - 2.0 * 16384.0 / (16384.0 - 1.0);
+	gl_Position = vec4(cx, cy, cz, c.z);
+	vUV = q[ci] * 0.5 + 0.5; vCol = col; vDepth = c.z;
+}
+)";
+
+static const char* kHdGpuCoreP3Fragment = R"(#version 330 core
+in vec2 vUV;
+in vec4 vCol;
+in float vDepth;
+uniform sampler2D uTex;
+uniform int uHasTex, uAdd;
+uniform vec4 uFog;
+uniform vec3 uFogCol;
+uniform float uD;
+out vec4 oColor;
+void main()
+{
+	float a = vCol.a; vec3 col = vCol.rgb;
+	if(uHasTex != 0) { vec4 t = texture(uTex, vUV); a *= t.a; if(t.a > 0.0) col *= t.rgb / t.a; }   // texture premultipliee
+	else a *= 1.0 - smoothstep(0.55, 1.0, length(vUV * 2.0 - 1.0));                                // point rond doux
+	if(a <= 0.003) discard;
+	if(uFog.w > 0.5) col = mix(col, uFogCol, clamp((vDepth - uD - uFog.x) / max(uFog.y - uFog.x, 1.0), 0.0, 1.0) * uFog.z);
+	oColor = uAdd != 0 ? vec4(col * a, 0.0) : vec4(col * a, a);
+}
+)";
+
+bool HdGpuCore::BuildP3Program()
+{
+	std::string err;
+	GLuint v = HdGpuCoreCompile(GL_VERTEX_SHADER, kHdGpuCoreP3Vertex, err);
+	if(!v) { MessageManager::Log("[HD-GPU-CORE] " + err); return false; }
+	GLuint f = HdGpuCoreCompile(GL_FRAGMENT_SHADER, kHdGpuCoreP3Fragment, err);
+	if(!f) { G.DeleteShader(v); MessageManager::Log("[HD-GPU-CORE] " + err); return false; }
+	GLuint p = G.CreateProgram();
+	G.AttachShader(p, v); G.AttachShader(p, f);
+	G.LinkProgram(p);
+	G.DeleteShader(v); G.DeleteShader(f);
+	GLint ok = 0;
+	G.GetProgramiv(p, GL_LINK_STATUS, &ok);
+	if(!ok) {
+		char log[1024] = {};
+		G.GetProgramInfoLog(p, sizeof(log) - 1, nullptr, log);
+		MessageManager::Log(std::string("[HD-GPU-CORE] programme des particules 3D : ") + log);
+		return false;
+	}
+	_progP3 = p;
+	return true;
+}
+
 static const char* kHdGpuCoreResolveVertex = R"(#version 330 core
 void main()
 {
@@ -1442,6 +1611,19 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	// G6a : lumieres de scene
 	const GLint locLightOn = U("uLightOn");
 	G.Uniform1i(locLightOn, sc.Lights.Active ? 1 : 0);
+	const GLint locFog = U("uFog");
+	G.Uniform4f(locFog, sc.Fog.Start, sc.Fog.End, sc.Fog.Opacity, sc.Fog.Active ? 1.0f : 0.0f);
+	G.Uniform3f(U("uFogCol"), sc.Fog.Col[0], sc.Fog.Col[1], sc.Fog.Col[2]);
+	G.Uniform3f(U("uFogGround"), sc.Fog.Ground, sc.Fog.GroundH, sc.FlatMask != 0 ? 1.0f : 0.0f);
+	auto setClouds = [&](auto Uf) { // <DioramaClouds> : memes uniformes pour les plans et les objets
+		for(int k = 0; k < 2; k++) {
+			const auto& C = sc.Cloud[k];
+			G.Uniform4f(Uf(k ? "uCldA1" : "uCldA0"), C.Size, C.Coverage, C.Soft, C.Active ? C.Opacity : 0.0f);
+			G.Uniform4f(Uf(k ? "uCldB1" : "uCldB0"), C.OffX, C.OffY, C.Seed, C.GroundH);
+			G.Uniform3f(Uf(k ? "uCldC1" : "uCldC0"), C.Col[0], C.Col[1], C.Col[2]);
+		}
+	};
+	setClouds(U);
 	if(sc.Lights.Active) {
 		G.Uniform3f(U("uLAmb"), sc.Lights.Ambient[0], sc.Lights.Ambient[1], sc.Lights.Ambient[2]);
 		static const char* lpn[8] = { "uLP0", "uLP1", "uLP2", "uLP3", "uLP4", "uLP5", "uLP6", "uLP7" };
@@ -1545,7 +1727,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	// tranche par pixel NES de profondeur (128 intervalles au plus). Toutes les tranches de toutes les couches sont triees
 	// du plus loin au plus pres ; a profondeur egale, la couche de plus petit numero d'abord (tri stable).
 	struct Slice { float Z; int Layer; float InvN; float Depth; };
-	Slice slices[(4 + HdDioMaxGroups) * 129 + 16 + HdDioMaxObjects]; // (+ objets 3D H1, couche 100 + numero) couches 0 a 3 = L0..L3, couches 4 a 7 = groupes <DioramaDepth> (G3e)
+	Slice slices[(4 + HdDioMaxGroups) * 129 + 16 + 8 + HdDioMaxObjects]; // (+ objets 3D H1, couche 100 + numero) couches 0 a 3 = L0..L3, couches 4 a 7 = groupes <DioramaDepth> (G3e)
 	int sliceCount = 0;
 	for(int layer = 0; layer < 4 + HdDioMaxGroups; layer++) {
 		if(layer >= 4 && !hasExtra[layer - 4]) continue;
@@ -1566,6 +1748,10 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	}
 	for(int bi = 0; bi < sc.BgCount && bi < 4; bi++) { // fonds de L0 dessines par le GPU : juste devant la face avant de L0
 		slices[sliceCount++] = { sc.PlaneZ[0] - 0.001f * (float)(bi + 1), 300 + bi, 1.0f, 0.0f };
+	}
+	if(sc.Mist.Active && sc.FlatMask == 0) { // <DioramaMist> side : nappes rangees avec les plans selon leur profondeur (couche 400 + numero)
+		const int n = std::min(sc.Mist.Count, 8);
+		for(int i = 0; i < n; i++) slices[sliceCount++] = { sc.Mist.From + (sc.Mist.To - sc.Mist.From) * (n > 1 ? (float)i / (float)(n - 1) : 0.0f), 400 + i, 1.0f, 0.0f };
 	}
 	for(int oi = 0; oi < sc.Objects.Count && oi < HdDioMaxObjects; oi++) { // H1 : objets 3D, ranges avec les tranches selon leur profondeur
 		slices[sliceCount++] = { sc.Objects.O[oi].Occlude ? 1.0e9f : sc.Objects.O[oi].Pos[2], 100 + oi, 1.0f, 0.0f };
@@ -1660,6 +1846,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		G.Uniform1i(UO("uTexM"), 6);
 		G.Uniform1i(UO("uHasTex"), ot ? 1 : 0);
 		G.Uniform3f(UO("uColor"), o.Color[0], o.Color[1], o.Color[2]);
+		G.Uniform1f(UO("uBright"), o.Bright);
 		G.Uniform3f(UO("uMr0"), o.Rot[0], o.Rot[1], o.Rot[2]);
 		G.Uniform3f(UO("uMr1"), o.Rot[3], o.Rot[4], o.Rot[5]);
 		G.Uniform3f(UO("uMr2"), o.Rot[6], o.Rot[7], o.Rot[8]);
@@ -1671,6 +1858,12 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		{ // H2 : lumieres de la scene
 			const bool lit = o.Lit && sc.Lights.Active;
 			G.Uniform1i(UO("uLightOn"), lit ? 1 : 0);
+			G.Uniform4f(UO("uFog"), sc.Fog.Start, sc.Fog.End, sc.Fog.Opacity, (sc.Fog.Active && !shadowPass) ? 1.0f : 0.0f);
+			G.Uniform3f(UO("uFogCol"), sc.Fog.Col[0], sc.Fog.Col[1], sc.Fog.Col[2]);
+			G.Uniform3f(UO("uFogGround"), sc.Fog.Ground, sc.Fog.GroundH, 0.0f);
+			G.Uniform1f(UO("uFogRef"), sc.FlatMask != 0 ? 0.0f : sc.H * 0.5f);
+			G.Uniform2f(UO("uCldSz"), sc.W, sc.H);
+			setClouds(UO);
 			if(lit) {
 				G.Uniform3f(UO("uLAmb"), sc.Lights.Ambient[0], sc.Lights.Ambient[1], sc.Lights.Ambient[2]);
 				static const char* lpn[8] = { "uLP0", "uLP1", "uLP2", "uLP3", "uLP4", "uLP5", "uLP6", "uLP7" };
@@ -1734,11 +1927,34 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	G.Uniform1f(locKFix, 0.0f);
 	G.Uniform1f(locShade, 1.0f);
 	const GLint locHasTop = U("uHasTop"), locHasSide = U("uHasSide"), locPeriods = U("uPeriods"), locOrigins = U("uOrigins"), locScroll = U("uScroll");
-	if(sc.FlatMask != 0 && (sc.Objects.Count > 0 || sc.SpriteFoot) && !objDepthOn) ensureObjDepth();
+	if(((sc.FlatMask != 0 && (sc.Objects.Count > 0 || sc.SpriteFoot)) || (sc.Mist.Active && sc.FlatMask != 0) || (sc.P3Count > 0 && sc.FlatMask != 0)) && !objDepthOn) ensureObjDepth(); // brume topDown : profondeur des montagnes et des sprites meme sans objet
 	const GLint locSprDepth = U("uSprDepth");
 	G.Uniform1i(locSprDepth, 0);
 	const GLint locStand = U("uStand"), locStandFoot = U("uStandFoot");
 	G.Uniform1i(locStand, 0);
+	const GLint locMist = U("uMist");
+	G.Uniform1i(locMist, 0);
+	// <DioramaMist> : une nappe (plan a la hauteur / profondeur de la nappe i, bruit qui derive), puis retour a l'etat des tranches
+	auto drawMist = [&](int i) {
+		const bool td = sc.FlatMask != 0;
+		const int n = std::min(sc.Mist.Count, 8);
+		const float tt = n > 1 ? (float)i / (float)(n - 1) : 0.0f;
+		G.Uniform1i(locMist, 1);
+		G.Uniform1i(locExt, 0); G.Uniform1i(locBg, 0); G.Uniform1i(locStand, 0); G.Uniform1f(locKFix, 0.0f); G.Uniform1f(locDepth, 0.0f);
+		G.Uniform1i(U("uFlat"), td ? 1 : 0); G.Uniform1f(U("uIncC"), 1.0f); G.Uniform1f(U("uIncS"), 0.0f);
+		const float mg = td ? sc.BgMargin : 64.0f;
+		const float fx = mg / sc.W, fy = mg / sc.H;
+		G.Uniform4f(locR, -fx, -fy, 1.0f + 2.0f * fx, 1.0f + 2.0f * fy);
+		G.Uniform1f(locZ, sc.Mist.From + (sc.Mist.To - sc.Mist.From) * tt);
+		G.Uniform4f(U("uCldA0"), sc.Mist.Size * (1.0f + 0.15f * (float)i), sc.Mist.Coverage, sc.Mist.Soft, sc.Mist.Opacity);
+		G.Uniform4f(U("uCldB0"), sc.Mist.OffX[i], sc.Mist.OffY[i], sc.Mist.Seed + (float)i, sc.Mist.Band);
+		G.Uniform3f(U("uCldC0"), sc.Mist.Col[0], sc.Mist.Col[1], sc.Mist.Col[2]);
+		G.DrawArrays(GL_TRIANGLES, 0, 6);
+		G.Uniform1i(locMist, 0);
+		G.Uniform1i(U("uFlat"), 0); G.Uniform1f(locZ, 0.0f);
+		G.Uniform4f(locR, 0.0f, 0.0f, 1.0f, 1.0f);
+		setClouds(U); // uniformes des nuages remis
+	};
 	int boundLayer = -1;
 	// topDown : ombres projetees des objets (castshadow=on), sur le sol, apres les couches a plat et avant les plans verticaux
 	bool objShadowsDone = !(sc.FlatMask != 0 && shadowOn && shObjL[3] > 1.5f);
@@ -1755,6 +1971,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	for(int i = 0; i < sliceCount; i++) {
 		const Slice& s = slices[i];
 		if(!objShadowsDone && !flatSlice(s)) drawObjShadows();
+		if(s.Layer >= 400 && s.Layer < 408) { drawMist(s.Layer - 400); boundLayer = -1; continue; } // <DioramaMist> side
 		if(s.Layer >= 100 && s.Layer < 300) { drawObject(sc.Objects.O[s.Layer - 100], false); boundLayer = -1; if(sc.Objects.O[s.Layer - 100].Occlude && objDepthOn) occlOn = true; G.Uniform1i(locZb, occlOn ? 1 : 0); continue; }
 		if(s.Layer != boundLayer) {
 			const int lay = s.Layer >= 300 ? 0 : s.Layer; // un fond de L0 partage l'etat de la couche 0
@@ -1860,7 +2077,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 					const HdDioramaColorTex& ct = cb.Ct[ci];
 					G.ActiveTexture(GL_TEXTURE0 + 8 + nOk);
 					if(!BgTexture(ct.Pix, ct.W, ct.H, true, true)) continue;
-					G.Uniform4f(U(kn[nOk]), (float)((ct.Key >> 16) & 0xFF), (float)((ct.Key >> 8) & 0xFF), (float)(ct.Key & 0xFF), ct.HasKey ? 1.0f : 0.0f);
+					G.Uniform4f(U(kn[nOk]), (float)((ct.Key >> 16) & 0xFF), (float)((ct.Key >> 8) & 0xFF), (float)(ct.Key & 0xFF), ct.HasKey ? 1.0f + ct.Tol : 0.0f);
 					G.Uniform4f(U(pn[nOk]), ct.TexelX, ct.TexelY, ct.OffX, ct.OffY);
 					bool matOk = false;
 					if(ct.MatPix) { G.ActiveTexture(GL_TEXTURE0 + 12 + nOk); matOk = BgTexture(ct.MatPix, ct.MatW, ct.MatH, true, true) != 0; }
@@ -1936,6 +2153,60 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		if(occlOn) { G.Disable(GL_DEPTH_TEST); G.DepthMask(GL_TRUE); }
 	}
 	G.Uniform1i(locZb, 0); occlOn = false; G.Uniform1i(locBg, 0);
+	// <DioramaMist> topDown : nappes de brume apres tous les plans et objets, testees contre leur profondeur (un objet qui depasse la nappe reste net)
+	if(sc.Mist.Active && sc.Mist.Count > 0 && sc.FlatMask != 0) {
+		const int n = std::min(sc.Mist.Count, 8);
+		if(objDepthOn) { G.Enable(GL_DEPTH_TEST); G.DepthFunc(GL_LEQUAL); G.DepthMask(GL_FALSE); G.Uniform1i(locZb, 1); }
+		for(int i = 0; i < n; i++) drawMist(i); // du bas vers le haut (du plus loin au plus pres)
+		if(objDepthOn) { G.Disable(GL_DEPTH_TEST); G.DepthMask(GL_TRUE); G.DepthFunc(GL_LESS); G.Uniform1i(locZb, 0); }
+		boundLayer = -1;
+	}
+	// <3DParticles> (diorama NES) : apres les plans, les objets et la brume ; testees contre la profondeur (cachees derriere montagnes et objets)
+	if(sc.P3Count > 0 && !_p3ProgFailed && !_progP3 && !BuildP3Program()) _p3ProgFailed = true; // erreur journalisee une fois
+	if(sc.P3Count > 0 && _progP3) {
+		G.UseProgram(_progP3);
+		auto UP = [&](const char* nm) { return G.GetUniformLocation(_progP3, nm); };
+		G.Uniform2f(UP("uO"), sc.W * 0.5f + oPadNes, sc.H * 0.5f);
+		G.Uniform3f(UP("uRt0"), ca, 0.0f, sa);
+		G.Uniform3f(UP("uRt1"), sb * sa, cb, -sb * ca);
+		G.Uniform3f(UP("uRt2"), -cb * sa, sb, cb * ca);
+		G.Uniform1f(UP("uD"), sc.D);
+		G.Uniform1f(UP("uZoom"), sc.Zoom > 0.05f ? sc.Zoom : 1.0f);
+		G.Uniform1f(UP("uScale"), sc.Scale);
+		G.Uniform2f(UP("uOut"), (float)ow, (float)h);
+		G.Uniform4f(UP("uFog"), sc.Fog.Start, sc.Fog.End, sc.Fog.Opacity, sc.Fog.Active ? 1.0f : 0.0f);
+		G.Uniform3f(UP("uFogCol"), sc.Fog.Col[0], sc.Fog.Col[1], sc.Fog.Col[2]);
+		G.Uniform1i(UP("uData"), 5);
+		G.Uniform1i(UP("uTex"), 6);
+		if(objDepthOn) { G.Enable(GL_DEPTH_TEST); G.DepthFunc(GL_LEQUAL); G.DepthMask(GL_FALSE); }
+		for(int bi = 0; bi < sc.P3Count && bi < 4; bi++) {
+			const HdDioramaP3Batch& pb = sc.P3[bi];
+			if(!pb.Data || pb.Count == 0) continue;
+			const uint32_t rows = (pb.Count + 255) / 256;
+			if(!_p3DataTex) {
+				G.GenTextures(1, &_p3DataTex);
+				G.ActiveTexture(GL_TEXTURE0 + 5);
+				G.BindTexture(GL_TEXTURE_2D, _p3DataTex);
+				G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+				G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); G.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			}
+			G.ActiveTexture(GL_TEXTURE0 + 5);
+			G.BindTexture(GL_TEXTURE_2D, _p3DataTex);
+			G.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 768, (GLsizei)rows, 0, GL_RGBA, GL_FLOAT, pb.Data);
+			G.ActiveTexture(GL_TEXTURE0 + 6);
+			const unsigned int tt = pb.TexPix ? WallTexture(pb.TexPix, pb.TexW, pb.TexH) : 0;
+			G.ActiveTexture(GL_TEXTURE0);
+			G.Uniform1i(UP("uHasTex"), tt ? 1 : 0);
+			G.Uniform1i(UP("uAdd"), pb.Additive ? 1 : 0);
+			G.Uniform1f(UP("uMinPx"), pb.MinPx);
+			G.BlendFunc(GL_ONE, pb.Additive ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+			G.DrawArrays(GL_TRIANGLES, 0, (GLsizei)(pb.Count * 6));
+		}
+		G.BlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+		if(objDepthOn) { G.Disable(GL_DEPTH_TEST); G.DepthMask(GL_TRUE); G.DepthFunc(GL_LESS); }
+		G.UseProgram(_progScene);
+		boundLayer = -1;
+	}
 	// G6a : halo des lumieres ponctuelles (ajout a l'ecran, avant la couche fixe)
 	if(sc.Lights.Active && !_skyProgFailed) {
 		bool drew = false;
@@ -1965,6 +2236,8 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	// G3c : couche fixe par-dessus la scene, camera neutre (aucune rotation), plan Z = 0 : position 2D d'origine.
 	if(hasFixed) {
 		G.Uniform1i(locLightOn, 0); // G6a : la couche fixe (HUD) n'est pas eclairee
+		G.Uniform4f(locFog, 0.0f, 1.0f, 0.0f, 0.0f); // ni dans le brouillard
+		G.Uniform4f(U("uCldA0"), 64.0f, 0.5f, 0.1f, 0.0f); G.Uniform4f(U("uCldA1"), 64.0f, 0.5f, 0.1f, 0.0f); // ni sous les nuages
 		G.Uniform1i(locShOn, 0);    // G6c : ni ombragee
 		G.Uniform1i(locNrmOn, 0);   // G6d : ni normales
 		G.Uniform3f(U("uRt0"), 1.0f, 0.0f, 0.0f);

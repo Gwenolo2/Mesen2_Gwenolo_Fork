@@ -905,8 +905,10 @@ namespace {
 			}
 			p.VX += ov.GravityX * dt;
 			p.VY += ov.GravityY * dt;
-			p.X = OvWrap(p.X + (p.VX + ov.WindX + ov.Turbulence * std::sin(w * p.Age + p.Seed1)) * dt, fieldW);
-			p.Y = OvWrap(p.Y + (p.VY + ov.WindY + ov.Turbulence * std::sin(w * p.Age + p.Seed2)) * dt, fieldH);
+			p.EVX = p.VX + ov.WindX + ov.Turbulence * std::sin(w * p.Age + p.Seed1); // vitesse effective (stretch=)
+			p.EVY = p.VY + ov.WindY + ov.Turbulence * std::sin(w * p.Age + p.Seed2);
+			p.X = OvWrap(p.X + p.EVX * dt, fieldW);
+			p.Y = OvWrap(p.Y + p.EVY * dt, fieldH);
 			p.Rot += p.Spin * dt;
 			k++;
 		}
@@ -1017,7 +1019,15 @@ void GbHdVideoFilter::RenderOverlayParticles(uint32_t* out, std::vector<uint8_t>
 			const float tintR = channel(16), tintG = channel(8), tintB = channel(0);
 
 			// Champ torique : la particule est dessinee a chaque copie visible (aucune couture)
-			const float radiusSd = hasTex ? std::max(texW, texH) * sizeMul * 0.5f / fScale : ov.DotSize * sizeMul * 0.5f;
+			// stretch= : trainee dans le sens du mouvement (longueur = vitesse x stretch, en pixels HD), la tete reste sur la particule
+			float sUx = 0.0f, sUy = 0.0f, sL = 0.0f;
+			if(ov.Stretch > 0.0f) {
+				const float vl = std::sqrt(p.EVX * p.EVX + p.EVY * p.EVY);
+				sL = vl * ov.Stretch * fScale;
+				if(sL > 0.5f) { sUx = p.EVX / vl; sUy = p.EVY / vl; } else sL = 0.0f;
+			}
+			const bool strk = sL > 0.0f;
+			const float radiusSd = (hasTex ? std::max(texW, texH) * sizeMul * 0.5f / fScale : ov.DotSize * sizeMul * 0.5f) + sL / fScale;
 			const float margin = radiusSd + 1.0f;
 			const float px0 = OvWrap(p.X - ov.OffsetX, fieldW);
 			const float py0 = OvWrap(p.Y - ov.OffsetY, fieldH);
@@ -1032,16 +1042,16 @@ void GbHdVideoFilter::RenderOverlayParticles(uint32_t* out, std::vector<uint8_t>
 					if(cy > screenH + margin) {
 						break;
 					}
-					const float cxH = cx * fScale;
-					const float cyH = cy * fScale;
+					const float cxH = cx * fScale - sUx * sL * 0.5f;
+					const float cyH = cy * fScale - sUy * sL * 0.5f;
 					if(hasTex) {
 						const float halfExt = std::max(texW, texH) * sizeMul * 0.5f;
-						const float reach = halfExt * 1.5f; // marge pour la rotation
+						const float reach = (halfExt + sL * 0.5f) * 1.5f; // marge pour la rotation / la trainee
 						const int xa = std::max(0, (int)std::floor(cxH - reach));
 						const int xb = std::min(outW - 1, (int)std::ceil(cxH + reach));
 						const int ya = std::max(0, (int)std::floor(cyH - reach));
 						const int yb = std::min(outH - 1, (int)std::ceil(cyH + reach));
-						const float cosR = std::cos(p.Rot), sinR = std::sin(p.Rot);
+						const float cosR = strk ? sUy : std::cos(p.Rot), sinR = strk ? -sUx : std::sin(p.Rot); // trainee : axe v de la texture = mouvement
 						for(int sy = ya; sy <= yb; sy++) {
 							for(int sx = xa; sx <= xb; sx++) {
 								// Transformation inverse : pixel de sortie -> pixel de la texture
@@ -1049,7 +1059,7 @@ void GbHdVideoFilter::RenderOverlayParticles(uint32_t* out, std::vector<uint8_t>
 								const float lx = dx * cosR + dy * sinR;
 								const float ly = -dx * sinR + dy * cosR;
 								const float u = lx / sizeMul + texW * 0.5f;
-								const float v = ly / sizeMul + texH * 0.5f;
+								const float v = (strk ? ly * texH * sizeMul / (texH * sizeMul + sL) : ly) / sizeMul + texH * 0.5f;
 								if(u < 0.0f || v < 0.0f || u >= texW || v >= texH) {
 									continue;
 								}
@@ -1067,14 +1077,16 @@ void GbHdVideoFilter::RenderOverlayParticles(uint32_t* out, std::vector<uint8_t>
 					} else {
 						// Point doux : alpha lineaire du centre vers le bord
 						const float rHD = std::max(0.01f, ov.DotSize * sizeMul * 0.5f * fScale);
-						const int xa = std::max(0, (int)std::floor(cxH - rHD));
-						const int xb = std::min(outW - 1, (int)std::ceil(cxH + rHD));
-						const int ya = std::max(0, (int)std::floor(cyH - rHD));
-						const int yb = std::min(outH - 1, (int)std::ceil(cyH + rHD));
+						const int xa = std::max(0, (int)std::floor(cxH - (rHD + sL * 0.5f)));
+						const int xb = std::min(outW - 1, (int)std::ceil(cxH + (rHD + sL * 0.5f)));
+						const int ya = std::max(0, (int)std::floor(cyH - (rHD + sL * 0.5f)));
+						const int yb = std::min(outH - 1, (int)std::ceil(cyH + (rHD + sL * 0.5f)));
 						for(int sy = ya; sy <= yb; sy++) {
 							for(int sx = xa; sx <= xb; sx++) {
 								const float dx = (float)sx + 0.5f - cxH, dy = (float)sy + 0.5f - cyH;
-								const float d = std::sqrt(dx * dx + dy * dy) / rHD;
+								float qx = dx, qy = dy;
+								if(strk) { qx = dx * sUy - dy * sUx; qy = std::max(0.0f, std::fabs(dx * sUx + dy * sUy) - sL * 0.5f); } // capsule
+								const float d = std::sqrt(qx * qx + qy * qy) / rHD;
 								if(d >= 1.0f) {
 									continue;
 								}

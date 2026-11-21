@@ -39,14 +39,14 @@
 		<DefineConstants></DefineConstants>
 	</PropertyGroup>
 	<PropertyGroup>
-		<CFBundleName>Mesen</CFBundleName> <!-- Also defines .app file name -->
-		<CFBundleDisplayName>Mesen</CFBundleDisplayName>
-		<CFBundleIdentifier>ca.mesen</CFBundleIdentifier>
+		<CFBundleName>Mesen_Gwenolo_Fork</CFBundleName> <!-- Also defines .app file name -->
+		<CFBundleDisplayName>Mesen Gwenolo Fork</CFBundleDisplayName>
+		<CFBundleIdentifier>ca.mesen.gwenolofork</CFBundleIdentifier>
 		<CFBundleVersion>1.0.0</CFBundleVersion>
 		<CFBundleShortVersionString>1.0</CFBundleShortVersionString>
 		<CFBundlePackageType>APPL</CFBundlePackageType>
 		<CFBundleSignature>????</CFBundleSignature>
-		<CFBundleExecutable>Mesen</CFBundleExecutable>
+		<CFBundleExecutable>Mesen_Gwenolo_Fork</CFBundleExecutable>
 		<CFBundleIconFile>MesenIcon.icns</CFBundleIconFile> <!-- Will be copied from output directory -->
 		<NSPrincipalClass>NSApplication</NSPrincipalClass>
 		<NSHighResolutionCapable>true</NSHighResolutionCapable>

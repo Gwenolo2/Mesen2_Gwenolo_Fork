@@ -668,6 +668,7 @@ struct NesHdParticle
 	float Size = 1;           // multiplicateur de taille propre (aleatoire)
 	float Rot = 0, Spin = 0;  // radians, radians / s
 	float Seed1 = 0, Seed2 = 0;
+	float EVX = 0, EVY = 0;   // vitesse effective (vent, turbulence) : trainee stretch=
 };
 
 struct NesHdOverlayInfo
@@ -700,6 +701,7 @@ struct NesHdOverlayInfo
 	float AlphaStart = 1, AlphaEnd = 1, FadeIn = 0.1f, FadeOut = 0.2f;
 	uint32_t ColorStart = 0xFFFFFF, ColorEnd = 0xFFFFFF;
 	float DotSize = 2.0f;                   // diametre du point doux (pixels NES) si pas de texture
+	float Stretch = 0.0f;                   // stretch= : trainee dans le sens du mouvement (secondes ; longueur = vitesse x stretch) ; 0 = aucune
 	bool Prewarm = true;
 
 	// Ecrans (type=plainscreen, type=ellipse) : passe finale sur l'image, zone en fractions de l'image
@@ -800,6 +802,7 @@ struct NesHdTextureInfo
 	float TexelPerPxY = 1.0f;
 	float RatioX = 0.0f;       // defilement : scroll PPU (pixels NES) x ratio
 	float RatioY = 0.0f;
+	int Tolerance = 0;         // tolerance= : ecart maximal par canal (0 a 255) pour reconnaitre la couleur
 	uint8_t DioMode = 0;       // diorama= : 0 on (partout), 1 only (seulement en diorama), 2 off (jamais en diorama)
 	// Materiau PBR (diorama, fond GPU) : image combinee R = normale x, G = normale y (convention OpenGL), B = AO, A = rugosite
 	std::shared_ptr<std::vector<uint32_t>> Mat; uint32_t MatW = 0, MatH = 0;
@@ -1103,6 +1106,64 @@ struct HdDioramaCameraDefaultRule
 struct HdDioramaCameraKeys { string Next, Prev, Default; };
 
 // <DioramaView>topDown,pitch=,zoom=,time= (doc 53) : reglages de vue tant que la condition est vraie (la derniere regle vraie l'emporte).
+// <DioramaFog> (doc 54) : brouillard de distance et brume au sol du diorama ; la derniere regle vraie l'emporte.
+// Valeur absente (Has = false) : defaut selon la vue (topDown ou side), voir HdNesPack (DioramaGpuStep).
+struct HdDioramaFogRule
+{
+	vector<HdPackCondition*> Conditions;
+	bool Off = false;                        // <DioramaFog>off
+	bool HasColor = false; uint32_t Color = 0; bool ColorSky = false; // color=RRGGBB | sky (bas du ciel en degrade)
+	bool HasStart = false, HasEnd = false, HasOpacity = false, HasGround = false, HasGroundH = false;
+	float Start = 0, End = 0, Opacity = 0, Ground = 0, GroundH = 0; // pixels NES au-dela du plan de l'ecran ; opacite 0..1 ; brume au sol 0..1, hauteur
+};
+
+// <DioramaClouds> (doc 54) : ombres de nuages (type=shadows) ou taches de brouillard (type=fog) calculees dans le repere de la carte
+// (bruit, comme <2DOverlay> shadows / fog). Valeur absente : defaut selon la vue. Une couche par type ; la derniere regle vraie l'emporte.
+struct HdDioramaCloudRule
+{
+	vector<HdPackCondition*> Conditions;
+	bool Off = false;
+	int Type = 0;            // 0 = shadows (ombres de nuages), 1 = fog (taches de brouillard)
+	int Anchor = -1;         // anchor=bgN : repere du fond de priorite N ; -1 = fond de sol du diorama, sinon scroll PPU
+	bool HasSize = false, HasSpeed = false, HasDir = false, HasCoverage = false, HasSoft = false, HasOpacity = false, HasColor = false, HasGroundH = false;
+	float Size = 0, Speed = 0, Dir = 0, Coverage = 0, Soft = 0, Opacity = 0, GroundH = 0, Seed = 1;
+	uint32_t Color = 0;
+};
+
+// <DioramaMist> (doc 54) : nappes de brume en volume : count plans semi-transparents (bruit qui derive) de from a to
+// (topDown : hauteurs au-dessus du sol ; side : profondeurs). Valeur absente : defaut selon la vue. Derniere regle vraie.
+struct HdDioramaMistRule
+{
+	vector<HdPackCondition*> Conditions;
+	bool Off = false;
+	int Anchor = -1;
+	bool HasCount = false, HasFrom = false, HasTo = false, HasOpacity = false, HasSize = false, HasSpeed = false, HasDir = false, HasCoverage = false, HasSoft = false, HasColor = false, HasBand = false;
+	int Count = 0; float From = 0, To = 0, Opacity = 0, Size = 0, Speed = 0, Dir = 0, Coverage = 0, Soft = 0, Band = 0, Seed = 3;
+	uint32_t Color = 0;
+};
+
+// <3DParticles> (diorama NES, doc 54) : meme JSON que le SNES (type particles3d, Atelier3DParticles). Unites : pixels NES (1 texel = 1 pixel).
+// Has* = cle donnee (JSON ou ligne) ; sinon defaut selon la vue (topDown ou side), choisi a chaque image.
+struct HdDiorama3DParticlesRule
+{
+	vector<HdPackCondition*> Conditions;
+	string JsonFile;
+	HdPackBitmapInfo* Texture = nullptr;
+	bool Additive = false;
+	int Anchor = -1;                    // anchor=bgN (topDown : repere de la carte), sinon fond de sol GPU, sinon scroll PPU
+	float Alpha = 1.0f;
+	int MaxParticles = 400;
+	float Rate = 0, LifeMin = 0, LifeMax = 0;
+	float BoxSize = 384, BoxHeight = 96, BoxAhead = 0.25f, DepthMin = -24, DepthMax = 200;
+	bool HasBoxSize = false, HasBoxHeight = false, HasBoxAhead = false, HasFall = false, HasSize = false, HasDepth = false;
+	float FallMin = 20, FallMax = 40, DriftMin = 0, DriftMax = 6, Gravity = 0, WindX = 0, WindY = 0, Turbulence = 0, TurbulenceFreq = 0.5f;
+	float SizeStart = 2, SizeEnd = 2, SizeRandom = 0, MinPixelSize = 1.5f;
+	float AlphaStart = 1, AlphaEnd = 1, FadeIn = 0.1f, FadeOut = 0.2f, FarFade = 0.3f;
+	uint32_t ColorStart = 0xFFFFFF, ColorEnd = 0xFFFFFF;
+	bool GroundRespawn = true;
+	float Stretch = 0.0f;               // stretch= : trainee dans le sens du mouvement (secondes ; longueur = vitesse x stretch) ; 0 = point rond
+};
+
 struct HdDioramaViewRule
 {
 	vector<HdPackCondition*> Conditions;
@@ -1128,6 +1189,7 @@ struct HdDioramaObjectRule
 	float Spin = 0;                      // rotation continue autour de Y (degres par image)
 	bool Shadow = true;                  // shadow=off : l'objet ne recoit pas les ombres des sprites (<DioramaShadow>)
 	bool Lit = true;                     // lit=off : l'objet n'est pas eclaire par <DioramaLight> (couleur de la texture telle quelle)
+	float Bright = 1.0f;                 // bright= : multiplie la couleur finale (eclairage compris)
 	bool HasWindow = false; float Window = 0.0f; // window=N : seuls les triangles a moins de N pixels NES de l'ecran (dans le niveau, avec scrollx=) sont dessines
 	float Radius = 0.0f;                 // distance maximale d'un sommet a l'origine du modele x scale (pixels NES), pour ne pas dessiner un objet hors ecran
 	bool CastShadow = false;             // castshadow=on (Tile2Obj, topDown) : ombre projetee sur le sol
@@ -1162,11 +1224,17 @@ struct HdDioramaTile2ObjRule
 	float RotX = 0.0f, RotZ = 0.0f;      // rotx= / rotz= : degres (axes du modele)
 	float Radius = 0.0f;                 // rayon du modele a l'echelle, pour le test d'ecran
 	bool CastShadow = false;             // castshadow=on : ombre projetee sur le sol (topDown, avec <DioramaShadow>)
+	float Bright = 1.0f; bool Lit = true; // bright= : multiplie la couleur finale de l'objet ; lit=off : pas eclaire par <DioramaLight>
 	// <Sprite2Obj> : tile= liste de tous les hashs du personnage (Group) ; id= nom de l'objet ; facing= miroir selon le sprite ; hide= cache le sprite
 	string Id; bool Facing = true; bool Hide = true;
 	// glTF (.glb / .gltf) : modele avec squelette ; PartTris = triangles du modele de chaque partie ; anim= clip (-1 = pose de repos)
 	std::shared_ptr<SnesHdModelMesh> Gltf; vector<vector<uint32_t>> PartTris; int AnimIndex = -1; float AnimSpeed = 1.0f;
+	// <DioramaObject>...,anchor=bgN (objet du monde) : position x / y en pixels NES du PNG du fond de priorite N ; hauteur de base :
+	// BaseMode -1 = surface du fond (sol, ou dessus du groupe dio=gK), 0 = sol, 1 = dessus du groupe BaseGroup, 2 = BaseZ (pixels NES)
+	int AnchorPrio = -1; float WX = 0.0f, WY = 0.0f; int BaseMode = -1, BaseGroup = 0; float BaseZ = 0.0f;
+	bool Debug = false; // debug=on : journal [HD-WORLDOBJ] (centre de l'ecran en coordonnees du PNG, position de l'objet), toutes les 2 secondes
 	float AnimTime = -1.0f; // animtime= : clip fige a cet instant (secondes) ; le temps du personnage (id=) n'avance pas
+	float Blend = -1.0f;    // blend= : duree du fondu (secondes) quand le personnage (id=) passe a ce clip ; -1 = defaut 0.2, 0 = coupure
 	vector<HdPackCondition*> Conditions;
 };
 
@@ -1256,6 +1324,7 @@ public:
 	vector<HdDioramaShadowRule> DioramaShadowRules; // G6c
 	vector<HdDioramaNormalPair> DioramaNormalPairs; // G6d
 	vector<HdDioramaObjectRule> DioramaObjectRules; // H1
+	vector<HdDioramaTile2ObjRule> WorldObjRules;    // <DioramaObject>...,anchor=bgN : objets places dans le monde (repere du fond)
 	vector<HdDioramaTile2ObjRule> Sprite2ObjRules;  // <Sprite2Obj> : silhouettes de sprites remplacees par des objets 3D
 	vector<HdDioramaTile2ObjRule> Tile2ObjRules;    // doc 53 : <Tile2Obj>
 	vector<HdDioramaPadRule> DioramaPadRules;       // manette -> camera
@@ -1263,6 +1332,10 @@ public:
 	vector<HdDioramaCameraLine> DioramaCameraLines;
 	vector<HdDioramaCameraDefaultRule> DioramaCameraDefaults;
 	HdDioramaCameraKeys DioramaCameraKeys;
+	vector<HdDiorama3DParticlesRule> Diorama3DParticles; // <3DParticles> (diorama NES, doc 54)
+	vector<HdDioramaMistRule> DioramaMistRules;     // <DioramaMist> (doc 54)
+	vector<HdDioramaCloudRule> DioramaCloudRules;   // <DioramaClouds> (doc 54)
+	vector<HdDioramaFogRule> DioramaFogRules;       // <DioramaFog> (doc 54)
 	vector<HdDioramaViewRule> DioramaViews;         // <DioramaView> : vues conditionnelles (doc 53)
 	bool DioramaFixed3d = false;          // G3c3 : au moins une zone ou un bloc <DioramaOffCamera> en mode fixed3d
 	bool DioramaOffTiles = false;         // au moins une <tile> declaree dans un bloc <DioramaOffCamera>{ }

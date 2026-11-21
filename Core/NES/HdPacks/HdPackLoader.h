@@ -96,12 +96,16 @@ private:
 	void ProcessDioramaCameraDefaultTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessDioramaCameraKeysTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessDioramaViewTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaFogTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaCloudsTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDioramaMistTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDiorama3DParticlesTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	bool ParseDioramaShadowOptions(vector<string>& tokens, HdDioramaShadowRule& rule, bool allowTile);
 	void ProcessDioramaShadowTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessDioramaNormalTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	HdPackBitmapInfo* LoadAuxBitmap(string name); // PNG hors de la liste des <img> (reutilise celui d'un <img> de meme nom)
 	void ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
-	void ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPackCondition*> conditions, bool sprite = false); // sprite = <Sprite2Obj>
+	void ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPackCondition*> conditions, bool sprite = false, bool world = false); // sprite = <Sprite2Obj>, world = <DioramaObject> anchor=
 	std::map<string, std::shared_ptr<vector<float>>> _dioObjCache; // H1 : .obj deja lus
 	void ProcessDioramaDepthTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	bool ParseDioramaDepthOptions(vector<string>& tokens, HdDioramaDepthGroup& group);

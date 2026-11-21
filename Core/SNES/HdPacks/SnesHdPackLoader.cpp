@@ -2418,6 +2418,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				pi->FarFade = std::clamp(num("farfade", 0.3f), 0.0f, 1.0f);
 				pi->NearFade = std::max(0.0f, num("nearfade", 24.0f));
 				pi->GroundRespawn = StringUtilities::ToLower(str("groundhit")) != "die";
+				pi->Stretch = std::clamp(num("stretch", 0.0f), 0.0f, 2.0f);
 				(void)boolean;
 
 				std::string tex = StringUtilities::Trim(str("texture"));
@@ -2598,6 +2599,7 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				ov->FadeOut = std::clamp(num("fadeout", 0.2f), 0.0f, 1.0f);
 				ov->ColorStart = color("colorstart", 0xFFFFFF); ov->ColorEnd = color("colorend", ov->ColorStart);
 				ov->DotSize = std::max(0.25f, num("dotsize", 2.0f));
+				ov->Stretch = std::clamp(num("stretch", 0.0f), 0.0f, 2.0f);
 				ov->Prewarm = boolean("prewarm", true);
 
 				std::string tex = StringUtilities::Trim(str("texture"));

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <unordered_map>
 #include "NES/HdPacks/HdPackLoader.h"
+#include "Utilities/HdFlatJson.h"
 #include "NES/HdPacks/HdPackConditions.h"
 #include "NES/HdPacks/HdNesPack.h"
 #include "NES/HdPacks/HdGltfSkin.h"
@@ -480,6 +481,18 @@ bool HdPackLoader::LoadPack()
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 19)) == "<dioramacamerakeys>") {
 				tokens = StringUtilities::Split(lineContent.substr(19), ',');
 				ProcessDioramaCameraKeysTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 13)) == "<3dparticles>") {
+				tokens = StringUtilities::Split(lineContent.substr(13), ',');
+				ProcessDiorama3DParticlesTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 13)) == "<dioramamist>") {
+				tokens = StringUtilities::Split(lineContent.substr(13), ',');
+				ProcessDioramaMistTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 15)) == "<dioramaclouds>") {
+				tokens = StringUtilities::Split(lineContent.substr(15), ',');
+				ProcessDioramaCloudsTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 12)) == "<dioramafog>") {
+				tokens = StringUtilities::Split(lineContent.substr(12), ',');
+				ProcessDioramaFogTag(tokens, conditions);
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 13)) == "<dioramaview>") {
 				tokens = StringUtilities::Split(lineContent.substr(13), ',');
 				ProcessDioramaViewTag(tokens, conditions);
@@ -1661,6 +1674,7 @@ void HdPackLoader::ProcessOverlayTag(vector<string>& tokens, vector<HdPackCondit
 	overlay->ColorStart = color("colorstart", 0xFFFFFF);
 	overlay->ColorEnd = color("colorend", overlay->ColorStart);
 	overlay->DotSize = std::max(0.25f, num("dotsize", 2.0f));
+	overlay->Stretch = std::clamp(num("stretch", 0.0f), 0.0f, 2.0f);
 	overlay->Prewarm = boolean("prewarm", true);
 
 	overlay->IsPlainScreen = (type == "plainscreen");
@@ -2629,6 +2643,10 @@ void HdPackLoader::ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPack
 		logError("DioramaObject : fichier .obj attendu en premier, ligne ignoree.");
 		return;
 	}
+	for(const string& t : tokens) { // anchor=bgN : objet du monde (repere du fond), meme moteur que <Tile2Obj> (glTF, animation, ombre)
+		const string lt = StringUtilities::ToLower(StringUtilities::Trim(t));
+		if(lt.rfind("anchor=", 0) == 0) { ProcessDioramaTile2ObjTag(tokens, conditions, false, true); return; }
+	}
 	HdDioramaObjectRule r;
 	r.Conditions = conditions;
 	const string file = StringUtilities::Trim(tokens[0]);
@@ -2669,6 +2687,7 @@ void HdPackLoader::ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPack
 			else if(key == "roty") r.RotY = f;
 			else if(key == "rotz") r.RotZ = f;
 			else if(key == "spin") r.Spin = f;
+			else if(key == "bright") { if(f < 0.0f || f > 8.0f) { logError("DioramaObject : bright doit etre de 0 a 8 : " + val + ", ligne ignoree."); return; } r.Bright = f; }
 			else if(key == "window") { if(f < 0.0f || f > 4096.0f) { logError("DioramaObject : window doit etre de 0 a 4096 pixels NES : " + val + ", ligne ignoree."); return; } r.HasWindow = true; r.Window = f; }
 			else { logError("DioramaObject : option inconnue : " + key + ", ligne ignoree."); return; }
 		}
@@ -2702,7 +2721,7 @@ void HdPackLoader::ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPack
 
 // <Tile2Obj> (doc 53) : <Tile2Obj>modele.obj,tile=HASH[,palette=*|RRGGBBAA][,tex=..][,color=RRGGBB][,scale=..|height=..][,elevation=..][,rotation=..]
 // Etape 1 : lecture seule (la regle est stockee). Le rendu des instances vient ensuite.
-void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPackCondition*> conditions, bool sprite)
+void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPackCondition*> conditions, bool sprite, bool world)
 {
 	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) {
 		logError("Tile2Obj : fichier .obj attendu en premier, ligne ignoree.");
@@ -2742,6 +2761,19 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 			r.Id = raw;
 		} else if(key == "anim") {
 			animName = raw;
+		} else if(world && key == "anchor") { // anchor=bgN : repere du fond de priorite N
+			char* endp = nullptr;
+			const string num = (val.size() > 2 && val.substr(0, 2) == "bg") ? val.substr(2) : val;
+			const long p = strtol(num.c_str(), &endp, 10);
+			if(num.empty() || *endp != 0 || p < 0 || p > 49) { logError("DioramaObject : anchor doit etre bgN (N = priorite du <background>, 0 a 49) : " + val + ", ligne ignoree."); return; }
+			r.AnchorPrio = (int)p;
+		} else if(world && key == "debug") {
+			r.Debug = (val == "on" || val == "1" || val == "yes");
+		} else if(world && key == "base") { // base=auto|floor|gK|nombre
+			if(val == "auto") r.BaseMode = -1;
+			else if(val == "floor" || val == "sol") r.BaseMode = 0;
+			else if(val.size() >= 2 && val[0] == 'g' && val[1] >= '1' && val[1] <= '8') { r.BaseMode = 1; r.BaseGroup = val[1] - '1'; }
+			else { float bz = 0.0f; if(!LightParseFloat(val, bz)) { logError("DioramaObject : base doit etre auto, floor, g1 a g8 ou une hauteur : " + val + ", ligne ignoree."); return; } r.BaseMode = 2; r.BaseZ = bz; }
 		} else if(sprite && (key == "facing" || key == "hide")) {
 			bool b = false;
 			if(val == "on" || val == "1" || val == "yes") b = true;
@@ -2784,6 +2816,10 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 				if(val.empty() || endp == val.c_str() || *endp != 0) { logError("Tile2Obj : palette doit etre * ou RRGGBBAA hexa : " + val + ", ligne ignoree."); return; }
 				r.AnyPalette = false; r.Palette = (uint32_t)v;
 			}
+		} else if(key == "lit") {
+			if(val == "on" || val == "1" || val == "yes") r.Lit = true;
+			else if(val == "off" || val == "0" || val == "no") r.Lit = false;
+			else { logError("Tile2Obj : lit doit etre on ou off : " + val + ", ligne ignoree."); return; }
 		} else if(key == "castshadow") {
 			if(val == "on" || val == "1" || val == "yes") r.CastShadow = true;
 			else if(val == "off" || val == "0" || val == "no") r.CastShadow = false;
@@ -2800,7 +2836,12 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 		} else {
 			if(!LightParseFloat(val, f)) { logError("Tile2Obj : valeur numerique attendue pour " + key + " : " + val + ", ligne ignoree."); return; }
 			if(key == "scale") { if(f <= 0.0f || f > 4096.0f) { logError("Tile2Obj : scale doit etre de 0 a 4096 : " + val + ", ligne ignoree."); return; } r.Scale = f; }
+			else if(world && key == "x") r.WX = f;
+			else if(world && key == "y") r.WY = f;
+			else if(world && key == "roty") r.RotY = f;
+			else if(key == "bright") { if(f < 0.0f || f > 8.0f) { logError("Tile2Obj : bright doit etre de 0 a 8 : " + val + ", ligne ignoree."); return; } r.Bright = f; }
 			else if(key == "animtime") { if(f < 0.0f || f > 3600.0f) { logError("Tile2Obj : animtime doit etre de 0 a 3600 secondes : " + val + ", ligne ignoree."); return; } r.AnimTime = f; }
+			else if(key == "blend") { if(f < 0.0f || f > 10.0f) { logError("Tile2Obj : blend doit etre de 0 a 10 secondes : " + val + ", ligne ignoree."); return; } r.Blend = f; }
 			else if(key == "animspeed") { if(f < 0.0f || f > 16.0f) { logError("Tile2Obj : animspeed doit etre de 0 a 16 : " + val + ", ligne ignoree."); return; } r.AnimSpeed = f; }
 			else if(key == "height") { if(f <= 0.0f || f > 4096.0f) { logError("Tile2Obj : height doit etre de 0 a 4096 pixels NES : " + val + ", ligne ignoree."); return; } r.Height = f; }
 			else if(key == "elevation") r.Elevation = f;
@@ -2810,8 +2851,9 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 			else { logError("Tile2Obj : option inconnue : " + key + ", ligne ignoree."); return; }
 		}
 	}
-	if(!hasTile) { logError("Tile2Obj : tile=HASH ou group=H1|H2|.. obligatoire, ligne ignoree."); return; }
-	if(!sprite && r.Group.size() != (size_t)(r.GridW * r.GridH)) { logError("Tile2Obj : group a " + std::to_string(r.Group.size()) + " hash(s), grid demande " + std::to_string(r.GridW * r.GridH) + ", ligne ignoree."); return; }
+	if(world && r.AnchorPrio < 0) { logError("DioramaObject : anchor=bgN obligatoire, ligne ignoree."); return; }
+	if(!hasTile && !world) { logError("Tile2Obj : tile=HASH ou group=H1|H2|.. obligatoire, ligne ignoree."); return; }
+	if(!sprite && !world && r.Group.size() != (size_t)(r.GridW * r.GridH)) { logError("Tile2Obj : group a " + std::to_string(r.Group.size()) + " hash(s), grid demande " + std::to_string(r.GridW * r.GridH) + ", ligne ignoree."); return; }
 	const string lowFile = StringUtilities::ToLower(file);
 	const bool isGltf = (lowFile.size() > 4 && lowFile.substr(lowFile.size() - 4) == ".glb") || (lowFile.size() > 5 && lowFile.substr(lowFile.size() - 5) == ".gltf");
 	if(isGltf) {
@@ -2874,7 +2916,7 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 			}
 			if(animName.empty() && !gm->Rig->Anims.empty()) r.AnimIndex = 0;
 		}
-		MessageManager::Log("[HDPack] <" + string(sprite ? "Sprite2Obj" : "Tile2Obj") + "> " + file + " : glTF, " + std::to_string(gm->Tris.size()) + " triangle(s), " + std::to_string(r.Parts.size()) + " partie(s), clips : " + (list.empty() ? string("aucun") : list) + ", joue : " + (r.AnimIndex >= 0 ? std::to_string(r.AnimIndex) : string("pose de repos")));
+		MessageManager::Log("[HDPack] <" + string(world ? "DioramaObject" : (sprite ? "Sprite2Obj" : "Tile2Obj")) + "> " + file + " : glTF, " + std::to_string(gm->Tris.size()) + " triangle(s), " + std::to_string(r.Parts.size()) + " partie(s), clips : " + (list.empty() ? string("aucun") : list) + ", joue : " + (r.AnimIndex >= 0 ? std::to_string(r.AnimIndex) : string("pose de repos")));
 	}
 	if(!isGltf) {
 		vector<uint8_t> raw;
@@ -2947,7 +2989,7 @@ void HdPackLoader::ProcessDioramaTile2ObjTag(vector<string>& tokens, vector<HdPa
 		}
 		if(r.Parts.empty()) { logError("Tile2Obj : " + file + " : aucune face lue, ligne ignoree."); return; }
 	}
-	if(sprite) _data->Sprite2ObjRules.push_back(r); else _data->Tile2ObjRules.push_back(r);
+	if(world) _data->WorldObjRules.push_back(r); else if(sprite) _data->Sprite2ObjRules.push_back(r); else _data->Tile2ObjRules.push_back(r);
 }
 
 // <DioramaNormal>albedo.png,normal.png (doc 44, G6d) : carte de normales. Les tiles dont l'image est albedo.png (les <tile> de ce PNG) recoivent
@@ -3168,6 +3210,206 @@ void HdPackLoader::ProcessDioramaCameraKeysTag(vector<string>& tokens, vector<Hd
 
 // <DioramaView>topDown[,pitch=,zoom=,time=] (doc 53) : reglages de vue tant que la condition est vraie (la derniere regle vraie l'emporte).
 // Seule la vue topDown est reconnue pour l'instant. Sans regle vraie, la vue reste celle de <Diorama> / <DioramaCamera>.
+// <DioramaFog>[off][,color=RRGGBB|sky][,start=][,end=][,opacity=][,ground=][,groundheight=] (doc 54) : brouillard de distance du diorama.
+// Les valeurs absentes prennent un defaut selon la vue (topDown ou side).
+// <DioramaClouds>[off][,type=shadows|fog][,anchor=bgN][,size=][,speed=][,direction=][,coverage=][,softness=][,opacity=][,color=][,groundheight=][,seed=]
+// <DioramaMist>[off][,count=][,from=][,to=][,opacity=][,size=][,speed=][,direction=][,coverage=][,softness=][,color=][,band=][,anchor=bgN][,seed=]
+// <3DParticles>fichier.json[,cle=valeur...] (diorama NES) : memes cles que le SNES (particles3d) ; anchor=bgN, depthmin= / depthmax= (side) en plus.
+void HdPackLoader::ProcessDiorama3DParticlesTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) { logError("3DParticles : fichier JSON manquant, ligne ignoree."); return; }
+	HdDiorama3DParticlesRule r;
+	r.Conditions = conditions;
+	r.JsonFile = StringUtilities::Trim(tokens[0]);
+	std::unordered_map<string, string> cfg;
+	vector<uint8_t> raw;
+	if(LoadFile(r.JsonFile, raw)) cfg = ParseFlatJson(string(raw.begin(), raw.end()));
+	else logError("3DParticles : fichier introuvable : " + r.JsonFile);
+	for(size_t t = 1; t < tokens.size(); t++) {
+		const string tok = StringUtilities::Trim(tokens[t]);
+		const size_t eq = tok.find('=');
+		if(eq == string::npos) continue;
+		cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+	}
+	auto has = [&](const char* k) { return cfg.find(k) != cfg.end() && !cfg[k].empty(); };
+	auto str = [&](const char* k) -> string { auto it = cfg.find(k); return it == cfg.end() ? string() : it->second; };
+	auto num = [&](const char* k, float def) -> float { const string v = str(k); if(v.empty()) return def; try { return std::stof(v); } catch(...) { return def; } };
+	auto color = [&](const char* k, uint32_t def) -> uint32_t { string v = StringUtilities::Trim(str(k)); if(v.empty()) return def; if(v[0] == '#') v = v.substr(1); try { return (uint32_t)std::stoul(v, nullptr, 16) & 0xFFFFFF; } catch(...) { return def; } };
+	r.Alpha = std::clamp(num("alpha", 1.0f), 0.0f, 1.0f);
+	r.Additive = StringUtilities::ToLower(str("blend")) == "additive";
+	r.MaxParticles = std::clamp((int)num("maxparticles", 400.0f), 1, 20000);
+	r.Rate = std::max(0.0f, num("rate", 0.0f));
+	r.LifeMin = std::max(0.0f, num("lifemin", 0.0f));
+	r.LifeMax = std::max(r.LifeMin, num("lifemax", r.LifeMin));
+	r.HasBoxSize = has("boxsize"); r.BoxSize = std::clamp(num("boxsize", 384.0f), 32.0f, 2048.0f);
+	r.HasBoxHeight = has("boxheight"); r.BoxHeight = std::clamp(num("boxheight", 96.0f), 4.0f, 2048.0f);
+	r.HasBoxAhead = has("boxahead"); r.BoxAhead = std::clamp(num("boxahead", 0.25f), 0.0f, 0.5f);
+	r.HasDepth = has("depthmin") || has("depthmax"); r.DepthMin = num("depthmin", -24.0f); r.DepthMax = num("depthmax", 200.0f);
+	if(r.DepthMax < r.DepthMin + 1.0f) r.DepthMax = r.DepthMin + 1.0f;
+	r.HasFall = has("fallmin") || has("fallmax"); r.FallMin = num("fallmin", 20.0f); r.FallMax = num("fallmax", 40.0f);
+	r.DriftMin = num("driftmin", 0.0f); r.DriftMax = num("driftmax", 6.0f);
+	r.Gravity = num("gravity", 0.0f);
+	r.WindX = num("windx", 0.0f); r.WindY = num("windy", 0.0f);
+	r.Turbulence = num("turbulence", 0.0f); r.TurbulenceFreq = num("turbulencefreq", 0.5f);
+	r.HasSize = has("sizestart"); r.SizeStart = num("sizestart", 2.0f); r.SizeEnd = num("sizeend", r.SizeStart);
+	r.SizeRandom = std::clamp(num("sizerandom", 0.0f), 0.0f, 0.95f);
+	r.MinPixelSize = std::max(0.5f, num("minpixelsize", 1.5f));
+	r.AlphaStart = num("alphastart", 1.0f); r.AlphaEnd = num("alphaend", r.AlphaStart);
+	r.FadeIn = std::clamp(num("fadein", 0.1f), 0.0f, 1.0f);
+	r.FadeOut = std::clamp(num("fadeout", 0.2f), 0.0f, 1.0f);
+	r.ColorStart = color("colorstart", 0xFFFFFF); r.ColorEnd = color("colorend", r.ColorStart);
+	r.FarFade = std::clamp(num("farfade", 0.3f), 0.0f, 1.0f);
+	r.GroundRespawn = StringUtilities::ToLower(str("groundhit")) != "die";
+	r.Stretch = std::clamp(num("stretch", 0.0f), 0.0f, 2.0f);
+	{
+		string a = StringUtilities::ToLower(str("anchor"));
+		if(!a.empty()) { if(a.size() > 2 && a.substr(0, 2) == "bg") a = a.substr(2); char* endp = nullptr; const long p = strtol(a.c_str(), &endp, 10); if(*endp == 0 && p >= 0 && p <= 49) r.Anchor = (int)p; else logError("3DParticles : anchor doit etre bgN : " + str("anchor")); }
+	}
+	const string tex = StringUtilities::Trim(str("texture"));
+	if(!tex.empty()) r.Texture = LoadAuxBitmap(tex);
+	if(_data->Diorama3DParticles.size() >= 4) { logError("3DParticles : 4 effets au plus en diorama, ligne ignoree."); return; }
+	MessageManager::Log("[HDPack] <3DParticles> " + r.JsonFile + " enregistre (diorama, " + std::to_string(r.MaxParticles) + " particules max).");
+	_data->Diorama3DParticles.push_back(r);
+}
+
+void HdPackLoader::ProcessDioramaMistTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	HdDioramaMistRule r;
+	r.Conditions = conditions;
+	for(const string& t0 : tokens) {
+		const string opt = StringUtilities::Trim(t0);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(eq == string::npos ? opt : opt.substr(0, eq)));
+		const string val = eq == string::npos ? string() : StringUtilities::ToLower(StringUtilities::Trim(opt.substr(eq + 1)));
+		if(eq == string::npos) {
+			if(key == "off") { r.Off = true; continue; }
+			if(key == "on") continue;
+			logError("DioramaMist : option inconnue : " + key + ", ligne ignoree."); return;
+		}
+		if(key == "anchor") {
+			const string num = (val.size() > 2 && val.substr(0, 2) == "bg") ? val.substr(2) : val;
+			char* endp = nullptr;
+			const long p = strtol(num.c_str(), &endp, 10);
+			if(num.empty() || *endp != 0 || p < 0 || p > 49) { logError("DioramaMist : anchor doit etre bgN : " + val + ", ligne ignoree."); return; }
+			r.Anchor = (int)p; continue;
+		}
+		if(key == "color") {
+			string h = val; if(!h.empty() && h[0] == '#') h = h.substr(1);
+			char* endp = nullptr;
+			const unsigned long v = h.size() == 6 ? strtoul(h.c_str(), &endp, 16) : 0;
+			if(h.size() != 6 || endp == h.c_str() || *endp != 0) { logError("DioramaMist : color doit etre RRGGBB : " + val + ", ligne ignoree."); return; }
+			r.Color = (uint32_t)v; r.HasColor = true; continue;
+		}
+		float f = 0.0f;
+		if(!LightParseFloat(val, f)) { logError("DioramaMist : valeur numerique attendue pour " + key + " : " + val + ", ligne ignoree."); return; }
+		if(key == "count") { if(f < 1.0f || f > 8.0f) { logError("DioramaMist : count doit etre de 1 a 8, ligne ignoree."); return; } r.Count = (int)f; r.HasCount = true; }
+		else if(key == "from") { r.From = f; r.HasFrom = true; }
+		else if(key == "to") { r.To = f; r.HasTo = true; }
+		else if(key == "opacity") { r.Opacity = std::clamp(f, 0.0f, 1.0f); r.HasOpacity = true; }
+		else if(key == "size") { if(f < 2.0f || f > 4096.0f) { logError("DioramaMist : size doit etre de 2 a 4096 pixels NES, ligne ignoree."); return; } r.Size = f; r.HasSize = true; }
+		else if(key == "speed") { r.Speed = f; r.HasSpeed = true; }
+		else if(key == "direction") { r.Dir = f; r.HasDir = true; }
+		else if(key == "coverage") { r.Coverage = std::clamp(f, 0.0f, 1.0f); r.HasCoverage = true; }
+		else if(key == "softness") { r.Soft = std::clamp(f, 0.0f, 1.0f); r.HasSoft = true; }
+		else if(key == "band") { if(f <= 0.0f) { logError("DioramaMist : band doit etre positif, ligne ignoree."); return; } r.Band = f; r.HasBand = true; }
+		else if(key == "seed") r.Seed = f;
+		else { logError("DioramaMist : option inconnue : " + key + ", ligne ignoree."); return; }
+	}
+	if(_data->DioramaMistRules.size() >= 16) { logError("DioramaMist : 16 regles au plus, ligne ignoree."); return; }
+	_data->DioramaMistRules.push_back(r);
+}
+
+void HdPackLoader::ProcessDioramaCloudsTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	HdDioramaCloudRule r;
+	r.Conditions = conditions;
+	for(const string& t0 : tokens) {
+		const string opt = StringUtilities::Trim(t0);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(eq == string::npos ? opt : opt.substr(0, eq)));
+		const string val = eq == string::npos ? string() : StringUtilities::ToLower(StringUtilities::Trim(opt.substr(eq + 1)));
+		if(eq == string::npos) {
+			if(key == "off") { r.Off = true; continue; }
+			if(key == "shadows" || key == "fog") { r.Type = key == "fog" ? 1 : 0; continue; }
+			logError("DioramaClouds : option inconnue : " + key + ", ligne ignoree."); return;
+		}
+		if(key == "type") {
+			if(val == "shadows" || val == "shadow" || val == "ombres") r.Type = 0;
+			else if(val == "fog" || val == "brouillard") r.Type = 1;
+			else { logError("DioramaClouds : type doit etre shadows ou fog : " + val + ", ligne ignoree."); return; }
+			continue;
+		}
+		if(key == "anchor") {
+			const string num = (val.size() > 2 && val.substr(0, 2) == "bg") ? val.substr(2) : val;
+			char* endp = nullptr;
+			const long p = strtol(num.c_str(), &endp, 10);
+			if(num.empty() || *endp != 0 || p < 0 || p > 49) { logError("DioramaClouds : anchor doit etre bgN : " + val + ", ligne ignoree."); return; }
+			r.Anchor = (int)p;
+			continue;
+		}
+		if(key == "color") {
+			string h = val; if(!h.empty() && h[0] == '#') h = h.substr(1);
+			char* endp = nullptr;
+			const unsigned long v = h.size() == 6 ? strtoul(h.c_str(), &endp, 16) : 0;
+			if(h.size() != 6 || endp == h.c_str() || *endp != 0) { logError("DioramaClouds : color doit etre RRGGBB : " + val + ", ligne ignoree."); return; }
+			r.Color = (uint32_t)v; r.HasColor = true;
+			continue;
+		}
+		float f = 0.0f;
+		if(!LightParseFloat(val, f)) { logError("DioramaClouds : valeur numerique attendue pour " + key + " : " + val + ", ligne ignoree."); return; }
+		if(key == "size") { if(f < 2.0f || f > 4096.0f) { logError("DioramaClouds : size doit etre de 2 a 4096 pixels NES, ligne ignoree."); return; } r.Size = f; r.HasSize = true; }
+		else if(key == "speed") { r.Speed = f; r.HasSpeed = true; }
+		else if(key == "direction") { r.Dir = f; r.HasDir = true; }
+		else if(key == "coverage") { r.Coverage = std::clamp(f, 0.0f, 1.0f); r.HasCoverage = true; }
+		else if(key == "softness") { r.Soft = std::clamp(f, 0.0f, 1.0f); r.HasSoft = true; }
+		else if(key == "opacity") { r.Opacity = std::clamp(f, 0.0f, 1.0f); r.HasOpacity = true; }
+		else if(key == "groundheight") { if(f <= 0.0f) { logError("DioramaClouds : groundheight doit etre positif, ligne ignoree."); return; } r.GroundH = f; r.HasGroundH = true; }
+		else if(key == "seed") r.Seed = f;
+		else { logError("DioramaClouds : option inconnue : " + key + ", ligne ignoree."); return; }
+	}
+	if(_data->DioramaCloudRules.size() >= 16) { logError("DioramaClouds : 16 regles au plus, ligne ignoree."); return; }
+	_data->DioramaCloudRules.push_back(r);
+}
+
+void HdPackLoader::ProcessDioramaFogTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	HdDioramaFogRule r;
+	r.Conditions = conditions;
+	for(const string& t0 : tokens) {
+		const string opt = StringUtilities::Trim(t0);
+		if(opt.empty()) continue;
+		const size_t eq = opt.find('=');
+		const string key = StringUtilities::ToLower(StringUtilities::Trim(eq == string::npos ? opt : opt.substr(0, eq)));
+		const string val = eq == string::npos ? string() : StringUtilities::ToLower(StringUtilities::Trim(opt.substr(eq + 1)));
+		if(eq == string::npos) {
+			if(key == "off") { r.Off = true; continue; }
+			if(key == "on") continue;
+			logError("DioramaFog : option inconnue : " + key + ", ligne ignoree."); return;
+		}
+		float f = 0.0f;
+		if(key == "color") {
+			if(val == "sky" || val == "ciel") { r.HasColor = true; r.ColorSky = true; continue; }
+			string h = val; if(!h.empty() && h[0] == '#') h = h.substr(1);
+			char* endp = nullptr;
+			const unsigned long v = h.size() == 6 ? strtoul(h.c_str(), &endp, 16) : 0;
+			if(h.size() != 6 || endp == h.c_str() || *endp != 0) { logError("DioramaFog : color doit etre RRGGBB ou sky : " + val + ", ligne ignoree."); return; }
+			r.HasColor = true; r.Color = (uint32_t)v;
+			continue;
+		}
+		if(!LightParseFloat(val, f)) { logError("DioramaFog : valeur numerique attendue pour " + key + " : " + val + ", ligne ignoree."); return; }
+		if(key == "start") { r.Start = f; r.HasStart = true; }
+		else if(key == "end") { r.End = f; r.HasEnd = true; }
+		else if(key == "opacity") { if(f < 0.0f || f > 1.0f) { logError("DioramaFog : opacity doit etre de 0 a 1, ligne ignoree."); return; } r.Opacity = f; r.HasOpacity = true; }
+		else if(key == "ground") { if(f < 0.0f || f > 1.0f) { logError("DioramaFog : ground doit etre de 0 a 1, ligne ignoree."); return; } r.Ground = f; r.HasGround = true; }
+		else if(key == "groundheight") { if(f <= 0.0f || f > 1024.0f) { logError("DioramaFog : groundheight doit etre de 0 a 1024 pixels NES, ligne ignoree."); return; } r.GroundH = f; r.HasGroundH = true; }
+		else { logError("DioramaFog : option inconnue : " + key + ", ligne ignoree."); return; }
+	}
+	if(_data->DioramaFogRules.size() >= 16) { logError("DioramaFog : 16 regles au plus, ligne ignoree."); return; }
+	_data->DioramaFogRules.push_back(r);
+}
+
 void HdPackLoader::ProcessDioramaViewTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
 {
 	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty() || tokens[0].find('=') != string::npos) {
@@ -3870,6 +4112,7 @@ void HdPackLoader::ProcessTexture2DTag(vector<string>& tokens, vector<HdPackCond
 	info.TexelPerPxY = 100.0f / sy;
 	info.RatioX = num("scrollx", 0.0f);
 	info.RatioY = num("scrolly", 0.0f);
+	info.Tolerance = std::clamp((int)num("tolerance", 0.0f), 0, 255); // couleurs proches (bords anticrenelés)
 	{
 		const string dm = StringUtilities::ToLower(StringUtilities::Trim(str("diorama")));
 		if(dm.empty() || dm == "on" || dm == "all") info.DioMode = 0;

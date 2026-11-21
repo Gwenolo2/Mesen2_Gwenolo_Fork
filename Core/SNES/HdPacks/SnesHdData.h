@@ -705,6 +705,7 @@ struct SnesHdParticle
 	float Size = 1;           // multiplicateur de taille propre (aleatoire)
 	float Rot = 0, Spin = 0;  // radians, radians / s
 	float Seed1 = 0, Seed2 = 0;
+	float EVX = 0, EVY = 0;   // vitesse effective (vent, turbulence) : trainee stretch=
 };
 
 // <2DPerspective> (SNES) : plan incline (sol) a partir d'un PNG. Etape 2 : mode=floor, sans ancrage
@@ -871,6 +872,7 @@ struct SnesHdOverlayInfo
 	float AlphaStart = 1, AlphaEnd = 1, FadeIn = 0.1f, FadeOut = 0.2f;
 	uint32_t ColorStart = 0xFFFFFF, ColorEnd = 0xFFFFFF; // teinte RGB (multiplie la texture)
 	float DotSize = 2.0f;                    // diametre du point doux (pixels SNES) si pas de texture
+	float Stretch = 0.0f;                    // stretch= : trainee dans le sens du mouvement (secondes ; longueur = vitesse x stretch) ; 0 = aucune
 	bool Prewarm = true;                     // remplit l'ecran des la 1re apparition
 
 	// Distorsion d'image (type=distortion) : deformation horizontale sinusoidale de l'image finale (chaleur)
@@ -958,6 +960,7 @@ struct SnesHdParticle3D
 	float Age = 0, Life = 0;       // Life = 0 : immortelle
 	float Size = 1;
 	float Seed1 = 0, Seed2 = 0;
+	float EVX = 0, EVY = 0;        // vitesse horizontale effective (vent, turbulence) : trainee stretch=
 };
 
 struct SnesHdParticles3DInfo
@@ -987,6 +990,7 @@ struct SnesHdParticles3DInfo
 	float FarFade = 0.3f;                // part du bord de la boite ou l'alpha s'estompe
 	float NearFade = 24.0f;              // en dessous de cette distance (texels), l'alpha s'estompe
 	bool GroundRespawn = true;           // au sol : reapparait en haut (sinon meurt)
+	float Stretch = 0.0f;                // stretch= : trainee dans le sens du mouvement (secondes ; longueur = vitesse x stretch) ; 0 = point rond
 
 	struct ViewState
 	{
@@ -1196,8 +1200,37 @@ struct SnesHdModelRig
 	// anim < 0 ou absente : pose de repos.
 	void Evaluate(int anim, float time, std::vector<float>& pal) const
 	{
+		std::vector<float> trs;
+		SampleTrs(anim, time, trs);
+		BuildPalette(trs, pal);
+	}
+	// Fondu entre deux clips (NES <Sprite2Obj> blend=) : poses melangees noeud par noeud (w = 0 : clip A, 1 : clip B)
+	void EvaluateBlend(int animA, float timeA, int animB, float timeB, float w, std::vector<float>& pal) const
+	{
+		std::vector<float> ta, tb;
+		SampleTrs(animA, timeA, ta);
+		SampleTrs(animB, timeB, tb);
+		w = std::clamp(w, 0.0f, 1.0f);
+		for(size_t i = 0; i + 10 <= ta.size() && i + 10 <= tb.size(); i += 10) {
+			for(int c = 0; c < 3; c++) {
+				ta[i + c] += (tb[i + c] - ta[i + c]) * w;             // translation
+				ta[i + 7 + c] += (tb[i + 7 + c] - ta[i + 7 + c]) * w; // echelle
+			}
+			float dot = 0.0f;
+			for(int c = 0; c < 4; c++) dot += ta[i + 3 + c] * tb[i + 3 + c];
+			const float sgn = dot < 0.0f ? -1.0f : 1.0f; // chemin le plus court
+			float len = 0.0f;
+			for(int c = 0; c < 4; c++) { ta[i + 3 + c] += (tb[i + 3 + c] * sgn - ta[i + 3 + c]) * w; len += ta[i + 3 + c] * ta[i + 3 + c]; }
+			len = len > 1e-12f ? 1.0f / std::sqrt(len) : 1.0f;
+			for(int c = 0; c < 4; c++) ta[i + 3 + c] *= len;
+		}
+		BuildPalette(ta, pal);
+	}
+	// Pose locale (translation, rotation, echelle : 10 flottants par noeud) au temps donne
+	void SampleTrs(int anim, float time, std::vector<float>& trs) const
+	{
 		const size_t n = Nodes.size();
-		std::vector<float> trs(n * 10);
+		trs.assign(n * 10, 0.0f);
 		for(size_t i = 0; i < n; i++) {
 			float* d = &trs[i * 10];
 			memcpy(d, Nodes[i].T, 3 * sizeof(float)); memcpy(d + 3, Nodes[i].R, 4 * sizeof(float)); memcpy(d + 7, Nodes[i].S, 3 * sizeof(float));
@@ -1236,6 +1269,11 @@ struct SnesHdModelRig
 				}
 			}
 		}
+	}
+	// Palette (12 flottants par emplacement) a partir d'une pose locale
+	void BuildPalette(const std::vector<float>& trs, std::vector<float>& pal) const
+	{
+		const size_t n = Nodes.size();
 		// matrices locales puis du monde (parents d'abord, par memo)
 		std::vector<float> world(n * 16);
 		std::vector<char> done(n, 0);

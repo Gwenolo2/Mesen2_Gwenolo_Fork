@@ -165,8 +165,22 @@ private:
 	vector<HdDioramaObjectRule> _dioT2oRules;  // Tile2Obj : instances de cette image
 	void DetectTile2Obj();
 	void DetectSprite2Obj();
+	void DetectWorldObj();
+	struct P3Part { float X = 0, Y = 0, Z = 0, VX = 0, VY = 0, VZ = 0, Age = 0, Life = 0, Size = 1, Seed1 = 0, Seed2 = 0, EVX = 0, EVY = 0; }; // EV* : vitesse effective (vent, turbulence) pour stretch=
+	struct P3State { vector<P3Part> Parts; bool Init = false; bool TopDown = false; float Time = 0, SpawnAcc = 0; uint32_t Rng = 0x9E3779B9; };
+	vector<P3State> _p3State;      // <3DParticles> (diorama) : une simulation par regle
+	vector<float> _p3Out[4];        // donnees envoyees au GPU
 	std::unordered_map<uint64_t, std::shared_ptr<vector<float>>> _s2oBuf;          // <Sprite2Obj> anime : sommets deformes (regle, silhouette, partie)
-	std::unordered_map<std::string, std::pair<uint32_t, float>> _s2oTime;          // id= -> (derniere image, temps du clip en secondes)
+	// <Sprite2Obj> / objets du monde animes : etat d'animation par personnage (id=) : temps du clip, clip en cours, fondu vers le clip suivant (blend=)
+	struct S2oAnimState
+	{
+		bool Has = false; uint32_t Frame = 0; float Time = 0.0f;
+		const void* Model = nullptr; int Anim = -1; float Frozen = -1.0f, Speed = 1.0f; // clip en cours (Frozen = animtime=, -1 = joue)
+		int PrevAnim = -1; float PrevTime = 0.0f, PrevFrozen = -1.0f, PrevSpeed = 1.0f;   // clip precedent pendant le fondu
+		float BlendLeft = 0.0f, BlendDur = 0.0f;                                           // secondes restantes / duree du fondu
+	};
+	std::unordered_map<std::string, S2oAnimState> _s2oTime;
+	void S2oPose(const std::string& key, const HdDioramaTile2ObjRule& r, uint32_t frame); // remplit _s2oPal
 	std::vector<float> _s2oPal;                                                   // palette d'os de la silhouette en cours
 	uint32_t _s2oVersion = 0;
 	vector<uint8_t> _s2oMask; // <Sprite2Obj> : par pixel NES, regle (+1) dont la silhouette a ete remplacee par un objet (0 = aucune)

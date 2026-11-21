@@ -257,7 +257,11 @@ uint32_t HdNesPack<scale>::ApplyTexture2D(const vector<NesHdTextureInfo>& rules,
 	const uint32_t alpha = raw >> 24;
 	for(const NesHdTextureInfo& r : rules) {
 		if(r.DioMode == (_dioDrawing ? 2 : 1)) continue; // diorama= off / only
-		const bool match = r.HasKey ? (alpha != 0 && (raw & 0xFFFFFFu) == r.Key) : (alpha == 0);
+		bool match = r.HasKey ? (alpha != 0 && (raw & 0xFFFFFFu) == r.Key) : (alpha == 0);
+		if(!match && r.HasKey && alpha != 0 && r.Tolerance > 0) { // tolerance= : ecart maximal par canal
+			const int dr = std::abs((int)((raw >> 16) & 0xFF) - (int)((r.Key >> 16) & 0xFF)), dg = std::abs((int)((raw >> 8) & 0xFF) - (int)((r.Key >> 8) & 0xFF)), db = std::abs((int)(raw & 0xFF) - (int)(r.Key & 0xFF));
+			match = std::max(dr, std::max(dg, db)) <= r.Tolerance;
+		}
 		if(!match || r.Texture == nullptr || r.Texture->PixelData.empty() || r.Texture->Width == 0 || r.Texture->Height == 0) {
 			continue;
 		}
@@ -515,8 +519,10 @@ namespace {
 			}
 			p.VX += ov.GravityX * dt;
 			p.VY += ov.GravityY * dt;
-			p.X = WrapCoord(p.X + (p.VX + ov.WindX + ov.Turbulence * std::sin(w * p.Age + p.Seed1)) * dt, fieldW);
-			p.Y = WrapCoord(p.Y + (p.VY + ov.WindY + ov.Turbulence * std::sin(w * p.Age + p.Seed2)) * dt, fieldH);
+			p.EVX = p.VX + ov.WindX + ov.Turbulence * std::sin(w * p.Age + p.Seed1); // vitesse effective (stretch=)
+			p.EVY = p.VY + ov.WindY + ov.Turbulence * std::sin(w * p.Age + p.Seed2);
+			p.X = WrapCoord(p.X + p.EVX * dt, fieldW);
+			p.Y = WrapCoord(p.Y + p.EVY * dt, fieldH);
 			p.Rot += p.Spin * dt;
 			k++;
 		}
@@ -1676,7 +1682,15 @@ void HdNesPack<scale>::ProcessOverlaysLayout(uint32_t* outputBuffer, uint32_t sc
 			const float tintR = channel(16), tintG = channel(8), tintB = channel(0);
 
 			// Rayon en pixels NES, pour le repliement sur le champ (copies visibles)
-			const float radiusNes = hasTex ? std::max(texW, texH) * sizeMul * 0.5f / fScale : ov.DotSize * sizeMul * 0.5f;
+			// stretch= : trainee dans le sens du mouvement (longueur = vitesse x stretch, en pixels HD), la tete reste sur la particule
+			float sUx = 0.0f, sUy = 0.0f, sL = 0.0f;
+			if(ov.Stretch > 0.0f) {
+				const float vl = std::sqrt(p.EVX * p.EVX + p.EVY * p.EVY);
+				sL = vl * ov.Stretch * fScale;
+				if(sL > 0.5f) { sUx = p.EVX / vl; sUy = p.EVY / vl; } else sL = 0.0f;
+			}
+			const bool strk = sL > 0.0f;
+			const float radiusNes = (hasTex ? std::max(texW, texH) * sizeMul * 0.5f / fScale : ov.DotSize * sizeMul * 0.5f) + sL / fScale;
 			const float margin = radiusNes + 1.0f;
 			const float px0 = WrapCoord(p.X - ov.OffsetX, fieldW);
 			const float py0 = WrapCoord(p.Y - ov.OffsetY, fieldH);
@@ -1693,17 +1707,17 @@ void HdNesPack<scale>::ProcessOverlaysLayout(uint32_t* outputBuffer, uint32_t sc
 					}
 
 					// Centre en pixels HD de la sortie
-					const float cxH = (cx - originNes) * fScale;
-					const float cyH = (cy - (float)yStart) * fScale;
+					const float cxH = (cx - originNes) * fScale - sUx * sL * 0.5f;
+					const float cyH = (cy - (float)yStart) * fScale - sUy * sL * 0.5f;
 
 					if(hasTex) {
 						const float halfExt = std::max(texW, texH) * sizeMul * 0.5f;
-						const float reach = halfExt * 1.5f; // marge pour la rotation
+						const float reach = (halfExt + sL * 0.5f) * 1.5f; // marge pour la rotation / la trainee
 						const int xa = std::max(0, (int)std::floor(cxH - reach));
 						const int xb = std::min((int)screenWidth - 1, (int)std::ceil(cxH + reach));
 						const int ya = std::max(0, (int)std::floor(cyH - reach));
 						const int yb = std::min(hdHeight - 1, (int)std::ceil(cyH + reach));
-						const float cosR = std::cos(p.Rot), sinR = std::sin(p.Rot);
+						const float cosR = strk ? sUy : std::cos(p.Rot), sinR = strk ? -sUx : std::sin(p.Rot); // trainee : axe v de la texture = mouvement
 						for(int sy = ya; sy <= yb; sy++) {
 							for(int sx = xa; sx <= xb; sx++) {
 								// Transformation inverse : pixel de sortie -> pixel de la texture
@@ -1711,7 +1725,7 @@ void HdNesPack<scale>::ProcessOverlaysLayout(uint32_t* outputBuffer, uint32_t sc
 								const float lx = dx * cosR + dy * sinR;
 								const float ly = -dx * sinR + dy * cosR;
 								const float u = lx / sizeMul + texW * 0.5f;
-								const float v = ly / sizeMul + texH * 0.5f;
+								const float v = (strk ? ly * texH * sizeMul / (texH * sizeMul + sL) : ly) / sizeMul + texH * 0.5f;
 								if(u < 0.0f || v < 0.0f || u >= texW || v >= texH) {
 									continue;
 								}
@@ -1729,14 +1743,16 @@ void HdNesPack<scale>::ProcessOverlaysLayout(uint32_t* outputBuffer, uint32_t sc
 					} else {
 						// Point doux : alpha lineaire du centre vers le bord
 						const float rHD = std::max(0.01f, ov.DotSize * sizeMul * 0.5f * fScale);
-						const int xa = std::max(0, (int)std::floor(cxH - rHD));
-						const int xb = std::min((int)screenWidth - 1, (int)std::ceil(cxH + rHD));
-						const int ya = std::max(0, (int)std::floor(cyH - rHD));
-						const int yb = std::min(hdHeight - 1, (int)std::ceil(cyH + rHD));
+						const int xa = std::max(0, (int)std::floor(cxH - (rHD + sL * 0.5f)));
+						const int xb = std::min((int)screenWidth - 1, (int)std::ceil(cxH + (rHD + sL * 0.5f)));
+						const int ya = std::max(0, (int)std::floor(cyH - (rHD + sL * 0.5f)));
+						const int yb = std::min(hdHeight - 1, (int)std::ceil(cyH + (rHD + sL * 0.5f)));
 						for(int sy = ya; sy <= yb; sy++) {
 							for(int sx = xa; sx <= xb; sx++) {
 								const float dx = (float)sx + 0.5f - cxH, dy = (float)sy + 0.5f - cyH;
-								const float d = std::sqrt(dx * dx + dy * dy) / rHD;
+								float qx = dx, qy = dy;
+								if(strk) { qx = dx * sUy - dy * sUx; qy = std::max(0.0f, std::fabs(dx * sUx + dy * sUy) - sL * 0.5f); } // capsule
+								const float d = std::sqrt(qx * qx + qy * qy) / rHD;
 								if(d >= 1.0f) {
 									continue;
 								}
@@ -2348,6 +2364,7 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 
 	if(!_hdData->Tile2ObjRules.empty()) DetectTile2Obj(); else if(!_dioT2oRules.empty() || !_dioT2oHide.empty()) { _dioT2oRules.clear(); _dioT2oHide.clear(); }
 	if(!_hdData->Sprite2ObjRules.empty()) DetectSprite2Obj(); else _s2oMask.clear(); // apres Tile2Obj : ajoute ses instances
+	if(!_hdData->WorldObjRules.empty()) DetectWorldObj(); // <DioramaObject> anchor=bgN : ajoute ses instances
 	lap(1);
 	//Passe 2 (parallele) : dessin. Chaque ligne NES ecrit ses propres lignes HD, sans recouvrement.
 	auto drawLine = [&](uint32_t i) {
@@ -2754,7 +2771,7 @@ void HdNesPack<scale>::DetectTile2Obj()
 				o.Y = (float)(y + 8 * gh) - r.Elevation;
 				o.Z = 0.0f;
 				o.Scale = r.Scale; o.RotY = r.RotY; o.RotX = r.RotX; o.RotZ = r.RotZ; o.Radius = r.Radius;
-				o.FromTile2Obj = true; o.BottomY = (float)(y + 8 * gh); o.Elevation = r.Elevation; o.CastShadow = r.CastShadow;
+				o.FromTile2Obj = true; o.BottomY = (float)(y + 8 * gh); o.Elevation = r.Elevation; o.CastShadow = r.CastShadow; o.Lit = r.Lit; o.Bright = r.Bright;
 				_dioT2oRules.push_back(o);
 				}
 			}
@@ -2824,15 +2841,8 @@ void HdNesPack<scale>::DetectSprite2Obj()
 				// glTF anime : palette d'os au temps du personnage (id=), puis sommets deformes dans un tampon propre a la silhouette
 				const bool animated = r.Gltf && r.AnimIndex >= 0 && r.PartTris.size() == r.Parts.size();
 				if(animated) {
-					float animT = r.AnimTime; // animtime= : pose figee, le temps du personnage reste tel quel (reprise sans saut)
-					if(animT < 0.0f) {
-						const string key = r.Id.empty() ? ("#" + std::to_string(ri)) : r.Id;
-						auto& st = _s2oTime[key];
-						if(st.first != frame) { st.second += r.AnimSpeed * (float)std::min<uint32_t>(frame - st.first, 4u) / 60.0f; st.first = frame; }
-						animT = st.second;
-					}
-					const SnesHdModelRig* rig = r.Gltf->Rig.get();
-					if(rig) rig->Evaluate(r.AnimIndex, animT, _s2oPal); else _s2oPal.clear();
+					// temps du clip par personnage (id=) et fondu entre clips (blend=)
+					S2oPose(r.Id.empty() ? ("#" + std::to_string(ri)) : r.Id, r, frame);
 					_s2oVersion++;
 				}
 				for(size_t pi = 0; pi < r.Parts.size(); pi++) { // une instance par materiau
@@ -2849,7 +2859,7 @@ void HdNesPack<scale>::DetectSprite2Obj()
 					o.Y = foot - r.Elevation;
 					o.Z = _hdData->Diorama.Z[3]; // vue side : plan des sprites (L3)
 					o.Scale = r.Scale; o.RotY = r.RotY; o.RotX = r.RotX; o.RotZ = r.RotZ; o.Radius = r.Radius;
-					o.FromTile2Obj = true; o.BottomY = foot; o.Elevation = r.Elevation; o.CastShadow = r.CastShadow;
+					o.FromTile2Obj = true; o.BottomY = foot; o.Elevation = r.Elevation; o.CastShadow = r.CastShadow; o.Lit = r.Lit; o.Bright = r.Bright;
 					o.MirrorX = r.Facing && nH * 2 > nMatch;
 					o.MirrorY = r.Facing && nV * 2 > nMatch;
 					if(o.MirrorY) { // retourne en haut / bas : le modele pend sous son origine, qui passe en haut de la silhouette
@@ -2861,6 +2871,118 @@ void HdNesPack<scale>::DetectSprite2Obj()
 				inst++;
 			}
 		}
+	}
+}
+
+// <DioramaObject>...,anchor=bgN : objet du monde. Position = pixel NES du PNG du fond de priorite N moins le defilement de ce fond
+// a cette image (ligne 120) ; hauteur de base = surface ou le fond est dessine (sol, ou dessus du groupe dio=gK), ou base=.
+template<uint32_t scale>
+void HdNesPack<scale>::DetectWorldObj()
+{
+	if(!_hdScreenInfo) return;
+	HdBgConfig cfg[5 * HdNesPack::PriorityLevelsPerLayer];
+	ComputeLineBgConfig(_hdScreenInfo->ScreenTiles[120 << 8], 120, cfg);
+	const uint32_t frame = _hdScreenInfo->FrameNumber;
+	for(size_t ri = 0; ri < _hdData->WorldObjRules.size(); ri++) {
+		const HdDioramaTile2ObjRule& r = _hdData->WorldObjRules[ri];
+		if(r.Parts.empty()) continue;
+		bool ok = true;
+		for(HdPackCondition* c : r.Conditions) {
+			if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; }
+		}
+		if(!ok) continue;
+		const HdBgConfig* bc = nullptr; const HdBackgroundInfo* bi = nullptr;
+		for(int layer = 0; layer < 5 && !bc; layer++) {
+			for(int i = 0; i < _activeBgCount[layer]; i++) {
+				const HdBgConfig& c = cfg[layer * HdNesPack::PriorityLevelsPerLayer + i];
+				if(c.BackgroundIndex < 0) continue;
+				const HdBackgroundInfo& b = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
+				if((int)b.Priority == r.AnchorPrio) { bc = &c; bi = &b; break; }
+			}
+		}
+		const bool diag = r.Debug && (frame % 120) == 0; // debug=on : [HD-WORLDOBJ] toutes les 2 secondes (outil de placement)
+		if(!bc) {
+			if(diag) MessageManager::Log("[HD-WORLDOBJ] objet " + std::to_string(ri + 1) + " : fond bg" + std::to_string(r.AnchorPrio) + " inactif a cette image");
+			continue; // fond d'ancrage inactif a cette image : objet absent
+		}
+		const float sx = r.WX - ((float)bi->Left + (float)bc->BgScrollX);
+		const float sy = r.WY - ((float)bi->Top + (float)bc->BgScrollY);
+		if(diag) {
+			const float cx = (float)bi->Left + (float)bc->BgScrollX + 128.0f, cy = (float)bi->Top + (float)bc->BgScrollY + 120.0f;
+			char b[256];
+			snprintf(b, sizeof(b), "[HD-WORLDOBJ] objet %d : centre de l'ecran = x=%.0f,y=%.0f (PNG NES ; HD %.0f,%.0f) ; objet x=%.0f,y=%.0f -> ecran %.0f,%.0f%s",
+				(int)ri + 1, cx, cy, cx * (float)scale, cy * (float)scale, r.WX, r.WY, sx, sy, (sx >= 0 && sx < 256 && sy >= 0 && sy < 240) ? " (a l'ecran)" : " (hors ecran)");
+			MessageManager::Log(b);
+		}
+		const float m = 256.0f + r.Radius + (_dioFloorMargin > 0.0f ? _dioFloorMargin : 0.0f);
+		if(sx < -m || sx > 256.0f + m || sy < -m || sy > 240.0f + m) continue; // loin de l'ecran
+		float base = 0.0f;
+		auto groupTop = [&](int g) { return (g >= 0 && (size_t)g < _hdData->DioramaDepthGroups.size()) ? _hdData->DioramaDepthGroups[g].Z + _hdData->DioramaDepthGroups[g].T * 8.0f : 0.0f; };
+		if(r.BaseMode == -1) base = bi->DioTarget >= 4 ? groupTop(bi->DioTarget - 4) : 0.0f;
+		else if(r.BaseMode == 1) base = groupTop(r.BaseGroup);
+		else if(r.BaseMode == 2) base = r.BaseZ;
+		const bool animated = r.Gltf && r.AnimIndex >= 0 && r.PartTris.size() == r.Parts.size();
+		if(animated) {
+			// temps du clip par personnage (id=) et fondu entre clips (blend=)
+			S2oPose(r.Id.empty() ? ("#w" + std::to_string(ri)) : r.Id, r, frame);
+			_s2oVersion++;
+		}
+		for(size_t pi = 0; pi < r.Parts.size(); pi++) {
+			const HdDioramaTile2ObjPart& part = r.Parts[pi];
+			HdDioramaObjectRule o;
+			o.Mesh = part.Mesh; o.Tex = part.Tex; o.Color = r.Color;
+			if(animated) {
+				std::shared_ptr<vector<float>>& buf = _s2oBuf[((uint64_t)(0x8000u + ri) << 32) | (uint64_t)pi];
+				if(!buf) buf = std::make_shared<vector<float>>();
+				HdGltfSkinPart(*r.Gltf, r.PartTris[pi], &_s2oPal, *buf);
+				o.Mesh = buf; o.MeshVersion = _s2oVersion;
+			}
+			const float elev = base + r.Elevation;
+			o.X = sx; o.Y = sy - elev; o.Z = 0.0f;
+			o.Scale = r.Scale; o.RotY = r.RotY; o.RotX = r.RotX; o.RotZ = r.RotZ; o.Radius = r.Radius;
+			o.FromTile2Obj = true; o.BottomY = sy; o.Elevation = elev; o.CastShadow = r.CastShadow; o.Lit = r.Lit; o.Bright = r.Bright;
+			_dioT2oRules.push_back(o);
+		}
+	}
+}
+
+// <Sprite2Obj> / objet du monde glTF anime : pose du personnage (id=) dans _s2oPal.
+// Le temps du clip avance a animspeed= (fige avec animtime=). Quand le personnage change de clip (autre anim= ou animtime=),
+// l'ancienne pose se fond dans la nouvelle pendant blend= secondes (defaut 0.2), l'ancien clip continuant de jouer pendant le fondu.
+template<uint32_t scale>
+void HdNesPack<scale>::S2oPose(const std::string& key, const HdDioramaTile2ObjRule& r, uint32_t frame)
+{
+	const SnesHdModelRig* rig = r.Gltf ? r.Gltf->Rig.get() : nullptr;
+	if(!rig) { _s2oPal.clear(); return; }
+	S2oAnimState& st = _s2oTime[key];
+	if(!st.Has || st.Frame != frame) {
+		const float dt = st.Has ? (float)std::min<uint32_t>(frame - st.Frame, 4u) / 60.0f : 0.0f;
+		const void* model = r.Gltf.get();
+		const bool changed = st.Has && (st.Model != model || st.Anim != r.AnimIndex || st.Frozen != r.AnimTime);
+		if(changed) {
+			const float dur = r.Blend >= 0.0f ? r.Blend : 0.2f;
+			if(st.Model == model && dur > 0.0f) {
+				// le clip quitte devient le clip "precedent" (au milieu d'un fondu : on repart de celui en cours)
+				st.PrevAnim = st.Anim; st.PrevTime = st.Time; st.PrevFrozen = st.Frozen; st.PrevSpeed = st.Speed;
+				st.BlendDur = dur; st.BlendLeft = dur;
+			} else {
+				st.BlendLeft = 0.0f; // autre modele : coupure (squelettes differents)
+			}
+		}
+		if(st.BlendLeft > 0.0f) {
+			st.BlendLeft -= dt;
+			if(st.PrevFrozen < 0.0f) st.PrevTime += st.PrevSpeed * dt;
+		}
+		if(r.AnimTime < 0.0f) st.Time += r.AnimSpeed * dt; // animtime= : le temps du personnage n'avance pas (reprise sans saut)
+		st.Has = true; st.Frame = frame; st.Model = model; st.Anim = r.AnimIndex; st.Frozen = r.AnimTime; st.Speed = r.AnimSpeed;
+	}
+	const float curT = r.AnimTime >= 0.0f ? r.AnimTime : st.Time;
+	if(st.BlendLeft > 0.0f && st.BlendDur > 0.0f) {
+		const float w = 1.0f - st.BlendLeft / st.BlendDur;
+		const float prevT = st.PrevFrozen >= 0.0f ? st.PrevFrozen : st.PrevTime;
+		rig->EvaluateBlend(st.PrevAnim, prevT, r.AnimIndex, curT, w, _s2oPal);
+	} else {
+		rig->Evaluate(r.AnimIndex, curT, _s2oPal);
 	}
 }
 
@@ -3672,7 +3794,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			if(r.Texture->PixelData.size() < (size_t)r.Texture->Width * r.Texture->Height || bp.CtN >= 4) continue;
 			HdDioramaColorTex& ct = bp.Ct[bp.CtN++];
 			ct.Pix = r.Texture->PixelData.data(); ct.W = r.Texture->Width; ct.H = r.Texture->Height;
-			ct.HasKey = r.HasKey; ct.Key = r.Key;
+			ct.HasKey = r.HasKey; ct.Key = r.Key; ct.Tol = (float)r.Tolerance;
 			ct.TexelX = r.TexelPerPxX; ct.TexelY = r.TexelPerPxY;
 			if(r.Mat && r.MatW > 0 && r.MatH > 0) { ct.MatPix = r.Mat->data(); ct.MatW = r.MatW; ct.MatH = r.MatH; ct.NStrength = r.NStrength; ct.AoStrength = r.AoStrength; ct.Specular = r.Specular; }
 			{ // eau : la normale defile (pixels NES par seconde -> fraction de la texture), seconde couche a une autre echelle
@@ -3928,6 +4050,248 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 	}
 	// H1 : objets 3D de decor (doc 45) : regles <DioramaObject> dont la condition est vraie (8 au plus)
 	scene.Objects.Count = 0;
+	// <DioramaFog> (doc 54) : derniere regle vraie ; valeurs absentes = defaut de la vue (topDown : brouillard vers l'horizon ; side : voile leger sur les plans du fond)
+	// <3DParticles> (diorama NES) : simulation SNES (boite torique autour de la camera), defauts selon la vue, puis positions scene pour le GPU.
+	// topDown : X / Y = carte, Z = hauteur ; side : X = carte, Y = profondeur (depthmin..depthmax), Z = hauteur depuis le bas de l'ecran.
+	if(!_hdData->Diorama3DParticles.empty()) {
+		if(_p3State.size() != _hdData->Diorama3DParticles.size()) _p3State.assign(_hdData->Diorama3DParticles.size(), P3State());
+		const float dt = 1.0f / 60.0f, kPi = 3.14159265f;
+		for(size_t pi = 0; pi < _hdData->Diorama3DParticles.size() && scene.P3Count < 4; pi++) {
+			const HdDiorama3DParticlesRule& R = _hdData->Diorama3DParticles[pi];
+			bool ok = true;
+			for(HdPackCondition* c : R.Conditions) { if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; } }
+			if(!ok) continue; // effet fige
+			P3State& st = _p3State[pi];
+			const bool td = _dioTopDown;
+			if(st.Init && st.TopDown != td) st.Init = false; // changement de vue : nouvelle boite
+			st.TopDown = td;
+			// defauts selon la vue (cle absente)
+			const float B = R.HasBoxSize ? R.BoxSize : (td ? 384.0f : 320.0f);
+			const float BH = td ? (R.HasBoxHeight ? R.BoxHeight : 96.0f) : scene.H + 32.0f;
+			const float ahead = R.HasBoxAhead ? R.BoxAhead : (td ? 0.25f : 0.0f);
+			const float fallMin = R.HasFall ? R.FallMin : (td ? 20.0f : 30.0f), fallMax = R.HasFall ? R.FallMax : (td ? 40.0f : 60.0f);
+			const float dMin = R.DepthMin, dMax = R.DepthMax, DB = dMax - dMin;
+			// repere : position monde du point (0, ligne 0) de la scene
+			float ox = 0.0f, oy = 0.0f; bool found = false;
+			if(R.Anchor >= 0 && hdScreenInfo) {
+				HdBgConfig cfgL[5 * HdNesPack::PriorityLevelsPerLayer];
+				ComputeLineBgConfig(hdScreenInfo->ScreenTiles[120 << 8], 120, cfgL);
+				for(int layer = 0; layer < 5 && !found; layer++) {
+					for(int i = 0; i < _activeBgCount[layer]; i++) {
+						const HdBgConfig& c = cfgL[layer * HdNesPack::PriorityLevelsPerLayer + i];
+						if(c.BackgroundIndex < 0) continue;
+						const HdBackgroundInfo& b = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
+						if((int)b.Priority == R.Anchor) { ox = (float)b.Left + (float)c.BgScrollX; oy = (float)b.Top + (float)c.BgScrollY; found = true; break; }
+					}
+				}
+			}
+			if(!found && _dioGpuBgN > 0) { ox = _dioGpuBg[0].OffX / (float)GetScale(); oy = _dioGpuBg[0].OffY / (float)GetScale(); found = true; }
+			if(!found && hdScreenInfo) { const HdPpuPixelInfo& lp = hdScreenInfo->ScreenTiles[120 << 8]; ox = (float)NesLineScrollX(lp); oy = (float)NesLineScrollY(lp); }
+			oy += (float)yStart;
+			const float cX = ox + scene.W * 0.5f;
+			const float cY = td ? oy + scene.H * 0.5f - B * ahead : dMin + DB * 0.5f;
+			const float BY = td ? B : DB; // taille de la boite sur le second axe (carte en topDown, profondeur en side)
+			auto rnd = [&]() { st.Rng ^= st.Rng << 13; st.Rng ^= st.Rng >> 17; st.Rng ^= st.Rng << 5; return (float)(st.Rng & 0xFFFFFF) / 16777216.0f; };
+			auto rr = [&](float a, float b) { return a + (b - a) * rnd(); };
+			auto spawn = [&](bool anyHeight) {
+				P3Part p;
+				p.X = cX + (rnd() - 0.5f) * B; p.Y = cY + (rnd() - 0.5f) * BY;
+				const float fall = rr(fallMin, fallMax);
+				p.Z = anyHeight ? rnd() * BH : (fall >= 0 ? BH : 0.0f);
+				const float ang = rnd() * 2.0f * kPi, dr = rr(R.DriftMin, R.DriftMax);
+				p.VX = std::cos(ang) * dr; p.VY = td ? std::sin(ang) * dr : 0.0f; p.VZ = -fall;
+				p.Life = R.LifeMax > 0 ? std::max(0.05f, rr(R.LifeMin, R.LifeMax)) : 0.0f;
+				p.Age = (anyHeight && p.Life > 0) ? rnd() * p.Life : 0.0f;
+				p.Size = 1.0f + R.SizeRandom * (rnd() * 2.0f - 1.0f);
+				p.Seed1 = rnd() * 2.0f * kPi; p.Seed2 = rnd() * 2.0f * kPi;
+				st.Parts.push_back(p);
+			};
+			auto step = [&]() {
+				st.Time += dt;
+				if(R.Rate > 0) { st.SpawnAcc += R.Rate * dt; while(st.SpawnAcc >= 1.0f) { st.SpawnAcc -= 1.0f; if((int)st.Parts.size() < R.MaxParticles) spawn(false); } }
+				else { while((int)st.Parts.size() < R.MaxParticles) spawn(false); }
+				const float tw = 2.0f * kPi * R.TurbulenceFreq;
+				for(size_t k = 0; k < st.Parts.size();) {
+					P3Part& p = st.Parts[k];
+					bool dead = false;
+					if(p.Life > 0) { p.Age += dt; dead = p.Age >= p.Life; }
+					if(!dead) {
+						p.VZ -= R.Gravity * dt;
+						float tx = 0, ty = 0;
+						if(R.Turbulence != 0.0f) { tx = R.Turbulence * std::sin(tw * st.Time + p.Seed1); ty = R.Turbulence * std::cos(tw * 0.73f * st.Time + p.Seed2); }
+						p.EVX = p.VX + R.WindX + tx; p.EVY = p.VY + (td ? R.WindY + ty : 0.0f);
+						p.X += p.EVX * dt;
+						p.Y += p.EVY * dt;
+						p.Z += p.VZ * dt;
+						if(p.Z <= 0.0f) { if(R.GroundRespawn) p.Z += BH; else dead = true; }
+						else if(p.Z > BH) p.Z -= BH;
+						float rx = p.X - cX; rx -= B * std::floor(rx / B + 0.5f); p.X = cX + rx;
+						float ry = p.Y - cY; ry -= BY * std::floor(ry / BY + 0.5f); p.Y = cY + ry;
+					}
+					if(dead) { p = st.Parts.back(); st.Parts.pop_back(); continue; }
+					k++;
+				}
+			};
+			if(!st.Init) {
+				st.Init = true; st.Parts.clear(); st.Time = 0; st.SpawnAcc = 0;
+				st.Rng ^= (uint32_t)(pi + 1) * 2654435761u;
+				if(R.Rate <= 0) { while((int)st.Parts.size() < R.MaxParticles) spawn(true); }
+				else { const int steps = (int)std::min(R.LifeMax > 0 ? R.LifeMax * 60.0f : 300.0f, 600.0f); for(int s = 0; s < steps; s++) step(); }
+			}
+			step();
+			// sortie : position scene centree (comme les objets) + taille + couleur / alpha
+			const uint32_t cnt = (uint32_t)st.Parts.size();
+			const uint32_t rows = (cnt + 255) / 256;
+			vector<float>& out = _p3Out[scene.P3Count];
+			out.assign((size_t)rows * 768 * 4, 0.0f); // 3 texels RGBA32F par particule, 256 particules par ligne
+			for(uint32_t k = 0; k < cnt; k++) {
+				const P3Part& p = st.Parts[k];
+				const float t = p.Life > 0 ? p.Age / p.Life : 0.0f;
+				float a = R.AlphaStart + (R.AlphaEnd - R.AlphaStart) * t;
+				if(p.Life > 0) {
+					if(R.FadeIn > 0 && t < R.FadeIn) a *= t / R.FadeIn;
+					if(R.FadeOut > 0 && t > 1.0f - R.FadeOut) a *= (1.0f - t) / R.FadeOut;
+				}
+				const float rb = std::max(std::fabs(p.X - cX) / (B * 0.5f), std::fabs(p.Y - cY) / (BY * 0.5f));
+				if(R.FarFade > 0 && rb > 1.0f - R.FarFade) a *= std::max(0.0f, (1.0f - rb) / R.FarFade);
+				a *= R.Alpha;
+				float x, y, z, pk = 1.0f, sx, sy, sz; // pk : facteur de perspective (side) ; s* : trainee (stretch=) dans le repere scene
+				if(td) { x = p.X - ox - scene.W * 0.5f; y = -p.Z; z = scene.H * 0.5f - (p.Y - oy); sx = p.EVX; sy = -p.VZ; sz = -p.EVY; }
+				else { z = p.Y; pk = (scene.D + z) / scene.D; x = (p.X - ox - scene.W * 0.5f) * pk; y = (scene.H * 0.5f + 16.0f - p.Z) * pk; sx = p.EVX * pk; sy = -p.VZ * pk; sz = 0.0f; }
+				const float size = p.Size * (R.SizeStart + (R.SizeEnd - R.SizeStart) * t) * pk;
+				auto lerpC = [&](int sh) { const float c0 = (float)((R.ColorStart >> sh) & 0xFF), c1 = (float)((R.ColorEnd >> sh) & 0xFF); return (c0 + (c1 - c0) * t) / 255.0f; };
+				float* o = &out[(size_t)k * 12];
+				o[0] = x; o[1] = y; o[2] = z; o[3] = size; o[4] = lerpC(16); o[5] = lerpC(8); o[6] = lerpC(0); o[7] = std::clamp(a, 0.0f, 1.0f);
+				o[8] = sx * R.Stretch; o[9] = sy * R.Stretch; o[10] = sz * R.Stretch; o[11] = 0.0f;
+			}
+			HdDioramaP3Batch& b = scene.P3[scene.P3Count++];
+			b.Data = out.data(); b.Count = cnt; b.Additive = R.Additive; b.MinPx = R.MinPixelSize;
+			if(R.Texture) {
+				R.Texture->Init();
+				if(R.Texture->Width > 0 && R.Texture->Height > 0 && R.Texture->PixelData.size() >= (size_t)R.Texture->Width * R.Texture->Height) {
+					b.TexPix = R.Texture->PixelData.data(); b.TexW = R.Texture->Width; b.TexH = R.Texture->Height;
+				}
+			}
+		}
+	}
+	// <DioramaMist> (doc 54) : nappes de brume ; derniere regle vraie ; repere comme <DioramaClouds> ; chaque nappe derive un peu plus vite (parallaxe)
+	if(!_hdData->DioramaMistRules.empty()) {
+		const HdDioramaMistRule* mr = nullptr;
+		for(const HdDioramaMistRule& r : _hdData->DioramaMistRules) {
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) { if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; } }
+			if(ok) mr = &r;
+		}
+		if(mr && !mr->Off) {
+			auto& M = scene.Mist;
+			const bool td = _dioTopDown;
+			M.Active = true;
+			M.Count = mr->HasCount ? mr->Count : (td ? 3 : 2);
+			M.From = mr->HasFrom ? mr->From : (td ? 4.0f : 120.0f);
+			M.To = mr->HasTo ? mr->To : (td ? 28.0f : 30.0f);
+			M.Opacity = mr->HasOpacity ? mr->Opacity : (td ? 0.3f : 0.25f);
+			M.Size = mr->HasSize ? mr->Size : (td ? 72.0f : 96.0f);
+			M.Coverage = mr->HasCoverage ? mr->Coverage : 0.55f;
+			M.Soft = mr->HasSoft ? mr->Soft : 0.3f;
+			M.Band = mr->HasBand ? mr->Band : 72.0f;
+			M.Seed = mr->Seed;
+			const uint32_t col = mr->HasColor ? mr->Color : 0xE0E8F0u;
+			M.Col[0] = ((col >> 16) & 0xFF) / 255.0f; M.Col[1] = ((col >> 8) & 0xFF) / 255.0f; M.Col[2] = (col & 0xFF) / 255.0f;
+			const float speed = mr->HasSpeed ? mr->Speed : (td ? 6.0f : 8.0f);
+			const float dir = (mr->HasDir ? mr->Dir : (td ? 30.0f : 0.0f)) * 0.017453292f;
+			float ox = 0.0f, oy = 0.0f; bool found = false;
+			if(mr->Anchor >= 0 && hdScreenInfo) {
+				HdBgConfig cfgL[5 * HdNesPack::PriorityLevelsPerLayer];
+				ComputeLineBgConfig(hdScreenInfo->ScreenTiles[120 << 8], 120, cfgL);
+				for(int layer = 0; layer < 5 && !found; layer++) {
+					for(int i = 0; i < _activeBgCount[layer]; i++) {
+						const HdBgConfig& c = cfgL[layer * HdNesPack::PriorityLevelsPerLayer + i];
+						if(c.BackgroundIndex < 0) continue;
+						const HdBackgroundInfo& b = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
+						if((int)b.Priority == mr->Anchor) { ox = (float)b.Left + (float)c.BgScrollX; oy = (float)b.Top + (float)c.BgScrollY; found = true; break; }
+					}
+				}
+			}
+			if(!found && _dioGpuBgN > 0) { ox = _dioGpuBg[0].OffX / (float)GetScale(); oy = _dioGpuBg[0].OffY / (float)GetScale(); found = true; }
+			if(!found && hdScreenInfo) { const HdPpuPixelInfo& lp = hdScreenInfo->ScreenTiles[120 << 8]; ox = (float)NesLineScrollX(lp); oy = (float)NesLineScrollY(lp); }
+			const float tSec = hdScreenInfo ? (float)hdScreenInfo->FrameNumber / 60.0f : 0.0f;
+			for(int i = 0; i < M.Count && i < 8; i++) {
+				const float k = 1.0f + 0.25f * (float)i; // nappes du haut un peu plus rapides
+				M.OffX[i] = ox - std::cos(dir) * speed * k * tSec + 37.0f * (float)i;
+				M.OffY[i] = oy + (float)yStart - std::sin(dir) * speed * k * tSec + 53.0f * (float)i;
+			}
+		}
+	}
+	// <DioramaClouds> (doc 54) : derniere regle vraie par type ; repere : fond d'ancrage, sinon fond de sol GPU, sinon scroll PPU (ligne 120)
+	if(!_hdData->DioramaCloudRules.empty()) {
+		const HdDioramaCloudRule* cr[2] = { nullptr, nullptr };
+		for(const HdDioramaCloudRule& r : _hdData->DioramaCloudRules) {
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) { if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; } }
+			if(ok) cr[r.Type & 1] = &r;
+		}
+		const float tSec = hdScreenInfo ? (float)hdScreenInfo->FrameNumber / 60.0f : 0.0f;
+		for(int k = 0; k < 2; k++) {
+			const HdDioramaCloudRule* r = cr[k];
+			if(!r || r->Off) continue;
+			auto& C = scene.Cloud[k];
+			C.Active = true;
+			const bool td = _dioTopDown;
+			C.Size = r->HasSize ? r->Size : (k == 0 ? (td ? 96.0f : 64.0f) : (td ? 64.0f : 48.0f));
+			const float speed = r->HasSpeed ? r->Speed : (k == 0 ? 10.0f : 4.0f);
+			const float dir = (r->HasDir ? r->Dir : (td ? 30.0f : 0.0f)) * 0.017453292f;
+			C.Coverage = r->HasCoverage ? r->Coverage : (k == 0 ? 0.45f : 0.5f);
+			C.Soft = r->HasSoft ? r->Soft : (k == 0 ? 0.12f : 0.25f);
+			C.Opacity = r->HasOpacity ? r->Opacity : (k == 0 ? (td ? 0.35f : 0.25f) : (td ? 0.55f : 0.35f));
+			C.GroundH = r->HasGroundH ? r->GroundH : 16.0f;
+			C.Seed = r->Seed;
+			const uint32_t col = r->HasColor ? r->Color : (k == 0 ? 0x101828u : 0xC8D4E0u);
+			C.Col[0] = ((col >> 16) & 0xFF) / 255.0f; C.Col[1] = ((col >> 8) & 0xFF) / 255.0f; C.Col[2] = (col & 0xFF) / 255.0f;
+			// repere du monde : position (pixels NES) du point de l'ecran (0, ligne 0 de la scene)
+			float ox = 0.0f, oy = 0.0f;
+			bool found = false;
+			if(r->Anchor >= 0 && hdScreenInfo) {
+				HdBgConfig cfgL[5 * HdNesPack::PriorityLevelsPerLayer];
+				ComputeLineBgConfig(hdScreenInfo->ScreenTiles[120 << 8], 120, cfgL);
+				for(int layer = 0; layer < 5 && !found; layer++) {
+					for(int i = 0; i < _activeBgCount[layer]; i++) {
+						const HdBgConfig& c = cfgL[layer * HdNesPack::PriorityLevelsPerLayer + i];
+						if(c.BackgroundIndex < 0) continue;
+						const HdBackgroundInfo& b = _hdData->BackgroundsByPriority[c.BgPriority][c.BackgroundIndex];
+						if((int)b.Priority == r->Anchor) { ox = (float)b.Left + (float)c.BgScrollX; oy = (float)b.Top + (float)c.BgScrollY; found = true; break; }
+					}
+				}
+			}
+			if(!found && _dioGpuBgN > 0) { ox = _dioGpuBg[0].OffX / (float)GetScale(); oy = _dioGpuBg[0].OffY / (float)GetScale(); found = true; }
+			if(!found && hdScreenInfo) { const HdPpuPixelInfo& lp = hdScreenInfo->ScreenTiles[120 << 8]; ox = (float)NesLineScrollX(lp); oy = (float)NesLineScrollY(lp); }
+			C.OffX = ox - std::cos(dir) * speed * tSec;
+			C.OffY = oy + (float)yStart - std::sin(dir) * speed * tSec;
+		}
+	}
+	if(!_hdData->DioramaFogRules.empty()) {
+		const HdDioramaFogRule* fr = nullptr;
+		for(const HdDioramaFogRule& r : _hdData->DioramaFogRules) {
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) { if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; } }
+			if(ok) fr = &r;
+		}
+		if(fr && !fr->Off) {
+			auto& F = scene.Fog;
+			F.Active = true;
+			F.Start = fr->HasStart ? fr->Start : (_dioTopDown ? -20.0f : 150.0f); // topDown pitch 55 : bas de l'ecran ~ -70, haut ~ +70
+			F.End = fr->HasEnd ? fr->End : (_dioTopDown ? 200.0f : 500.0f);
+			if(F.End <= F.Start + 1.0f) F.End = F.Start + 1.0f;
+			F.Opacity = fr->HasOpacity ? fr->Opacity : (_dioTopDown ? 0.7f : 0.45f);
+			F.Ground = fr->HasGround ? fr->Ground : 0.0f;
+			F.GroundH = fr->HasGroundH ? fr->GroundH : 16.0f;
+			const bool skyCol = (fr->HasColor ? fr->ColorSky : true) && scene.Sky.Mode == 1; // defaut : bas du ciel en degrade
+			if(skyCol) { F.Col[0] = scene.Sky.Bottom[0]; F.Col[1] = scene.Sky.Bottom[1]; F.Col[2] = scene.Sky.Bottom[2]; }
+			else {
+				const uint32_t c = (fr->HasColor && !fr->ColorSky) ? fr->Color : (_dioTopDown ? 0xC8D4E0u : 0xA8B8C8u);
+				F.Col[0] = ((c >> 16) & 0xFF) / 255.0f; F.Col[1] = ((c >> 8) & 0xFF) / 255.0f; F.Col[2] = (c & 0xFF) / 255.0f;
+			}
+		}
+	}
 	if(!_hdData->DioramaObjectRules.empty() || !_dioT2oRules.empty()) {
 		vector<const HdDioramaObjectRule*> orules; // <DioramaObject>, puis instances <Tile2Obj> de cette image
 		for(const HdDioramaObjectRule& q : _hdData->DioramaObjectRules) orules.push_back(&q);
@@ -3980,6 +4344,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			}
 			o.Scale = r.Scale;
 			o.Lit = r.Lit;
+			o.Bright = r.Bright;
 			o.Shadow = r.Shadow;
 			o.CastShadow = r.CastShadow && _dioTopDown;
 			o.WinOn = false;

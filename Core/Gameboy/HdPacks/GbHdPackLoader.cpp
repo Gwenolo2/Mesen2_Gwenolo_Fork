@@ -275,6 +275,7 @@ namespace {
 		ov.ColorStart = color("colorstart", 0xFFFFFF);
 		ov.ColorEnd = color("colorend", ov.ColorStart);
 		ov.DotSize = std::max(0.25f, num("dotsize", 2.0f));
+		ov.Stretch = std::clamp(num("stretch", 0.0f), 0.0f, 2.0f);
 		ov.Prewarm = boolean("prewarm", true);
 
 		ov.IsPlainScreen = (type == "plainscreen");

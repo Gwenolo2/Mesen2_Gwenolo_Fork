@@ -6,9 +6,9 @@ make -j$(nproc) -O LTO=true STATICLINK=true SYSTEM_LIBEVDEV=false
 curl -SL https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage -o appimagetool
 
 mkdir -p AppDir/usr/bin
-cp bin/linux-arm64/Release/linux-arm64/publish/Mesen AppDir/usr/bin
+cp bin/linux-arm64/Release/linux-arm64/publish/Mesen_Gwenolo_Fork AppDir/usr/bin
 chmod +x AppDir/usr/bin
-ln -sr AppDir/usr/bin/Mesen AppDir/AppRun
+ln -sr AppDir/usr/bin/Mesen_Gwenolo_Fork AppDir/AppRun
 
 cp Linux/appimage/Mesen.48x48.png AppDir/Mesen.png
 cp Linux/appimage/Mesen.desktop AppDir/Mesen.desktop
@@ -17,4 +17,4 @@ mkdir -p AppDir/usr/share/icons && cp ./AppDir/Mesen.png ./AppDir/usr/share/icon
 mkdir -p AppDir/usr/share/icons/hicolor/48x48/apps && cp ./AppDir/Mesen.png ./AppDir/usr/share/icons/hicolor/48x48/apps
 
 chmod a+x appimagetool
-./appimagetool AppDir/ Mesen.AppImage
+./appimagetool AppDir/ Mesen_Gwenolo_Fork.AppImage
