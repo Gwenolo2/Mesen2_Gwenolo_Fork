@@ -266,6 +266,11 @@ private:
 	bool _wsMode = false; // vrai en widescreen : overlays et distorsions sont faits apres les bandes
 	void ProcessWidescreenOverlays(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
 	void ProcessOverlaysLayout(uint32_t* outputBuffer, uint32_t screenWidth, uint32_t padHd, uint32_t centreHd, float originNes, float widthNes, float fieldWNes, uint32_t oLeft, uint32_t oTop, uint32_t oBottom);
+	// <DayNight> (doc 55) : etat des cycles, sortie de l'image (couleur, etapes, poids), diorama deja teinte cette image
+	vector<HdDayNightState> _dnState;
+	HdDayNightOut _dn;
+	bool _dnDioApplied = false;
+	void UpdateDayNight(HdScreenInfo* hdScreenInfo);
 	void ProcessWidescreenScreenLayers(uint32_t* out, uint32_t outWidth, uint32_t padHd, uint32_t overscanLeft, uint32_t overscanTop, uint32_t overscanBottom) override;
 	void ProcessScreenLayersLayout(uint32_t* outputBuffer, uint32_t screenWidth, float originNes, uint32_t oTop, uint32_t oBottom);
 	std::vector<uint8_t> _wsZ; // z des bandes (priorite du dernier fond ecrit), indexe comme le buffer de sortie

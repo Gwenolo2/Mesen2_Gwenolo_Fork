@@ -481,6 +481,9 @@ bool HdPackLoader::LoadPack()
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 19)) == "<dioramacamerakeys>") {
 				tokens = StringUtilities::Split(lineContent.substr(19), ',');
 				ProcessDioramaCameraKeysTag(tokens, conditions);
+			} else if(StringUtilities::ToLower(lineContent.substr(0, 10)) == "<daynight>") {
+				tokens = StringUtilities::Split(lineContent.substr(10), ',');
+				ProcessDayNightTag(tokens, conditions);
 			} else if(StringUtilities::ToLower(lineContent.substr(0, 13)) == "<3dparticles>") {
 				tokens = StringUtilities::Split(lineContent.substr(13), ',');
 				ProcessDiorama3DParticlesTag(tokens, conditions);
@@ -3270,6 +3273,33 @@ void HdPackLoader::ProcessDiorama3DParticlesTag(vector<string>& tokens, vector<H
 	if(_data->Diorama3DParticles.size() >= 4) { logError("3DParticles : 4 effets au plus en diorama, ligne ignoree."); return; }
 	MessageManager::Log("[HDPack] <3DParticles> " + r.JsonFile + " enregistre (diorama, " + std::to_string(r.MaxParticles) + " particules max).");
 	_data->Diorama3DParticles.push_back(r);
+}
+
+// <DayNight>fichier.json[,cle=valeur...] (doc 55) : cycle jour / nuit, diorama et mode normal. Les cles de la ligne remplacent celles du JSON.
+void HdPackLoader::ProcessDayNightTag(vector<string>& tokens, vector<HdPackCondition*> conditions)
+{
+	if(tokens.empty() || StringUtilities::Trim(tokens[0]).empty()) { logError("DayNight : fichier JSON manquant, ligne ignoree."); return; }
+	HdPackData::DayNightRule r;
+	r.Conditions = conditions;
+	r.JsonFile = StringUtilities::Trim(tokens[0]);
+	std::unordered_map<string, string> cfg;
+	vector<uint8_t> raw;
+	if(LoadFile(r.JsonFile, raw)) cfg = ParseFlatJson(string(raw.begin(), raw.end()));
+	else { logError("DayNight : fichier introuvable : " + r.JsonFile + ", ligne ignoree."); return; }
+	for(size_t t = 1; t < tokens.size(); t++) {
+		const string tok = StringUtilities::Trim(tokens[t]);
+		const size_t eq = tok.find('=');
+		if(eq == string::npos) continue;
+		cfg[StringUtilities::ToLower(StringUtilities::Trim(tok.substr(0, eq)))] = StringUtilities::Trim(tok.substr(eq + 1));
+	}
+	const string err = HdDayNightParse(cfg, r.Def);
+	if(r.Def.Steps.empty()) { logError("DayNight : " + r.JsonFile + " : " + err + ", ligne ignoree."); return; }
+	if(!err.empty()) logError("DayNight : " + r.JsonFile + " : " + err);
+	for(const HdDayNightStep& s : r.Def.Steps) r.Until.push_back(s.Until.empty() ? vector<HdPackCondition*>() : ParseConditionString(s.Until));
+	int total = 0;
+	for(const HdDayNightStep& s : r.Def.Steps) total += s.Hold + s.Fade;
+	MessageManager::Log("[HDPack] <DayNight> " + r.JsonFile + " : " + std::to_string(r.Def.Steps.size()) + " etape(s), cycle " + std::to_string(total) + " images" + (r.Def.TimeAlways ? "" : " (temps : seulement sous condition)") + (r.Def.DrivesFog ? ", pilote le brouillard" : "") + ".");
+	_data->DayNightRules.push_back(r);
 }
 
 void HdPackLoader::ProcessDioramaMistTag(vector<string>& tokens, vector<HdPackCondition*> conditions)

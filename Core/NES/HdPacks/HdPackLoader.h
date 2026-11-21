@@ -100,6 +100,7 @@ private:
 	void ProcessDioramaCloudsTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessDioramaMistTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessDiorama3DParticlesTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
+	void ProcessDayNightTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	bool ParseDioramaShadowOptions(vector<string>& tokens, HdDioramaShadowRule& rule, bool allowTile);
 	void ProcessDioramaShadowTag(vector<string>& tokens, vector<HdPackCondition*> conditions);
 	void ProcessDioramaNormalTag(vector<string>& tokens, vector<HdPackCondition*> conditions);

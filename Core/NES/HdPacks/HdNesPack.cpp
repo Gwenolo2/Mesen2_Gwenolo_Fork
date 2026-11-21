@@ -1765,6 +1765,48 @@ void HdNesPack<scale>::ProcessOverlaysLayout(uint32_t* outputBuffer, uint32_t sc
 			}
 		}
 	}
+	// <DayNight> (doc 55), mode normal : teinte (multiplication) de l'image, apres les particules ; zindex= : seulement ce qui est a ce z ou en dessous.
+	// En diorama, la teinte est appliquee dans la scene 3D (lumieres, ciel, brouillard) : rien ici.
+	if(_dn.Active && !_dnDioApplied && (_dn.Col[0] < 0.999f || _dn.Col[1] < 0.999f || _dn.Col[2] < 0.999f)) {
+		const int zMax = _hdData->DayNightRules[_dn.Def].Def.ZIndex;
+		const uint32_t kr = (uint32_t)(_dn.Col[0] * 256.0f + 0.5f), kg = (uint32_t)(_dn.Col[1] * 256.0f + 0.5f), kb = (uint32_t)(_dn.Col[2] * 256.0f + 0.5f);
+		for(int sy = 0; sy < hdHeight; sy++) {
+			uint32_t* row = outputBuffer + (size_t)sy * screenWidth;
+			for(int sx = 0; sx < (int)screenWidth; sx++) {
+				if(zMax >= 0) {
+					const uint8_t z = (sx >= (int)padHd && sx < (int)(padHd + centreHd))
+						? _zNes[((size_t)(yStart + sy / iScale) << 8) | (size_t)(xStart + (sx - (int)padHd) / iScale)]
+						: _wsZ[(size_t)sy * screenWidth + (size_t)sx];
+					if((int)z > zMax) continue;
+				}
+				const uint32_t d = row[sx];
+				row[sx] = (d & 0xFF000000u) | ((((d >> 16) & 0xFF) * kr >> 8) << 16) | ((((d >> 8) & 0xFF) * kg >> 8) << 8) | ((d & 0xFF) * kb >> 8);
+			}
+		}
+	}
+}
+
+// <DayNight> (doc 55) : avance des cycles (une fois par image) ; la derniere regle dont la condition est vraie donne la teinte.
+// time=always : le temps d'un cycle avance meme quand sa condition est fausse ; time=cond : seulement quand elle est vraie.
+template<uint32_t scale>
+void HdNesPack<scale>::UpdateDayNight(HdScreenInfo* hdScreenInfo)
+{
+	_dn.Active = false;
+	const auto& rules = _hdData->DayNightRules;
+	if(rules.empty() || !hdScreenInfo) return;
+	if(_dnState.size() != rules.size()) _dnState.assign(rules.size(), HdDayNightState());
+	const uint32_t frame = hdScreenInfo->FrameNumber;
+	for(size_t i = 0; i < rules.size(); i++) {
+		const auto& r = rules[i];
+		bool ok = true;
+		for(HdPackCondition* c : r.Conditions) { if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; } }
+		HdDayNightAdvance(r.Def, _dnState[i], frame, r.Def.TimeAlways || ok, [&](int s) {
+			if(s < 0 || (size_t)s >= r.Until.size()) return true;
+			for(HdPackCondition* c : r.Until[s]) { if(!c->CheckCondition(0, 0, nullptr)) return false; }
+			return true;
+		});
+		if(ok) HdDayNightOutput(r.Def, _dnState[i], (int)i, _dn);
+	}
 }
 
 // Overlays : chemin non widescreen (inchange : meme champ 256 px, meme z NES).
@@ -2343,7 +2385,9 @@ void HdNesPack<scale>::Process(HdScreenInfo *hdScreenInfo, uint32_t* outputBuffe
 	_liquidOffY = overscan.Top;
 	_reflectEnabled = !_hdData->Reflects.empty();
 	PrepareLiquids(screenWidth);
-	_zEnabled = !_hdData->Videos.empty() || !_hdData->Overlays.empty() || !_hdData->Perspectives.empty();
+	_zEnabled = !_hdData->Videos.empty() || !_hdData->Overlays.empty() || !_hdData->Perspectives.empty() || !_hdData->DayNightRules.empty();
+	UpdateDayNight(hdScreenInfo); // <DayNight> : avance des cycles, couleur de l'image
+	_dnDioApplied = false;
 	if(_zEnabled) {
 		std::fill(_zNes.begin(), _zNes.end(), (uint8_t)0);
 	}
@@ -4291,6 +4335,53 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 				F.Col[0] = ((c >> 16) & 0xFF) / 255.0f; F.Col[1] = ((c >> 8) & 0xFF) / 255.0f; F.Col[2] = (c & 0xFF) / 255.0f;
 			}
 		}
+	}
+	// <DayNight> (doc 55), diorama : la couleur du cycle multiplie l'ambiante, le soleil et le ciel ; les lumieres ponctuelles restent intactes.
+	// Les cles de brouillard des etapes pilotent <DioramaFog> (active avec ses valeurs par defaut s'il n'y a pas de regle).
+	if(_dn.Active) {
+		const HdDayNightDef& dd = _hdData->DayNightRules[_dn.Def].Def;
+		const float* k = _dn.Col;
+		if(dd.TAmbient) {
+			if(!scene.Lights.Active) { scene.Lights.Active = true; scene.Lights.Ambient[0] = scene.Lights.Ambient[1] = scene.Lights.Ambient[2] = 1.0f; }
+			for(int c = 0; c < 3; c++) scene.Lights.Ambient[c] *= k[c];
+		}
+		if(dd.TSun) {
+			for(int i = 0; i < 8; i++) { if(scene.Lights.L[i].Type == 3) for(int c = 0; c < 3; c++) scene.Lights.L[i].Col[c] *= k[c]; }
+		}
+		if(dd.TSky) {
+			for(int c = 0; c < 3; c++) scene.Sky.Tint[c] = k[c];
+			const uint32_t cl = scene.Clear;
+			scene.Clear = (cl & 0xFF000000u) | ((uint32_t)(((cl >> 16) & 0xFF) * k[0] + 0.5f) << 16) | ((uint32_t)(((cl >> 8) & 0xFF) * k[1] + 0.5f) << 8) | (uint32_t)((cl & 0xFF) * k[2] + 0.5f);
+		}
+		if(dd.DrivesFog) {
+			auto& F = scene.Fog;
+			if(!F.Active) {
+				F.Active = true;
+				F.Start = _dioTopDown ? -20.0f : 150.0f; F.End = _dioTopDown ? 200.0f : 500.0f; F.Opacity = 0.0f;
+				F.Ground = 0.0f; F.GroundH = 16.0f;
+				const uint32_t c = _dioTopDown ? 0xC8D4E0u : 0xA8B8C8u;
+				if(scene.Sky.Mode == 1) { F.Col[0] = scene.Sky.Bottom[0]; F.Col[1] = scene.Sky.Bottom[1]; F.Col[2] = scene.Sky.Bottom[2]; }
+				else { F.Col[0] = ((c >> 16) & 0xFF) / 255.0f; F.Col[1] = ((c >> 8) & 0xFF) / 255.0f; F.Col[2] = (c & 0xFF) / 255.0f; }
+			}
+			F.Opacity = std::clamp(HdDayNightFog(dd, _dn, 0, F.Opacity), 0.0f, 1.0f);
+			F.Start = HdDayNightFog(dd, _dn, 1, F.Start);
+			F.End = HdDayNightFog(dd, _dn, 2, F.End);
+			if(F.End <= F.Start + 1.0f) F.End = F.Start + 1.0f;
+			F.Ground = std::clamp(HdDayNightFog(dd, _dn, 3, F.Ground), 0.0f, 1.0f);
+			HdDayNightFogColor(dd, _dn, F.Col);
+		}
+		if(dd.TAmbient) {
+			// brouillard sans fogColor, brume, nappes de brouillard au sol et particules 3D (non additives) suivent la lumiere ambiante
+			const HdDayNightStep& sa = dd.Steps[_dn.A]; const HdDayNightStep& sb = dd.Steps[_dn.B];
+			const bool fogColDriven = sa.HasFogColor || sb.HasFogColor;
+			for(int c = 0; c < 3; c++) {
+				if(scene.Fog.Active && !fogColDriven) scene.Fog.Col[c] *= k[c];
+				scene.Mist.Col[c] *= k[c];
+				scene.Cloud[1].Col[c] *= k[c];
+				scene.P3Tint[c] = k[c];
+			}
+		}
+		_dnDioApplied = true;
 	}
 	if(!_hdData->DioramaObjectRules.empty() || !_dioT2oRules.empty()) {
 		vector<const HdDioramaObjectRule*> orules; // <DioramaObject>, puis instances <Tile2Obj> de cette image

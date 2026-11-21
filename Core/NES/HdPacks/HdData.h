@@ -8,6 +8,7 @@
 #include "Utilities/PNGHelper.h"
 #include "Utilities/HexUtilities.h"
 #include "Shared/HdWatchExpr.h"
+#include "Shared/HdDayNight.h"
 #include "Utilities/SimpleLock.h"
 
 // Decodage d'image hors PNG (JPG, BMP, TGA via stb_image), defini dans SNES/HdPacks/SnesHdGltf.cpp
@@ -1333,6 +1334,9 @@ public:
 	vector<HdDioramaCameraDefaultRule> DioramaCameraDefaults;
 	HdDioramaCameraKeys DioramaCameraKeys;
 	vector<HdDiorama3DParticlesRule> Diorama3DParticles; // <3DParticles> (diorama NES, doc 54)
+	// <DayNight>fichier.json (doc 55) : cycle jour / nuit ; Until[i] = conditions until= de l'etape i
+	struct DayNightRule { vector<HdPackCondition*> Conditions; string JsonFile; HdDayNightDef Def; vector<vector<HdPackCondition*>> Until; };
+	vector<DayNightRule> DayNightRules;
 	vector<HdDioramaMistRule> DioramaMistRules;     // <DioramaMist> (doc 54)
 	vector<HdDioramaCloudRule> DioramaCloudRules;   // <DioramaClouds> (doc 54)
 	vector<HdDioramaFogRule> DioramaFogRules;       // <DioramaFog> (doc 54)

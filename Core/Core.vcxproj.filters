@@ -2988,6 +2988,9 @@
     <ClInclude Include="Shared\HdGpuCore.h">
       <Filter>Shared</Filter>
     </ClInclude>
+    <ClInclude Include="Shared\HdDayNight.h">
+      <Filter>Shared</Filter>
+    </ClInclude>
     <ClInclude Include="Shared\HdCamera.h">
       <Filter>Shared</Filter>
     </ClInclude>

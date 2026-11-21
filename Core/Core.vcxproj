@@ -591,6 +591,7 @@
     <ClInclude Include="SNES\HdPacks\SnesHdMode7Camera.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdGpu.h" />
     <ClInclude Include="Shared\HdGpuCore.h" />
+    <ClInclude Include="Shared\HdDayNight.h" />
     <ClInclude Include="Shared\HdCamera.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdM7CameraAdapter.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdGl.h" />

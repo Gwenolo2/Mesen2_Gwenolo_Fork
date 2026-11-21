@@ -1199,6 +1199,7 @@ uniform int uHasTex, uAdd;
 uniform vec4 uFog;
 uniform vec3 uFogCol;
 uniform float uD;
+uniform vec3 uTint;
 out vec4 oColor;
 void main()
 {
@@ -1206,6 +1207,7 @@ void main()
 	if(uHasTex != 0) { vec4 t = texture(uTex, vUV); a *= t.a; if(t.a > 0.0) col *= t.rgb / t.a; }   // texture premultipliee
 	else a *= 1.0 - smoothstep(0.55, 1.0, length(vUV * 2.0 - 1.0));                                // point rond doux
 	if(a <= 0.003) discard;
+	if(uAdd == 0) col *= uTint;   // <DayNight>
 	if(uFog.w > 0.5) col = mix(col, uFogCol, clamp((vDepth - uD - uFog.x) / max(uFog.y - uFog.x, 1.0), 0.0, 1.0) * uFog.z);
 	oColor = uAdd != 0 ? vec4(col * a, 0.0) : vec4(col * a, a);
 }
@@ -1273,6 +1275,7 @@ uniform vec2 uRot;      // decalage de yaw / pitch du fond (radians)
 uniform float uCamPitch; // G5c : decalage de pitch dans le repere de la camera (radians), axe horizontal de l'ecran
 uniform int uCubeLayout;
 uniform vec4 uGlow;     // G6a : halo (mode 5) : x, y centre (pixels dessines, origine en haut a gauche), z rayon, w intensite
+uniform vec3 uTint;     // <DayNight> : teinte du ciel (modes 1 a 4)
 layout(location = 0) out vec4 oColor;
 vec3 SkyDir()
 {
@@ -1338,6 +1341,7 @@ void main()
 		vec2 p = vec2(gl_FragCoord.x, uOut.y - gl_FragCoord.y) + uOff;
 		oColor = vec4(texture(uSky, p / uTexSize).rgb, 1.0);
 	}
+	if(uMode != 5) oColor.rgb *= uTint;
 }
 )";
 
@@ -1594,6 +1598,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			G.Uniform2f(US("uRot"), sc.Sky.RotYaw * kDeg, sc.Sky.RotPitch * kDeg);
 			G.Uniform1f(US("uCamPitch"), sc.Sky.CamPitch * kDeg);
 			G.Uniform1i(US("uCubeLayout"), sc.Sky.CubeLayout);
+			G.Uniform3f(US("uTint"), sc.Sky.Tint[0], sc.Sky.Tint[1], sc.Sky.Tint[2]);
 			if(skyTex) {
 				G.ActiveTexture(GL_TEXTURE0);
 				G.BindTexture(GL_TEXTURE_2D, skyTex);
@@ -2176,6 +2181,7 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		G.Uniform2f(UP("uOut"), (float)ow, (float)h);
 		G.Uniform4f(UP("uFog"), sc.Fog.Start, sc.Fog.End, sc.Fog.Opacity, sc.Fog.Active ? 1.0f : 0.0f);
 		G.Uniform3f(UP("uFogCol"), sc.Fog.Col[0], sc.Fog.Col[1], sc.Fog.Col[2]);
+		G.Uniform3f(UP("uTint"), sc.P3Tint[0], sc.P3Tint[1], sc.P3Tint[2]);
 		G.Uniform1i(UP("uData"), 5);
 		G.Uniform1i(UP("uTex"), 6);
 		if(objDepthOn) { G.Enable(GL_DEPTH_TEST); G.DepthFunc(GL_LEQUAL); G.DepthMask(GL_FALSE); }

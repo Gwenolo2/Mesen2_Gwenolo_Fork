@@ -73,6 +73,7 @@ struct HdDioramaSky
 	float RotYaw = 0.0f, RotPitch = 0.0f;
 	float CamPitch = 0.0f; // G5c : inclinaison fixe du ciel (degres) dans le repere de la camera (offset= du pack)
 	int CubeLayout = 1;
+	float Tint[3] = { 1.0f, 1.0f, 1.0f }; // <DayNight> : teinte du ciel (multiplie les modes 1 a 4)
 };
 
 // G6a : lumieres de scene (doc 42). Positions en pixels NES de la scene (x 0..W, y 0..H, z positif = derriere, negatif = devant).
@@ -196,6 +197,7 @@ struct HdDioramaScene
 	HdDioramaNormals Normals;             // G6d : cartes de normales
 	HdDioramaObjects Objects;             // H1 : objets 3D de decor
 	HdDioramaP3Batch P3[4]; int P3Count = 0; // <3DParticles> (diorama NES)
+	float P3Tint[3] = { 1.0f, 1.0f, 1.0f };   // <DayNight> : teinte des particules 3D non additives
 	// <DioramaFog> (doc 54) : brouillard de distance (profondeur au-dela du plan de l'ecran, pixels NES) et brume au sol (hauteur)
 	// <DioramaClouds> (doc 54) : [0] ombres de nuages, [1] taches de brouillard ; Off = position monde du point de l'ecran (0, 0) + derive (pixels NES)
 	struct Cloud { bool Active = false; float Size = 64, Coverage = 0.5f, Soft = 0.15f, Opacity = 0.3f, OffX = 0, OffY = 0, Seed = 1, GroundH = 16; float Col[3] = { 0, 0, 0 }; } Cloud[2];
