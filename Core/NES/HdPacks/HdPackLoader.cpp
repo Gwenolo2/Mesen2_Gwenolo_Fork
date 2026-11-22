@@ -25,6 +25,16 @@
 #include <iostream>
 #include <string>
 
+// G8 : numero (1 a 8) d'un groupe <DioramaDepth> a partir de son nom name= (0 si absent)
+static int FindDioGroupByName(const vector<HdDioramaDepthGroup>& groups, const string& name)
+{
+	if(name.empty()) return 0;
+	for(size_t i = 0; i < groups.size(); i++) {
+		if(groups[i].Name == name) return (int)i + 1;
+	}
+	return 0;
+}
+
 #define logError(y) MessageManager::Log("[HDPack - " + GetLineLocation() + "] " + (y)); _errorCount++;
 #define checkConstraint(x, y) if(!(x)) { logError(y); return; }
 #define checkConstraintEx(x, y) if(_data->Version >= 109) { checkConstraint(x, y); } else { if(!(x)) { logError(y); } }
@@ -1408,7 +1418,8 @@ void HdPackLoader::ProcessBackgroundTag(vector<string> &tokens, vector<HdPackCon
 			else if(v == "g6") bgDio = 9;
 			else if(v == "g7") bgDio = 10;
 			else if(v == "g8") bgDio = 11;
-			else logError("Background : dio= doit valoir off, l0 a l3 ou g1 a g8 : " + v + ", option ignoree.");
+			else if(FindDioGroupByName(_data->DioramaDepthGroups, v) > 0) bgDio = 3 + FindDioGroupByName(_data->DioramaDepthGroups, v); // G8 : nom de groupe
+			else logError("Background : dio= doit valoir off, l0 a l3, g1 a g8 ou un nom de groupe : " + v + ", option ignoree.");
 			tokens.erase(tokens.begin() + ti);
 		} else {
 			ti++;
@@ -2351,6 +2362,17 @@ bool HdPackLoader::ParseDioramaDepthOptions(vector<string>& tokens, HdDioramaDep
 			}
 		} else if(ParseDioramaWallOption(key, val, group.Wall)) {
 			// cle de mur reconnue : side, top, stretchx, stretchy, topstretchx, topstretchy, sidestretchx, sidestretchy
+		} else if(key == "name") {
+			const string nm = StringUtilities::ToLower(val);
+			bool okName = !nm.empty();
+			for(char ch : nm) {
+				if(!(std::isalnum((unsigned char)ch) || ch == '_')) okName = false;
+			}
+			if(!okName) {
+				logError("DioramaDepth : name= ne doit contenir que lettres, chiffres ou _ : " + val);
+				return false;
+			}
+			group.Name = nm;
 		} else if(key == "worldtex") {
 			group.WorldTex = (val == "on" || val == "true" || val == "1"); // doc 53 : fond L0 projete sur le groupe
 		} else if(key == "rect") {
@@ -2391,6 +2413,17 @@ bool HdPackLoader::ParseDioramaDepthOptions(vector<string>& tokens, HdDioramaDep
 // Ajoute le groupe, renvoie son numero (1 a 4) ou 0 s'il y en a deja 4.
 int HdPackLoader::AddDioramaDepthGroup(const HdDioramaDepthGroup& group)
 {
+	// G8 : meme name= = meme groupe ; le bloc est rattache au groupe deja declare
+	if(!group.Name.empty()) {
+		const int existing = FindDioGroupByName(_data->DioramaDepthGroups, group.Name);
+		if(existing > 0) {
+			const HdDioramaDepthGroup& first = _data->DioramaDepthGroups[existing - 1];
+			if(first.Z != group.Z || first.T != group.T) {
+				logError("DioramaDepth : le groupe '" + group.Name + "' est deja declare avec z/t differents, le bloc est rattache au premier.");
+			}
+			return existing;
+		}
+	}
 	if(_data->DioramaDepthGroups.size() >= 8) {
 		logError("DioramaDepth : 8 groupes au maximum, groupe ignore.");
 		return 0;
@@ -2461,6 +2494,8 @@ void HdPackLoader::ProcessDioramaExtendTag(vector<string>& tokens, vector<HdPack
 		} else if(key == "layer") {
 			if(lval.size() == 2 && lval[0] == 'g' && lval[1] >= '1' && lval[1] <= '8') {
 				rule.Layer = 4 + (lval[1] - '1'); // groupe <DioramaDepth> numero 1 a 8 (cotes gauche et droit seulement)
+			} else if(FindDioGroupByName(_data->DioramaDepthGroups, lval) > 0) {
+				rule.Layer = 3 + FindDioGroupByName(_data->DioramaDepthGroups, lval); // G8 : nom de groupe
 			} else if(DioParseInt(lval, n) && n >= 0 && n <= 3) {
 				rule.Layer = n;
 			} else {

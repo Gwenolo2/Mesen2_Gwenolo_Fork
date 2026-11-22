@@ -1009,6 +1009,7 @@ struct HdDioramaDepthGroup
 	bool HasRect = false;
 	int X = 0, Y = 0, W = 0, H = 0;
 	HdDioramaWallTex Wall;  // G3b2 : options side=, top=, stretchx=, stretchy=...
+	std::string Name;       // name= : nom du groupe (minuscules) ; deux blocs de meme nom = meme groupe
 	bool WorldTex = false;  // worldtex=on : les tiles du groupe prennent la couleur du fond L0 aux memes coordonnees monde (doc 53)
 };
 
