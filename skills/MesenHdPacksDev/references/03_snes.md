@@ -31,3 +31,9 @@ Référence complète : doc projet **20** (balises SNES), **29** (`29_schema_bal
 ## RAM
 - `<watchmemoryaddress>nom,adresse[,1|2][,signed][,vram|oam|cgram|aram]` : adresses 24 bits (WRAM `7E0000`–`7FFFFF` ; les miroirs `00:0000–1FFF` désignent `7E:0000–1FFF`).
 - Conditions : `memoryCheck`, `memoryCheckConstant` et leurs variantes préfixées `vram`, `ppu`, `oam`, `cgram`, `aram` ; `frameRange`, `tileAtPosition`, `spriteAtPosition`, `tileNearby`, `spriteNearby`.
+
+## Variables de chemin (`<setVariable>`, doc 57)
+
+- `[cond]<setVariable>nom,chemin.png` puis `[cond]<background>$nom,…` : le PNG du fond suit la valeur courante de `$nom` (règle vraie la plus basse gagne, voir 01_principes).
+- Journal : `[HD-VAR] $nom = chemin` à chaque changement.
+

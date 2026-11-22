@@ -51,6 +51,8 @@ private:
 	const GbHdPixelInfo* _frameInfo = nullptr;                 // tampon de l'image courante (valide pendant ApplyFilter)
 	const std::vector<GbHdSpriteInfo>* _frameSprites = nullptr; // sprites de l'image courante
 	std::map<std::string, bool> _condResult; // resultat de chaque condition pour l'image, calcule avant Run (lu par les threads)
+	std::map<std::string, int32_t> _varCurrent; // [fork GB] <setVariable> : valeur courante (index, -1 = aucune)
+	std::map<std::string, int32_t> _varLogged; // [fork GB] derniere valeur journalisee
 	std::vector<uint32_t> _under; // couleur sous chaque pixel HD de sprite (fond Game Boy + fonds derriere les sprites)
 	uint32_t _frameNumber = 0; // image courante, pour frameRange (ecrit avant Run, lu par les threads)
 

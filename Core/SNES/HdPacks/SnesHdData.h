@@ -337,7 +337,8 @@ enum class SnesHdPackConditionType
 	TileNearby,    
 	SpriteNearby,
 	ColorWindow,
-	SystemFlag
+	SystemFlag,
+	Variable, // [fork SNES] <setVariable> (doc 57)
 };
 //-----------------------------------------------------------------------
 struct SnesHdPackCondition
@@ -1792,6 +1793,29 @@ struct SnesHdDisableColorWindowRule
 };
 
 // ---------------------------------------------------------
+// [fork SNES] <setVariable> (doc 57) : variable qui choisit, a chaque image, une valeur de chemin de PNG ($nom dans <background>)
+struct SnesHdVariable
+{
+    struct Rule
+    {
+        std::vector<SnesHdPackCondition*> Conditions;
+        int ValueIndex = 0;
+    };
+    std::string Name;
+    std::vector<std::string> Values;
+    std::vector<Rule> Rules;
+    int Current = -1; // index dans Values ; -1 = aucune regle vraie
+    int LoggedValue = -2;
+
+    int IndexOf(const std::string& v)
+    {
+        for(size_t i = 0; i < Values.size(); i++) {
+            if(Values[i] == v) return (int)i;
+        }
+        return -1;
+    }
+};
+//-----------------------------------------------------------------------
 class SnesHdPackData
 {
 private:
@@ -1852,6 +1876,7 @@ public:
 
 	// Stockage global des conditions et adresses surveillées
 	std::vector<std::unique_ptr<SnesHdPackCondition>> Conditions;
+	std::vector<std::unique_ptr<SnesHdVariable>> Variables; // [fork SNES] <setVariable> (doc 57)
 	std::unordered_set<uint32_t> WatchedMemoryAddresses;
 	// <watchMemoryAddress> : valeurs nommees (lecture seule), utilisables dans <background> via ramx= / ramy=
 	std::vector<HdWatchVar> WatchedVars;

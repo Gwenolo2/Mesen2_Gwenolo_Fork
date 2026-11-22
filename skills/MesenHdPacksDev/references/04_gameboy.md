@@ -29,3 +29,9 @@ Référence : docs projet **30** (structure, décisions D1–D29), **30b–30j**
 - `<condition>nom,memoryCheckConstant,adresse,op,valeur[,masque]` (CPU seulement), `frameRange`, `tileAtPosition`, `spriteAtPosition`, `tileNearby`, `spriteNearby` ; termes `hmirror`, `vmirror`.
 - `<watchMemoryAddress>nom,adresse[,1|2][,signed]`.
 - Adresses utiles : WRAM C000–DFFF, HRAM FF80–FFFE, registres SCY `FF42`, SCX `FF43`, WY `FF4A`, WX `FF4B`, LCDC `FF40`.
+
+## Variables de chemin (`<setVariable>`, doc 57)
+
+- `[cond]<setVariable>nom,chemin.png` puis `[cond]<background>$nom,…` : le PNG du fond suit la valeur courante de `$nom` (règle vraie la plus basse gagne, voir 01_principes).
+- Journal : `[HD-VAR] $nom = chemin` à chaque changement.
+

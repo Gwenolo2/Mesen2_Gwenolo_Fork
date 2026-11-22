@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { PackCodeLensProvider } from './codelens';
 import { PackCompletionProvider } from './completion';
-import { ConsoleProfile, HdConsole, PROFILES, profileForLanguage } from './consoles';
+import { ConsoleProfile, HdConsole, PROFILES, profileForDocument } from './consoles';
 import { computeDiagnostics } from './diagnostics';
 import { PackHoverProvider } from './hover';
 import { PackLinkProvider } from './links';
@@ -27,7 +27,8 @@ export function activate(context: vscode.ExtensionContext): void {
     for (const profile of PROFILES) {
         const schema = loadSchema(context.extensionPath, profile.schemaFile);
         schemas.set(profile.id, schema);
-        const selector: vscode.DocumentSelector = { language: profile.languageId, scheme: 'file' };
+        // Sélecteur par nom de fichier : le fournisseur suit le fichier, pas la langue VS Code (qui peut être mal détectée).
+        const selector: vscode.DocumentSelector = { scheme: 'file', pattern: `**/${profile.entryName}` };
         context.subscriptions.push(
             vscode.languages.registerDocumentLinkProvider(selector, new PackLinkProvider(profile)),
             vscode.languages.registerCodeLensProvider(selector, new PackCodeLensProvider(profile)),
@@ -41,7 +42,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('mesenHd.toggleComment', () => vscode.commands.executeCommand('editor.action.commentLine')),
         vscode.commands.registerCommand('mesenHd.listConditions', () => {
             const doc = vscode.window.activeTextEditor?.document;
-            if (!doc || doc.uri.scheme !== 'file' || !profileForLanguage(doc.languageId)) {
+            if (!doc || doc.uri.scheme !== 'file' || !profileForDocument(doc)) {
                 vscode.window.showWarningMessage('Ouvrez un snes_hires.txt ou un hires.txt.');
                 return;
             }
@@ -62,7 +63,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const diagnostics = vscode.languages.createDiagnosticCollection('mesen-hd');
     context.subscriptions.push(diagnostics);
     const refresh = (doc: vscode.TextDocument): void => {
-        const profile: ConsoleProfile | undefined = profileForLanguage(doc.languageId);
+        const profile: ConsoleProfile | undefined = profileForDocument(doc);
         if (!profile || doc.uri.scheme !== 'file') return;
         const schema = schemas.get(profile.id);
         if (!schema) return;

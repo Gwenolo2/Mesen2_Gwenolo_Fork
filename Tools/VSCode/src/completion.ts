@@ -14,6 +14,9 @@ function extensionFilter(tag: string): RegExp | undefined {
     if (tag === 'msutoogg') return /\.ogg$/i;
     if (tag === 'video') return /\.(mpg|mp4)$/i;
     if (tag === 'm7model') return /\.(obj|gltf|glb)$/i;
+    if (tag === 'tile2obj' || tag === 'sprite2obj') return /\.(obj|gltf|glb)$/i;
+    if (tag === 'daynight') return /\.json$/i;
+    if (tag === 'setvariable') return /\.png$/i;
     return undefined;
 }
 

@@ -718,6 +718,42 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 				continue;
 			}
 
+			if(line.compare(0, 13, "<setVariable>") == 0) {
+				// [fork GB] <setVariable>nom,valeur (doc 57) : une valeur possible de $nom ; la derniere regle vraie gagne a chaque image
+				std::vector<std::string> sv = SplitTrim(line.substr(13), ',');
+				const std::string vname = sv.size() >= 1 ? sv[0] : std::string();
+				const std::string vvalue = sv.size() >= 2 ? sv[1] : std::string();
+				bool termsOk = true;
+				for(const GbHdTerm& t : terms) {
+					if(!t.Name.empty() && t.Name[0] == '$') termsOk = false;
+				}
+				if(vname.empty() || vname.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos || vvalue.empty() || vvalue[0] == '$' || !termsOk) {
+					MessageManager::Log("[HD-GB-LOAD] <setVariable> : syntaxe invalide (nom alphanumerique, valeur = chemin de PNG, pas de variable dans les conditions) : " + line);
+					ignoredLines++;
+					continue;
+				}
+				GbHdVariable* var = nullptr;
+				for(GbHdVariable& v : outData.Variables) { if(v.Name == vname) { var = &v; break; } }
+				if(!var) {
+					outData.Variables.push_back(GbHdVariable());
+					var = &outData.Variables.back();
+					var->Name = vname;
+				}
+				uint32_t vidx = 0;
+				bool found = false;
+				for(size_t i = 0; i < var->Values.size(); i++) {
+					if(var->Values[i] == vvalue) { vidx = (uint32_t)i; found = true; break; }
+				}
+				if(!found) {
+					var->Values.push_back(vvalue);
+					vidx = (uint32_t)(var->Values.size() - 1);
+				}
+				GbHdVariable::Rule rule;
+				rule.Terms = terms;
+				rule.ValueIndex = vidx;
+				var->Rules.push_back(rule);
+				continue;
+			}
 			if(line.compare(0, 12, "<background>") == 0) {
 				// <background>fichier|dossier,luminosite,scrollX,scrollY,Z,offsetX,offsetY,coucheMaitre,tileX,tileY,framesParImage,inverse,alpha,operateur
 				std::vector<std::string> f = SplitTrim(line.substr(12), ',');
@@ -739,19 +775,56 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 						ti++;
 					}
 				}
-				std::vector<std::string> files = f.empty() ? std::vector<std::string>() : ListBackgroundFiles(packFolder, f[0]);
+				// [fork GB] <background>$nom (doc 57) : une variante par valeur de <setVariable>$nom, conditionnee par $nom = valeur
+				struct GbBgVariant { std::string Path; std::vector<GbHdTerm> Terms; };
+				std::vector<GbBgVariant> variants;
+				if(!f.empty() && f[0].size() > 1 && f[0][0] == '$') {
+					const std::string vname = f[0].substr(1);
+					const GbHdVariable* var = nullptr;
+					for(const GbHdVariable& v : outData.Variables) { if(v.Name == vname) { var = &v; break; } }
+					if(!var || var->Values.empty()) {
+						MessageManager::Log("[HD-GB-LOAD] <background> : variable $" + vname + " inconnue (declarer <setVariable> avant cette ligne), fond ignore.");
+						ignoredLines++;
+						continue;
+					}
+					for(size_t k = 0; k < var->Values.size(); k++) {
+						const std::string cname = "$" + vname + "=" + std::to_string(k);
+						GbHdCondition vc;
+						vc.Type = GbHdCondition::Kind::Variable;
+						vc.VarName = vname;
+						vc.VarIndex = (uint32_t)k;
+						outData.Conditions[cname] = vc;
+						GbBgVariant gv;
+						gv.Path = var->Values[k];
+						gv.Terms = terms;
+						GbHdTerm vt;
+						vt.Name = cname;
+						vt.Negated = false;
+						gv.Terms.push_back(vt);
+						variants.push_back(gv);
+					}
+				} else {
+					GbBgVariant gv;
+					gv.Path = f.empty() ? std::string() : f[0];
+					gv.Terms = terms;
+					variants.push_back(gv);
+				}
+				for(const GbBgVariant& gv : variants) {
+				std::vector<std::string> fv = f;
+				if(!fv.empty()) fv[0] = gv.Path;
+				std::vector<std::string> files = fv.empty() ? std::vector<std::string>() : ListBackgroundFiles(packFolder, fv[0]);
 				if(files.empty()) {
 					ignoredLines++;
 					continue;
 				}
 				GbHdBackground bg;
-				bg.Terms = terms;
+				bg.Terms = gv.Terms;
 				bg.RamX = bgRamX;
 				bg.RamY = bgRamY;
 				for(const std::string& rel : files) {
 					bg.Frames.push_back(FindOrAddImage(outData.Images, rel));
 				}
-				auto field = [&f](size_t i) { return i < f.size() ? f[i] : std::string(); };
+				auto field = [&fv](size_t i) { return i < fv.size() ? fv[i] : std::string(); };
 				bg.Luminosity = ToDouble(field(1), 1.0);
 				bg.RatioX = ToDouble(field(2), 0.0);
 				bg.RatioY = ToDouble(field(3), 0.0);
@@ -766,6 +839,7 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 				bg.Alpha = ToDouble(field(12), 1.0);
 				bg.Operator = ParseOperator(field(13));
 				outData.Backgrounds.push_back(bg);
+				}
 				continue;
 			}
 			if(line.compare(0, 5, "<tile") != 0) {

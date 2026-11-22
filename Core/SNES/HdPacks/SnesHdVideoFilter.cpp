@@ -271,6 +271,26 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	};
 	std::vector<ExpandedTile> tilesToExpand;
 
+    // [fork SNES] <setVariable> (doc 57) : valeur courante de chaque variable, la derniere regle vraie gagne
+    if(_framePack) {
+        static int varLogs = 0;
+        for(auto& var : _framePack->Variables) {
+            var->Current = -1;
+            for(const SnesHdVariable::Rule& r : var->Rules) {
+                bool ok = true;
+                for(auto* c : r.Conditions) { if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; } }
+                if(ok) var->Current = r.ValueIndex;
+            }
+            if(var->Current != var->LoggedValue) {
+                if(varLogs < 60) {
+                    varLogs++;
+                    MessageManager::Log("[HD-VAR] $" + var->Name + " = " + (var->Current >= 0 ? var->Values[var->Current] : std::string("(aucune)")));
+                }
+                var->LoggedValue = var->Current;
+            }
+        }
+    }
+
 	if(!_framePack) {
 		SnesDefaultVideoFilter::ApplyFilter(ppuOutputBuffer);
 		return;

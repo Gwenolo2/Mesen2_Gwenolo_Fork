@@ -51,6 +51,11 @@ const FILE_FIELD_NES: Record<string, number> = {
     'patch': 0,
     'dioramaobject': 0,
     'dioramanormal': 0,
+    'tile2obj': 0,
+    'sprite2obj': 0,
+    'daynight': 0,
+    'loadingscreen': 0,
+    'setvariable': 1,
 };
 
 export const SNES_PROFILE: ConsoleProfile = {
@@ -91,6 +96,20 @@ export const PROFILES: ConsoleProfile[] = [SNES_PROFILE, NES_PROFILE];
 
 export function profileForLanguage(languageId: string): ConsoleProfile | undefined {
     return PROFILES.find(p => p.languageId === languageId);
+}
+
+/**
+ * Profil d'après le nom du fichier : snes_hires.txt = SNES, hires.txt = NES.
+ * Prioritaire sur la langue VS Code, qui peut être mal détectée ou choisie à la main.
+ */
+export function profileForFileName(fileName: string): ConsoleProfile | undefined {
+    const base = (fileName.split(/[\\/]/).pop() ?? '').toLowerCase();
+    return PROFILES.find(p => p.entryName.toLowerCase() === base);
+}
+
+/** Profil d'un document : nom du fichier d'abord, puis langue VS Code en repli. */
+export function profileForDocument(doc: { fileName: string; languageId: string }): ConsoleProfile | undefined {
+    return profileForFileName(doc.fileName) ?? profileForLanguage(doc.languageId);
 }
 
 /** Vrai si le nom est une condition intégrée de la console (sans le !). */

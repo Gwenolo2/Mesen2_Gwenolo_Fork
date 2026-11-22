@@ -62,3 +62,21 @@
 5. 3D : diorama (NES, GB) ou Mode 7 HD (SNES).
 6. Conditions par zone : adresses RAM (fiche 07).
 7. Tester par étapes (fiche 08), garder des sauvegardes du `*_hires.txt`.
+
+## Variables de chemin : `<setVariable>` (doc 57)
+
+Une variable choisit, à chaque image, le PNG d'un `<background>` parmi les valeurs déclarées. Valable sur NES, SNES et Game Boy.
+
+```
+[cond]<setVariable>nom,chemin.png
+[cond]<background>$nom,luminosité,scrollX,scrollY,priorité,...
+```
+
+- `nom` : lettres, chiffres et `_`. `$` = variable de chemin ; `@` reste réservé aux alias.
+- Chaque `<setVariable>` déclare une valeur. Toutes les valeurs sont connues au chargement, donc aucun PNG n'est lu pendant le jeu.
+- À chaque image, la **dernière** règle vraie gagne. Une règle sans condition vaut toujours vraie : la mettre en premier comme valeur par défaut. Aucune règle vraie = aucun fond pour cette variable.
+- `<background>$nom` crée une variante par valeur, avec les mêmes paramètres ; chaque variante ajoute la condition « `$nom` = cette valeur ».
+- Il faut déclarer `<setVariable>` **avant** la ligne `<background>$nom`, et les conditions (`<condition>`) avant leur usage.
+- Conditions acceptées : toutes. Piège : `tileNearby`, `spriteNearby`, `hmirror`, `vmirror`, `bgPriority`, `spritePalette` et `positionCheck*` sont évaluées sans pixel (position 0,0) : évitez-les dans une variable. Les conditions à coordonnées fixes (`memoryCheck`, `frameRange`, `tileAtPosition`, `spriteAtPosition`) sont fiables.
+- Journal : `[HD-VAR] $nom = valeur` à chaque changement (60 lignes au plus). Si une variable ne change jamais, c'est que sa condition n'est jamais vraie.
+

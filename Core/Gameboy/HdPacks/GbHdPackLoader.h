@@ -24,8 +24,11 @@ struct GbHdTileRef
 struct GbHdCondition
 {
 	enum class Op : uint8_t { Eq, Ne, Gt, Lt, Ge, Le, In };
-	enum class Kind : uint8_t { Memory, FrameRange, TileAtPosition, SpriteAtPosition, TileNearby, SpriteNearby };
+	enum class Kind : uint8_t { Memory, FrameRange, TileAtPosition, SpriteAtPosition, TileNearby, SpriteNearby, Variable };
 	Kind Type = Kind::Memory;
+	// Kind::Variable (doc 57, <setVariable>) : vraie si la variable $VarName vaut la valeur d'index VarIndex
+	std::string VarName;
+	uint32_t VarIndex = 0;
 	uint32_t Divisor = 1;   // frameRange : vrai si (image % Divisor) >= Threshold
 	uint32_t Threshold = 0;
 	// tileAtPosition / spriteAtPosition
@@ -236,6 +239,19 @@ struct GbHdConditionalBgm
 	std::vector<GbHdTerm> Terms;
 };
 
+// [fork GB] <setVariable> (doc 57) : variable qui choisit, a chaque image, une valeur de chemin de PNG ($nom dans <background>)
+struct GbHdVariable
+{
+	struct Rule
+	{
+		std::vector<GbHdTerm> Terms; // vide = toujours vraie
+		uint32_t ValueIndex = 0;
+	};
+	std::string Name;
+	std::vector<std::string> Values;
+	std::vector<Rule> Rules;
+};
+
 // Contenu d'un pack Game Boy (gb_hires.txt)
 struct GbHdPackData
 {
@@ -246,6 +262,8 @@ struct GbHdPackData
 	std::map<std::tuple<uint64_t, uint32_t, uint8_t>, GbHdTileRef> Tiles;
 	// Conditions declarees par <condition>
 	std::map<std::string, GbHdCondition> Conditions;
+	// [fork GB] <setVariable> (doc 57)
+	std::vector<GbHdVariable> Variables;
 	// Tiles conditionnelles, dans l'ordre du fichier ; ConditionalIndex : (hash, palette) -> indices
 	std::vector<GbHdConditionalTile> ConditionalTiles;
 	std::map<std::pair<uint64_t, uint32_t>, std::vector<size_t>> ConditionalIndex;

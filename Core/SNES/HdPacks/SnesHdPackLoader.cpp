@@ -639,7 +639,8 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 	// ====================================================================
 	// [HD-BUILD] : date et heure de compilation de ce fichier (preuve que l'executable est a jour)
 	MessageManager::Log("[HD-BUILD] SnesHdPackLoader compile : " __DATE__ " " __TIME__ " - " + std::to_string(parsedLines.size()) + " lignes lues.");
-	for(const auto& lineInfo : parsedLines) {
+	for(size_t lineIdx = 0; lineIdx < parsedLines.size(); lineIdx++) {
+		const SnesHdLineInfo lineInfo = parsedLines[lineIdx]; // copie : des lignes peuvent etre inserees (<background>$nom)
 		lineContent = lineInfo.Content;
 
 		// Variable qui remplace currentLine par 'monfichier.txt:123'
@@ -763,11 +764,13 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 		// EXTRACTION DES CONDITIONS (Pour TOUS les tags !)
 		// ====================================================================
 		std::vector<SnesHdPackCondition*> currentConditions;
+		std::string rawCondString; // texte entre crochets (pour recopier les conditions d'une variante)
 
 		if(lineContent.substr(0, 1) == "[") {
 			size_t endOfCondition = lineContent.find_first_of(']', 1);
 			if(endOfCondition != std::string::npos) {
 				std::string conditionString = lineContent.substr(1, endOfCondition - 1);
+				rawCondString = conditionString;
 
 				std::vector<std::string> condNames = StringUtilities::Split(conditionString, '&');
 				for(const std::string& name : condNames) {
@@ -2929,7 +2932,70 @@ else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dtexture>") {
 				outData->WatchedVars.push_back(wv);
 			}
 		}
+		else if(lineContent.substr(0, 13) == "<setVariable>") {
+            // [fork SNES] <setVariable>nom,valeur (doc 57) : une valeur possible de $nom ; la derniere regle vraie gagne a chaque image
+            std::vector<std::string> vtokens = StringUtilities::Split(lineContent.substr(13), ',');
+            const std::string vname = vtokens.size() >= 1 ? StringUtilities::Trim(vtokens[0]) : std::string();
+            const std::string vvalue = vtokens.size() >= 2 ? StringUtilities::Trim(vtokens[1]) : std::string();
+            if(vname.empty() || vname.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos) {
+                MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <setVariable> : nom invalide (lettres, chiffres et _ seulement) : " + vname + ", ligne ignoree.");
+            } else if(vvalue.empty() || vvalue[0] == '$') {
+                MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <setVariable> : la valeur doit etre un chemin de PNG (pas une autre variable), ligne ignoree.");
+            } else {
+                SnesHdVariable* var = nullptr;
+                for(auto& v : outData->Variables) { if(v->Name == vname) { var = v.get(); break; } }
+                if(!var) {
+                    outData->Variables.push_back(std::make_unique<SnesHdVariable>());
+                    var = outData->Variables.back().get();
+                    var->Name = vname;
+                }
+                int vidx = var->IndexOf(vvalue);
+                if(vidx < 0) {
+                    var->Values.push_back(vvalue);
+                    vidx = (int)var->Values.size() - 1;
+                }
+                SnesHdVariable::Rule vrule;
+                vrule.Conditions = currentConditions;
+                vrule.ValueIndex = vidx;
+                var->Rules.push_back(vrule);
+            }
+        }
 		else if(lineContent.substr(0, 12) == "<background>") {
+            // [fork SNES] <background>$nom (doc 57) : une ligne par valeur, inseree juste apres celle-ci, chacune conditionnee par $nom = valeur
+            {
+                const std::string bgData = lineContent.substr(12);
+                const size_t bgComma = bgData.find(',');
+                const std::string bgName = StringUtilities::Trim(bgData.substr(0, bgComma));
+                if(bgName.size() > 1 && bgName[0] == '$') {
+                    const std::string vname = bgName.substr(1);
+                    SnesHdVariable* var = nullptr;
+                    for(auto& v : outData->Variables) { if(v->Name == vname) { var = v.get(); break; } }
+                    if(!var || var->Values.empty()) {
+                        MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <background> : variable $" + vname + " inconnue (declarer <setVariable> avant cette ligne), fond ignore.");
+                        continue;
+                    }
+                    const std::string restOfBg = bgComma == std::string::npos ? std::string() : bgData.substr(bgComma);
+                    std::vector<SnesHdLineInfo> variantLines;
+                    for(size_t k = 0; k < var->Values.size(); k++) {
+                        std::string vcName = "$" + vname + "=" + std::to_string(k);
+                        auto vc = std::make_unique<SnesHdVariableCondition>();
+                        vc->Var = var;
+                        vc->Index = (int)k;
+                        vc->Name = vcName;
+                        vc->Initialize(&outData->ScreenInfo, outData.get());
+                        conditionsByName[vcName] = vc.get();
+                        outData->Conditions.emplace_back(std::move(vc));
+
+                        SnesHdLineInfo nl;
+                        nl.Filename = lineInfo.Filename;
+                        nl.LineNumber = lineInfo.LineNumber;
+                        nl.Content = "[" + (rawCondString.empty() ? std::string() : rawCondString + "&") + vcName + "]<background>" + var->Values[k] + restOfBg;
+                        variantLines.push_back(nl);
+                    }
+                    parsedLines.insert(parsedLines.begin() + (long)(lineIdx + 1), variantLines.begin(), variantLines.end());
+                    continue;
+                }
+            }
 			bool tileX = false;
 			bool tileY = false;
 

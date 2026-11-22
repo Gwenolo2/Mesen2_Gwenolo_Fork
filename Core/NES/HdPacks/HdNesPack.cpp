@@ -3085,7 +3085,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 	if(l4 && _dioOffMask[pixelIndex]) {
 		l1 = l2 = l3 = l4;
 	}
-	// G3e : groupe de profondeur de la tile de fond (bloc : marque de la tile ; rect= : position). Sprites non concernes.
+	// G3e : groupe de profondeur de la tile de fond (bloc : marque de la tile ; rect= : position). Sprites : voir spriteTgt (G7, bloc uniquement).
 	uint32_t* tileTarget = l2;
 	uint32_t* maskTarget = nullptr; // masque du groupe de la tile (topDown)
 	int worldGroup = -1; // doc 53 : groupe avec worldtex=on, pour la tile courante
@@ -3139,6 +3139,20 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 	}
 	drawBgs(0, l0);
 
+	// G7 : sprite HD dont le <tile> est dans un bloc <DioramaDepth>{ } : dessine dans le groupe (plan de profondeur du groupe) au lieu de L1 / L3
+	auto spriteTgt = [&](const HdPackTileInfo* st, uint32_t* def) -> uint32_t* {
+		if(!st || st->DioDepthGroup == 0 || st->DioOffCamera || _hdData->DioramaDepthGroups.empty() || l2 == l4) return def;
+		const int g = (int)st->DioDepthGroup;
+		if(g > DioGroups || (size_t)(g - 1) >= bgGroups || _dioG[g - 1].size() <= offset) return def;
+		_dioGLines[g - 1][y] = 1;
+		static bool sprLogged = false;
+		if(!sprLogged) {
+			sprLogged = true;
+			MessageManager::Log("[HD-DIORAMA] G7 sprite dans un groupe <DioramaDepth> : le sprite est dessine dans le groupe " + std::to_string(g) + " (et non dans L1 / L3)");
+		}
+		return _dioG[g - 1].data() + offset;
+	};
+
 	int lowestBgSprite = 999;
 	if(hasSprite) {
 		for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
@@ -3148,7 +3162,7 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 				}
 				if(!_s2oMask.empty() && S2oHidden(pixelIndex, pixelInfo.Sprite[k])) continue; // <Sprite2Obj> : remplace par un objet 3D
 				if(sprites[k]) {
-					if(!sprites[k]->DioIgnore) DrawTileLayer(pixelInfo.Sprite[k], *sprites[k], (l4 && sprites[k]->DioOffCamera) ? l4 : l1, screenWidth);
+					if(!sprites[k]->DioIgnore) DrawTileLayer(pixelInfo.Sprite[k], *sprites[k], (l4 && sprites[k]->DioOffCamera) ? l4 : spriteTgt(sprites[k], l1), screenWidth);
 				} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
 					DrawColor(_palette[pixelInfo.Sprite[k].SpriteColor] | 0xFF000000u, l1, screenWidth);
 				}
@@ -3200,13 +3214,15 @@ void HdNesPack<scale>::DrawPixelLayers(uint32_t x, uint32_t y, HdPpuPixelInfo &p
 		for(int k = pixelInfo.SpriteCount - 1; k >= 0; k--) {
 			if(!pixelInfo.Sprite[k].BackgroundPriority && lowestBgSprite > k) {
 				if(!_s2oMask.empty() && S2oHidden(pixelIndex, pixelInfo.Sprite[k])) continue; // <Sprite2Obj> : remplace par un objet 3D
+				uint32_t* sprT = l3; // G7 : cible du sprite (L3, ou son groupe <DioramaDepth>)
 				if(sprites[k]) {
-					if(!sprites[k]->DioIgnore) DrawTileLayer(pixelInfo.Sprite[k], *sprites[k], (l4 && sprites[k]->DioOffCamera) ? l4 : l3, screenWidth);
+					sprT = spriteTgt(sprites[k], l3);
+					if(!sprites[k]->DioIgnore) DrawTileLayer(pixelInfo.Sprite[k], *sprites[k], (l4 && sprites[k]->DioOffCamera) ? l4 : sprT, screenWidth);
 				} else if(pixelInfo.Sprite[k].SpriteColorIndex != 0) {
 					DrawColor(_palette[pixelInfo.Sprite[k].SpriteColor] | 0xFF000000u, l3, screenWidth);
 				}
 				// G6d : normales du sprite (L3)
-				if(!_dioNrm[1].empty() && sprites[k] && sprites[k]->NormalBitmap && !sprites[k]->NormalTileData.empty() && l3 != l4 && !sprites[k]->DioIgnore && !(l4 && sprites[k]->DioOffCamera)) {
+				if(!_dioNrm[1].empty() && sprT == l3 && sprites[k] && sprites[k]->NormalBitmap && !sprites[k]->NormalTileData.empty() && l3 != l4 && !sprites[k]->DioIgnore && !(l4 && sprites[k]->DioOffCamera)) {
 					DrawNormalLayer(pixelInfo.Sprite[k], *sprites[k], _dioNrm[1].data() + offset, screenWidth);
 					_dioNrmLines[1][y] = 1;
 				}
@@ -4077,7 +4093,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 		int n = 0;
 		bool any = false;
 		const float tSec = hdScreenInfo ? (float)hdScreenInfo->FrameNumber / 60.0f : 0.0f;
-		auto addLight = [&](const HdDioramaLightRule& r, float px, float py, bool onFloor) {
+		auto addLight = [&](const HdDioramaLightRule& r, float px, float py, bool onFloor, int grp = 0) {
 			if(n >= 8) return;
 			HdDioramaLight& l = scene.Lights.L[n++];
 			const float fk = r.Flicker > 0.0f ? 1.0f - r.Flicker * 0.5f * (1.0f + std::sin(r.FlickerSpeed * tSec)) : 1.0f;
@@ -4086,7 +4102,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			if(r.Type == 2) {
 				if(_dioTopDown && onFloor) { // topDown, lumiere de tile : posee sur le sol (Y = -|y| au-dessus, profondeur = verticale de l'image)
 					l.Pos[0] = px; l.Pos[1] = -std::fabs(r.Y); l.Pos[2] = scene.H * 0.5f - py;
-				} else { l.Pos[0] = px; l.Pos[1] = py; l.Pos[2] = r.Z; } l.Radius = r.Radius; l.Glow = r.Glow * fk; l.GlowRadius = r.GlowRadius;
+				} else { l.Pos[0] = px; l.Pos[1] = py; l.Pos[2] = r.Z + ((grp > 0 && (size_t)(grp - 1) < _hdData->DioramaDepthGroups.size()) ? _hdData->DioramaDepthGroups[grp - 1].Z : 0.0f); } l.Radius = r.Radius; l.Glow = r.Glow * fk; l.GlowRadius = r.GlowRadius;
 			} else {
 				// topDown : soleil venant du dessus par defaut (0.3, 1.0, 0.3), sauf dx/dy/dz ecrits dans le pack
 				const bool topSun = _dioTopDown && !r.DirGiven;
@@ -4117,6 +4133,9 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 					HdPpuPixelInfo& pi = hdScreenInfo->ScreenTiles[((size_t)y << 8) | (size_t)x];
 					for(int sp = 0; sp < pi.SpriteCount; sp++) {
 						HdPpuTileInfo& spr = pi.Sprite[sp];
+						// G7 : sprite dans un groupe <DioramaDepth> : la lumiere prend la profondeur de ce groupe (z= reste relatif au plan)
+						const HdPackTileInfo* sgInfo = _resolvedSprites[((size_t)y << 8 | (size_t)x) * 4 + (size_t)sp];
+						const int sg = (sgInfo && !sgInfo->DioOffCamera && sgInfo->DioDepthGroup > 0 && sgInfo->DioDepthGroup <= DioGroups && (size_t)(sgInfo->DioDepthGroup - 1) < _hdData->DioramaDepthGroups.size()) ? (int)sgInfo->DioDepthGroup : 0;
 						for(size_t ri = 0; ri < nRules; ri++) {
 							const HdDioramaLightRule& r = _hdData->DioramaLightRules[ri];
 							if(!r.HasTile || !r.MatchesTile(spr)) continue;
@@ -4135,24 +4154,24 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 							const float lpx = (float)ox + 4.0f + (spr.HorizontalMirroring ? -r.OffX : r.OffX);
 							const float lpy = (float)oy + 4.0f - (float)yStart + (spr.VerticalMirroring ? -r.OffY : r.OffY);
 							bool near = false;
-							for(size_t q = 0; q + 5 < nearLights.size() && !near; q += 6) {
-								if(nearLights[q] == (float)ri && std::abs(nearLights[q + 1] - (float)ox) <= 16.0f && std::abs(nearLights[q + 2] - (float)oy) <= 16.0f) {
+							for(size_t q = 0; q + 6 < nearLights.size() && !near; q += 7) {
+								if(nearLights[q] == (float)ri && nearLights[q + 6] == (float)sg && std::abs(nearLights[q + 1] - (float)ox) <= 16.0f && std::abs(nearLights[q + 2] - (float)oy) <= 16.0f) {
 									nearLights[q + 3] += 1.0f; nearLights[q + 4] += lpx; nearLights[q + 5] += lpy; near = true;
 								}
 							}
 							if(!near) {
 								nearLights.push_back((float)ri); nearLights.push_back((float)ox); nearLights.push_back((float)oy);
-								nearLights.push_back(1.0f); nearLights.push_back(lpx); nearLights.push_back(lpy);
+								nearLights.push_back(1.0f); nearLights.push_back(lpx); nearLights.push_back(lpy); nearLights.push_back((float)sg);
 							}
 						}
 					}
 				}
 			}
 			// une lumiere par groupe, a la position moyenne de ses tiles
-			for(size_t q = 0; q + 5 < nearLights.size(); q += 6) {
+			for(size_t q = 0; q + 6 < nearLights.size(); q += 7) {
 				const HdDioramaLightRule& gr = _hdData->DioramaLightRules[(size_t)nearLights[q]];
 				const float cnt = nearLights[q + 3];
-				addLight(gr, nearLights[q + 4] / cnt, nearLights[q + 5] / cnt, true);
+				addLight(gr, nearLights[q + 4] / cnt, nearLights[q + 5] / cnt, true, (int)nearLights[q + 6]);
 			}
 		}
 				scene.Lights.Active = any;

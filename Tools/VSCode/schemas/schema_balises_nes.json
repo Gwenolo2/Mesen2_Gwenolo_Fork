@@ -2144,6 +2144,918 @@
       "syntax": "<DioramaIgnore>...",
       "params": [],
       "notes": "Clés à compléter (ProcessDioramaIgnore)."
+    },
+    {
+      "name": "<setVariable>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<setVariable>nom,valeur",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "type": "lettres, chiffres, _",
+          "required": true
+        },
+        {
+          "name": "valeur",
+          "src": "code",
+          "pos": 2,
+          "type": "chemin PNG",
+          "required": true
+        }
+      ],
+      "notes": "Déclare une valeur possible de la variable $nom ; la dernière règle vraie gagne à chaque image. Sert avec <background>$nom (doc 57)."
+    },
+    {
+      "name": "<widescreen>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<widescreen>on|off",
+      "params": [
+        {
+          "name": "mode",
+          "src": "code",
+          "pos": 1,
+          "values": [
+            "on",
+            "off"
+          ],
+          "required": true
+        }
+      ],
+      "notes": "Active ou désactive l'écran large. Toute autre valeur est refusée."
+    },
+    {
+      "name": "<LoadingScreen>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<LoadingScreen>fichier.png[,...]",
+      "params": [
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin PNG",
+          "required": true
+        }
+      ],
+      "notes": "Écran de chargement. Options suivantes à vérifier dans HdLoadingScreen::ParseTag."
+    },
+    {
+      "name": "<Tile2Obj>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<Tile2Obj>modele.obj,group=HASH|HASH,palette=*,height=16,grid=2x2",
+      "params": [
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin .obj / .gltf / .glb",
+          "required": true
+        },
+        {
+          "name": "tile",
+          "src": "code",
+          "kv": true,
+          "type": "hash hexa 4 chiffres"
+        },
+        {
+          "name": "group",
+          "src": "code",
+          "kv": true,
+          "type": "hashs hexa séparés par |"
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "kv": true,
+          "type": "* ou RRGGBBAA"
+        },
+        {
+          "name": "tex",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "RRGGBB"
+        },
+        {
+          "name": "scale",
+          "src": "code",
+          "kv": true,
+          "type": "nombre 0 à 4096"
+        },
+        {
+          "name": "height",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "elevation",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "rotation",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "rotx",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "roty",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "rotz",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "grid",
+          "src": "code",
+          "kv": true,
+          "type": "CxL, 1 à 8"
+        },
+        {
+          "name": "castshadow",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "name": "lit",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "name": "bright",
+          "src": "code",
+          "kv": true,
+          "type": "nombre 0 à 8"
+        },
+        {
+          "name": "animtime",
+          "src": "code",
+          "kv": true,
+          "type": "secondes 0 à 3600"
+        },
+        {
+          "name": "animspeed",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "anim",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "blend",
+          "src": "code",
+          "kv": true,
+          "type": "secondes 0 à 10"
+        },
+        {
+          "name": "anchor",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "floor",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "facing",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "hide",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "bg",
+          "src": "code",
+          "kv": true
+        }
+      ],
+      "notes": "Objet 3D posé sur des tiles (doc 53). Une même liste de clés vaut pour <Sprite2Obj> ; <Sprite2Obj> ne s'applique qu'aux sprites."
+    },
+    {
+      "name": "<Sprite2Obj>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<Sprite2Obj>modele.obj,tile=HASH[,...]",
+      "params": [
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin .obj / .gltf / .glb",
+          "required": true
+        },
+        {
+          "name": "tile",
+          "src": "code",
+          "kv": true,
+          "type": "hash hexa 4 chiffres"
+        },
+        {
+          "name": "group",
+          "src": "code",
+          "kv": true,
+          "type": "hashs hexa séparés par |"
+        },
+        {
+          "name": "palette",
+          "src": "code",
+          "kv": true,
+          "type": "* ou RRGGBBAA"
+        },
+        {
+          "name": "tex",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "RRGGBB"
+        },
+        {
+          "name": "scale",
+          "src": "code",
+          "kv": true,
+          "type": "nombre 0 à 4096"
+        },
+        {
+          "name": "height",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "elevation",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "rotation",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "rotx",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "roty",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "rotz",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "grid",
+          "src": "code",
+          "kv": true,
+          "type": "CxL, 1 à 8"
+        },
+        {
+          "name": "castshadow",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "name": "lit",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "name": "bright",
+          "src": "code",
+          "kv": true,
+          "type": "nombre 0 à 8"
+        },
+        {
+          "name": "animtime",
+          "src": "code",
+          "kv": true,
+          "type": "secondes 0 à 3600"
+        },
+        {
+          "name": "animspeed",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "anim",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "blend",
+          "src": "code",
+          "kv": true,
+          "type": "secondes 0 à 10"
+        },
+        {
+          "name": "anchor",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "floor",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "facing",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "hide",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "bg",
+          "src": "code",
+          "kv": true
+        }
+      ],
+      "notes": "Objet 3D posé sur des sprites. Même lecteur que <Tile2Obj>."
+    },
+    {
+      "name": "<DayNight>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DayNight>fichier.json[,cle=valeur]",
+      "params": [
+        {
+          "name": "fichier",
+          "src": "code",
+          "pos": 1,
+          "type": "chemin .json",
+          "required": true
+        },
+        {
+          "name": "time",
+          "src": "code",
+          "kv": true,
+          "values": [
+            "always",
+            "cond"
+          ]
+        },
+        {
+          "name": "start",
+          "src": "code",
+          "kv": true,
+          "type": "entier"
+        },
+        {
+          "name": "targets",
+          "src": "code",
+          "kv": true
+        }
+      ],
+      "notes": "Cycle jour / nuit (doc 55). Les clés de la ligne remplacent celles du JSON. Dans le JSON : steps, time, start, targets ; par étape : color, hold, fade, fogColor, fogOpacity, fogStart, fogEnd, until."
+    },
+    {
+      "name": "<DioramaView>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaView>topDown[,pitch=,zoom=,time=,floormargin=]",
+      "params": [
+        {
+          "name": "mode",
+          "src": "code",
+          "pos": 1,
+          "values": [
+            "topDown"
+          ],
+          "required": true
+        },
+        {
+          "name": "pitch",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "zoom",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "time",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "floormargin",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        }
+      ],
+      "notes": "Réglages de vue tant que la condition est vraie ; la dernière règle vraie l'emporte (doc 53)."
+    },
+    {
+      "name": "<DioramaMist>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaMist>on|off[,cle=valeur]",
+      "params": [
+        {
+          "name": "mode",
+          "src": "code",
+          "pos": 1,
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "name": "anchor",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "band",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "RRGGBB"
+        },
+        {
+          "name": "count",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "coverage",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "direction",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "from",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "to",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "opacity",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "seed",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "size",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "softness",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "speed",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        }
+      ],
+      "notes": "Brume. Clés relevées dans le loader ; forme exacte à confirmer."
+    },
+    {
+      "name": "<DioramaClouds>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaClouds>cle=valeur[,...]",
+      "params": [
+        {
+          "name": "anchor",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "RRGGBB"
+        },
+        {
+          "name": "coverage",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "direction",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "groundheight",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "opacity",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "seed",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "shadows",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "size",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "softness",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "speed",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "type",
+          "src": "code",
+          "kv": true
+        }
+      ],
+      "notes": "Nuages. Clés relevées dans le loader ; forme exacte à confirmer."
+    },
+    {
+      "name": "<DioramaFog>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<DioramaFog>cle=valeur[,...]",
+      "params": [
+        {
+          "name": "color",
+          "src": "code",
+          "kv": true,
+          "type": "RRGGBB"
+        },
+        {
+          "name": "end",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "start",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "groundheight",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "opacity",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        }
+      ],
+      "notes": "Brouillard (doc 55 pour le lien avec le cycle jour / nuit). Clés relevées dans le loader ; forme exacte à confirmer."
+    },
+    {
+      "name": "<3DParticles>",
+      "status": "partial",
+      "block": false,
+      "conditions": true,
+      "syntax": "<3DParticles>cle=valeur[,...]",
+      "params": [
+        {
+          "name": "texture",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "rate",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "maxparticles",
+          "src": "code",
+          "kv": true,
+          "type": "entier"
+        },
+        {
+          "name": "lifemin",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "lifemax",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "sizestart",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "sizeend",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "sizerandom",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "colorstart",
+          "src": "code",
+          "kv": true,
+          "type": "RRGGBB"
+        },
+        {
+          "name": "colorend",
+          "src": "code",
+          "kv": true,
+          "type": "RRGGBB"
+        },
+        {
+          "name": "alphastart",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "alphaend",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "fadein",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "fadeout",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "driftmin",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "driftmax",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "fallmin",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "fallmax",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "gravity",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "windx",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "windy",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "turbulence",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "turbulencefreq",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "groundhit",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "die",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "depthmin",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "depthmax",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "boxsize",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "boxheight",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "boxahead",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "farfade",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "minpixelsize",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "stretch",
+          "src": "code",
+          "kv": true,
+          "type": "nombre"
+        },
+        {
+          "name": "additive",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "blend",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "bg",
+          "src": "code",
+          "kv": true
+        },
+        {
+          "name": "anchor",
+          "src": "code",
+          "kv": true
+        }
+      ],
+      "notes": "Particules 3D (éditeur Tools/Atelier3DParticles.html). Clés relevées dans le loader ; forme exacte à confirmer."
     }
   ],
   "conditionTypes": [
@@ -2404,7 +3316,15 @@
       "<DioramaSkybox>",
       "<DioramaExtend>",
       "<DioramaOffCamera>",
-      "<DioramaIgnore>"
+      "<DioramaIgnore>",
+      "<DayNight>",
+      "<DioramaView>",
+      "<Tile2Obj>",
+      "<Sprite2Obj>",
+      "<DioramaMist>",
+      "<DioramaClouds>",
+      "<DioramaFog>",
+      "<3DParticles>"
     ]
   }
 }

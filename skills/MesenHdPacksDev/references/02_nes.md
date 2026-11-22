@@ -42,3 +42,9 @@ Référence complète : doc projet **19** (balises NES), doc projet **54** (dior
 ## RAM
 - `<watchMemoryAddress>nom,adresse[,1|2][,signed]` (adresses CPU 0000–FFFF ; RAM interne 0000–07FF) ; conditions `memoryCheckConstant` (fiche 07).
 - Exemple SMB1 : `<watchMemoryAddress>page,071A` + `<watchMemoryAddress>x,071C` → `<background>ciel.png,1,0.5,0,10,0,0,Alpha,Y,N,0,N,*,ramx=$page*256+$x`.
+
+## Variables de chemin (`<setVariable>`, doc 57)
+
+- `[cond]<setVariable>nom,chemin.png` puis `[cond]<background>$nom,…` : le PNG du fond suit la valeur courante de `$nom` (règle vraie la plus basse gagne, voir 01_principes).
+- Journal : `[HD-VAR] $nom = chemin` à chaque changement.
+

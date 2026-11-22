@@ -31,3 +31,10 @@
 
 ## Côté code du fork (si une correction est nécessaire)
 Règles du `CLAUDE.md` du dépôt : `git status`, sauvegarde `_backup_claude/<date>/`, fins de ligne conservées, contrôle `g++ -std=c++17 -fsyntax-only -ICore -I. <fichier.cpp>` possible dans la VM, compilation et commit par Gwen dans Visual Studio, docs mises à jour (`docs/claude/03`, `05`, doc projet concerné).
+
+## Variables de chemin : pièges (doc 57)
+
+- **Fond qui ne disparaît pas** : vérifier `[HD-VAR] $nom = (aucune)` à la sortie de la zone. Si la valeur reste, la condition de `<setVariable>` est toujours vraie. Si la valeur est bonne mais le fond reste, un autre `<background>` utilise le même PNG sans variable (cherchez le nom du fichier dans tout le pack).
+- **Fond absent du tout** : une ligne `variable $nom inconnue` signifie que `<setVariable>` est après `<background>$nom` ou mal orthographié. Une ligne `<setVariable> : syntaxe invalide` signale un nom ou une valeur mal formés (une valeur ne peut pas être une autre variable).
+- **Condition pixel dans une variable** (`tileNearby`, `hmirror`, …) : évaluée à la position 0,0 sans pixel, donc résultat peu fiable.
+

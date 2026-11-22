@@ -469,7 +469,30 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	_frameSprites = sprites;
 	_condResult.clear();
 	for(const auto& kv : _pack.Conditions) {
+		if(kv.second.Type == GbHdCondition::Kind::Variable) continue; // <setVariable> : evaluee apres les autres conditions
 		_condResult[kv.first] = EvaluateCondition(kv.second, mem, info, sprites);
+	}
+	// [fork GB] <setVariable> (doc 57) : valeur courante de chaque variable, la derniere regle vraie gagne ; puis conditions $nom=k
+	static int varLogs = 0;
+	for(const GbHdVariable& var : _pack.Variables) {
+		int32_t cur = -1;
+		for(const GbHdVariable::Rule& r : var.Rules) {
+			if(EvaluateTerms(r.Terms, 0, mem, 0, 0, false)) cur = (int32_t)r.ValueIndex;
+		}
+		_varCurrent[var.Name] = cur;
+		auto logged = _varLogged.find(var.Name);
+		if(logged == _varLogged.end() || logged->second != cur) {
+			if(varLogs < 60) {
+				varLogs++;
+				MessageManager::Log("[HD-VAR] $" + var.Name + " = " + (cur >= 0 ? var.Values[(size_t)cur] : std::string("(aucune)")));
+			}
+			_varLogged[var.Name] = cur;
+		}
+	}
+	for(const auto& kv : _pack.Conditions) {
+		if(kv.second.Type != GbHdCondition::Kind::Variable) continue;
+		auto it = _varCurrent.find(kv.second.VarName);
+		_condResult[kv.first] = it != _varCurrent.end() && it->second == (int32_t)kv.second.VarIndex;
 	}
 	// <muteAudio> : canaux coupes = union des regles dont les termes sont vrais ; lu par l'APU (GbApu::UpdateOutput)
 	if(_pack.AudioMuteMask) {

@@ -514,3 +514,20 @@ struct SnesHdPackColorWindowCondition : public SnesHdPackCondition
 		return false;
 	}
 };
+
+// [fork SNES] <setVariable> (doc 57) : vraie quand la variable $nom a la valeur d'index Index (creee par <background>$nom)
+struct SnesHdVariableCondition : public SnesHdPackCondition
+{
+    SnesHdVariable* Var = nullptr;
+    int Index = 0;
+
+    SnesHdPackConditionType GetConditionType() override { return SnesHdPackConditionType::Variable; }
+    string GetConditionName() override { return "variable"; }
+    string ToString() override { return "$" + (Var ? Var->Name : string("?")) + "=" + std::to_string(Index); }
+
+protected:
+    bool InternalCheckCondition(int x, int y, SnesHdPixelData* tile) override
+    {
+        return Var != nullptr && Var->Current == Index;
+    }
+};
