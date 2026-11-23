@@ -3951,6 +3951,21 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	    s_reflSpr.assign((size_t)outWidth * hdHeight, 0);
 	}
 
+	// Diorama SNES (doc 59) : <background> du pack captures entierement (meme sous les sprites et le HUD) pour remplir les couches
+	uint32_t* dioBgCol = nullptr;
+	uint8_t* dioBgZ = nullptr;
+	uint32_t* dioTrCol = nullptr; // diorama : dernier pixel de tile semi-transparent pose (bord anticrenele d'un sprite HD)
+	uint8_t* dioTrZ = nullptr;
+	if(_framePack->Dio && _framePack->DioRecord) {
+		const size_t np = (size_t)outWidth * hdHeight;
+		if(_dioBgCol.size() != np) { _dioBgCol.assign(np, 0u); _dioBgZ.assign(np, 0); }
+		else { memset(_dioBgCol.data(), 0, np * sizeof(uint32_t)); memset(_dioBgZ.data(), 0, np); }
+		dioBgCol = _dioBgCol.data(); dioBgZ = _dioBgZ.data();
+		if(_dioTrCol.size() != np) { _dioTrCol.assign(np, 0u); _dioTrZ.assign(np, 0); }
+		else { memset(_dioTrCol.data(), 0, np * sizeof(uint32_t)); memset(_dioTrZ.data(), 0, np); }
+		dioTrCol = _dioTrCol.data(); dioTrZ = _dioTrZ.data();
+	}
+
 	auto composeBand = [&](uint32_t bandY0, uint32_t bandY1) {
 	for(const auto& task : tasks) {
 		if(task.type == 9) {
@@ -4084,6 +4099,17 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 							if(cov > cv) cv = (uint8_t)cov;
 						}
 
+						if(dioBgCol) { // diorama : fonds du pack empiles par Z, sans test de profondeur
+							uint32_t& dc = dioBgCol[outIdx];
+							if(alpha == 255 || (dc >> 24) == 0) dc = (pixelColor & 0xFFFFFFu) | (alpha << 24);
+							else {
+								const uint32_t ia = 255 - alpha;
+								const uint32_t rb = (((pixelColor & 0xFF00FFu) * alpha + (dc & 0xFF00FFu) * ia) >> 8) & 0xFF00FFu;
+								const uint32_t g = (((pixelColor & 0x00FF00u) * alpha + (dc & 0x00FF00u) * ia) >> 8) & 0x00FF00u;
+								dc = rb | g | (std::max(alpha, dc >> 24) << 24);
+							}
+							if(alpha >= 128) dioBgZ[outIdx] = (uint8_t)bg->ZIndex;
+						}
 						if(bg->ZIndex >= _zBuffer[outIdx]) {
 							if(alpha == 255) {
 								out[outIdx] = pixelColor | 0xFF000000;
@@ -4182,6 +4208,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								uint32_t dstColor = out[pixelIndex];
 								uint32_t invAlpha = 255 - alpha;
 
+								if(dioTrCol) { dioTrCol[pixelIndex] = finalColor; dioTrZ[pixelIndex] = item.zIndex; } // diorama : bord semi-transparent
 								uint32_t s_R = (finalColor >> 16) & 0xFF;
 								uint32_t s_G = (finalColor >> 8) & 0xFF;
 								uint32_t s_B = finalColor & 0xFF;
@@ -5697,6 +5724,30 @@ if(video->IsPlaying && video->VideoPlayer != nullptr) {
 }
 
 		}
+	}
+
+	// ====================================================================
+	// DIORAMA SNES (doc 59) : couches L0..L3 (+ fixe) tirees de l'image composee et du releve PPU par source,
+	// scene 3D dessinee par le GPU (Shared/HdGpuCore). Inactif ou en echec : l'image 2D reste intacte.
+	// ====================================================================
+	if(_framePack->Dio && out != nullptr) {
+		if(!_dio) _dio = SnesHdDioCreate();
+		SnesHdDioFrame df;
+		df.BgCol = dioBgCol; df.BgZ = dioBgZ; df.TrCol = dioTrCol; df.TrZ = dioTrZ;
+		df.Out = out; df.Z = _zBuffer.data(); df.OutW = outWidth; df.OutH = hdHeight; df.Scale = scale;
+		df.SrcX = (int)srcX; df.SrcY = (int)srcY; df.DstX = (int)dstX; df.DstY = (int)dstY;
+		df.SdWidth = _baseFrameInfo.Width; df.Wide = wsExt > 0;
+		df.Rec = console->GetPpu()->GetHdDioBuffer();
+		df.Backdrop = console->GetPpu()->GetHdDioBackdrop();
+		df.Palette = _calculatedPalette;
+		const SnesPpuState dioPpu = console->GetPpu()->GetState();
+		df.BgMode = dioPpu.BgMode; df.Bg3Priority = dioPpu.Mode1Bg3Priority;
+		// une image qui melange Mode 7 et un autre mode (Mario Kart : HUD en Mode 1) compte comme Mode 7 (pas encore pris en charge)
+		if(hdBuffer && _baseFrameInfo.Width == 256) {
+			for(uint32_t r = 0; r < 239 && df.BgMode != 7; r++) { if(hdBuffer[r * 256 + 128].IsMode7 || hdBuffer[r * 256 + 8].IsMode7) df.BgMode = 7; }
+		}
+		df.FrameNumber = _framePack->ScreenInfo.FrameNumber; df.Screen = &_framePack->ScreenInfo; df.Pool = &_pool;
+		SnesHdDioRun(*_dio, *_framePack, df);
 	}
 
 	// ====================================================================

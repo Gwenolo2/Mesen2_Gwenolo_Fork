@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { PROFILES } from './consoles';
 
 /**
  * Textes des fichiers de pack ouverts dans l'éditeur, modifications non sauvegardées incluses,
@@ -8,7 +9,7 @@ import * as vscode from 'vscode';
 export function openPackTexts(): Map<string, string> {
     const texts = new Map<string, string>();
     for (const d of vscode.workspace.textDocuments) {
-        if ((d.languageId === 'mesen-snes-hd' || d.languageId === 'mesen-nes-hd') && d.uri.scheme === 'file') {
+        if (PROFILES.some(p => p.languageId === d.languageId) && d.uri.scheme === 'file') {
             texts.set(path.resolve(d.uri.fsPath), d.getText());
         }
     }

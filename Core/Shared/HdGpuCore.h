@@ -264,6 +264,8 @@ class HdGpuCore
 {
 public:
 	static HdGpuCore& Get();
+	// Diorama SNES (doc 59) : relache le contexte, pour qu'un autre contexte OpenGL du meme thread (SnesHdGpu, Mode 7) ne soit pas pris pour le sien
+	void ReleaseForOtherContext() { ReleaseCurrent(); }
 
 	// Ouvre le contexte au premier appel (une seule tentative). Faux = pas de GPU.
 	bool Available();

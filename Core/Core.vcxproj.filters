@@ -2985,6 +2985,12 @@
     <ClInclude Include="SNES\HdPacks\SnesHdGpu.h">
       <Filter>SNES\HdPacks</Filter>
     </ClInclude>
+    <ClInclude Include="SNES\HdPacks\SnesHdDiorama.h">
+      <Filter>SNES\HdPacks</Filter>
+    </ClInclude>
+    <ClInclude Include="SNES\HdPacks\SnesHdDioramaRun.h">
+      <Filter>SNES\HdPacks</Filter>
+    </ClInclude>
     <ClInclude Include="Shared\HdGpuCore.h">
       <Filter>Shared</Filter>
     </ClInclude>
@@ -3394,6 +3400,9 @@
       <Filter>SNES\HdPacks</Filter>
     </ClCompile>
     <ClCompile Include="SNES\HdPacks\SnesHdGpu.cpp">
+      <Filter>SNES\HdPacks</Filter>
+    </ClCompile>
+    <ClCompile Include="SNES\HdPacks\SnesHdDiorama.cpp">
       <Filter>SNES\HdPacks</Filter>
     </ClCompile>
     <ClCompile Include="Shared\HdGpuCore.cpp">

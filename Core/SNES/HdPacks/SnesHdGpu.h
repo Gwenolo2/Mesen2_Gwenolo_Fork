@@ -40,6 +40,8 @@ class SnesHdGpu
 {
 public:
 	static SnesHdGpu& Get();
+	// Diorama SNES (doc 59) : relache le contexte avant que HdGpuCore (diorama) active le sien sur le meme thread
+	void ReleaseForOtherContext() { ReleaseCurrent(); }
 
 	// Ouvre le contexte au premier appel (une seule tentative). Faux = moteur processeur.
 	bool Available();

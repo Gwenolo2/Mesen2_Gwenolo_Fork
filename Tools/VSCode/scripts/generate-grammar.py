@@ -15,6 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TARGETS = [
     ('schemas/29_schema_balises_snes.json', 'syntaxes/mesen-snes-hd.tmLanguage.json', 'snes-hd', 'Mesen HD Pack (SNES)'),
     ('schemas/schema_balises_nes.json', 'syntaxes/mesen-nes-hd.tmLanguage.json', 'nes-hd', 'Mesen HD Pack (NES)'),
+    ('schemas/schema_balises_gb.json', 'syntaxes/mesen-gb-hd.tmLanguage.json', 'gb-hd', 'Mesen HD Pack (Game Boy)'),
 ]
 
 

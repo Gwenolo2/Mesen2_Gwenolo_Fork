@@ -1,0 +1,102 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mesen HD Pack (Game Boy)",
+  "scopeName": "source.mesen-gb-hd",
+  "comment": "Généré par scripts/generate-grammar.py depuis schemas/schema_balises_gb.json. Ne pas éditer à la main.",
+  "patterns": [
+    {
+      "name": "comment.line.number-sign.mesen-gb-hd",
+      "match": "#.*$"
+    },
+    {
+      "name": "meta.condition.mesen-gb-hd",
+      "begin": "^\\s*\\[",
+      "end": "\\]",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.condition.begin.mesen-gb-hd"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.condition.end.mesen-gb-hd"
+        }
+      },
+      "patterns": [
+        {
+          "name": "keyword.operator.and.mesen-gb-hd",
+          "match": "&"
+        },
+        {
+          "name": "keyword.operator.not.mesen-gb-hd",
+          "match": "!"
+        },
+        {
+          "name": "support.function.condition.mesen-gb-hd",
+          "match": "\\b(?:spriteAtPosition|tileAtPosition|spriteNearby|tileNearby|frameRange)\\b"
+        },
+        {
+          "name": "constant.numeric.hash.mesen-gb-hd",
+          "match": "\\b[0-9A-Fa-f]{8,16}\\b"
+        },
+        {
+          "name": "constant.numeric.mesen-gb-hd",
+          "match": "-?\\d+(?:\\.\\d+)?"
+        },
+        {
+          "name": "keyword.operator.or.mesen-gb-hd",
+          "match": "\\|"
+        }
+      ]
+    },
+    {
+      "name": "punctuation.section.block.mesen-gb-hd",
+      "match": "\\}>?|\\{"
+    },
+    {
+      "name": "keyword.control.tag.mesen-gb-hd",
+      "match": "<(?:disableOriginalTiles|play_conditional_bgm|tile_hvflip|setVariable|tile_vflip|tile_hflip|background|2DOverlay|muteAudio|condition|include|options|scale|tile|img|bgm)>"
+    },
+    {
+      "name": "keyword.control.tag.mesen-gb-hd",
+      "match": "(?i:<(?:DioramaCameraDefault|watchMemoryAddress|DioramaCameraKeys|DioramaExtend|DioramaClouds|DioramaCamera|DioramaWindow|DioramaObject|DioramaSkybox|DioramaShadow|2DSpriteLight|DioramaDepth|DioramaLight|3DParticles|DioramaView|DioramaMist|DioramaPad|DioramaFog|DayNight|spriteZ|Diorama)>)"
+    },
+    {
+      "name": "invalid.deprecated.tag.mesen-gb-hd",
+      "match": "(?i:<(?:play_conditional_sfx|disable_8bits_Sound|Ignore2DOverlays|DioramaOffCamera|LoadingScreen|DioramaNormal|2DPerspective|DioramaIgnore|Sprite2Obj|widescreen|2DTexture|2DReflect|Tile2Obj|addition|2DLiquid|overscan|fallback|patch|alias|video|sfx|ver)>)"
+    },
+    {
+      "name": "invalid.illegal.tag.mesen-gb-hd",
+      "match": "<[^>\\s]*>"
+    },
+    {
+      "name": "variable.parameter.mesen-gb-hd",
+      "match": "(?<=[,>\\s])[A-Za-z_]\\w*(?==)"
+    },
+    {
+      "name": "string.unquoted.path.mesen-gb-hd",
+      "match": "[^\\s,\\[\\]{}<>=|#]+\\.(?i:png|ogg|json|obj|mtl|gltf|glb|mpg|mp4|txt|mesen)\\b"
+    },
+    {
+      "name": "constant.numeric.hash.mesen-gb-hd",
+      "match": "\\b[0-9A-Fa-f]{8,16}\\b"
+    },
+    {
+      "name": "constant.numeric.mesen-gb-hd",
+      "match": "(?<![\\w.])-?\\d+(?:\\.\\d+)?\\b"
+    },
+    {
+      "name": "constant.language.boolean.mesen-gb-hd",
+      "match": "\\b(?i:true|false|yes|no)\\b"
+    },
+    {
+      "name": "keyword.operator.wildcard.mesen-gb-hd",
+      "match": "\\*"
+    },
+    {
+      "name": "keyword.operator.or.mesen-gb-hd",
+      "match": "\\|"
+    }
+  ],
+  "repository": {}
+}

@@ -55,11 +55,11 @@
     },
     {
       "name": "keyword.control.tag.mesen-nes-hd",
-      "match": "<(?:play_conditional_bgm|play_conditional_sfx|disable_8bits_Sound|LoadingScreen|2DPerspective|tile_hvflip|setVariable|tile_vflip|widescreen|background|tile_hflip|condition|2DOverlay|fallback|2DLiquid|overscan|addition|options|include|scale|alias|patch|video|tile|sfx|ver|img|bgm)>"
+      "match": "<(?:play_conditional_bgm|play_conditional_sfx|disable_8bits_Sound|LoadingScreen|2DPerspective|tile_hvflip|setVariable|tile_hflip|widescreen|background|tile_vflip|condition|2DOverlay|addition|2DLiquid|overscan|fallback|include|options|patch|scale|alias|video|tile|img|sfx|bgm|ver)>"
     },
     {
       "name": "keyword.control.tag.mesen-nes-hd",
-      "match": "(?i:<(?:DioramaCameraDefault|watchMemoryAddress|DioramaCameraKeys|Ignore2DOverlays|DioramaOffCamera|DioramaShadow|DioramaClouds|DioramaObject|DioramaCamera|2DSpriteLight|DioramaExtend|DioramaSkybox|DioramaNormal|DioramaIgnore|DioramaDepth|DioramaLight|DioramaMist|DioramaView|3DParticles|Sprite2Obj|DioramaFog|DioramaPad|2DReflect|2DTexture|DayNight|Tile2Obj|Diorama)>)"
+      "match": "(?i:<(?:DioramaCameraDefault|watchMemoryAddress|DioramaCameraKeys|Ignore2DOverlays|DioramaOffCamera|DioramaExtend|DioramaClouds|DioramaCamera|DioramaNormal|DioramaObject|DioramaSkybox|DioramaIgnore|DioramaShadow|2DSpriteLight|DioramaDepth|DioramaLight|3DParticles|DioramaView|DioramaMist|Sprite2Obj|DioramaPad|DioramaFog|2DTexture|2DReflect|Tile2Obj|DayNight|Diorama)>)"
     },
     {
       "name": "invalid.illegal.tag.mesen-nes-hd",

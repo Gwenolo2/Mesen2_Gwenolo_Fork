@@ -99,7 +99,7 @@ export function computeDiagnostics(doc: vscode.TextDocument, schema: Schema, pro
             if (body.startsWith('<')) {
                 if (schema.notRecognized.has(key)) {
                     report(r, { severity: vscode.DiagnosticSeverity.Error, code: 'tag-not-recognized',
-                        message: `<${written}> est absente du loader SNES : elle sera ignorée.` });
+                        message: `<${written}> est absente du loader ${profile.shortName} : elle sera ignorée.` });
                 } else if (schema.planned.has(key)) {
                     report(r, { severity: vscode.DiagnosticSeverity.Error, code: 'tag-planned',
                         message: `<${written}> n'est pas encore implémentée.` });

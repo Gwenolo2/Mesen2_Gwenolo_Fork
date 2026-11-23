@@ -173,6 +173,16 @@ private:
 	SnesHdPixelData _hdSpriteBufferBehind[256] = {};
 	SnesHdPixelData _hdSpriteBufferCopyBehind[256] = {};
 
+	// Diorama SNES (doc 59) : releve de chaque source (BG1..BG4, sprites) par ligne, avant le test de priorite.
+	// Tampons de frame alloues a la premiere ligne relevee (seulement si le pack a un <Diorama>).
+	SnesHdDioPixel _hdDioLine[SnesHdDioSources][256] = {};
+	SnesHdDioPixel* _hdDioBuffers[2] = {};
+	SnesHdDioPixel* _hdDioReadyBuf = nullptr;
+	uint16_t _hdDioBackdrop[2][240] = {};
+	uint8_t _hdDioCur = 0;
+	uint8_t _hdDioReady = 0;
+	bool _hdDioRec = false; // releve actif pour le segment de ligne en cours
+
 	uint32_t _beyondPriorityBuffer[512] = {};
 	bool _hasBeyondPriorityPixels = false;
 
@@ -336,6 +346,9 @@ public:
 	// Buffer des sprites en second plan (sous un sprite plus prioritaire)
 	SnesHdPixelData* GetHdSpriteBehindBuffer() { return _hdSpriteBufferBehind; }
 	SnesHdPixelData* GetHdBehindScreenBuffer() { return _readyHdBehindBuffer; }
+	// Diorama SNES (doc 59) : releve par source de la frame prete (239 lignes x 5 sources x 256), nullptr si pas de releve
+	const SnesHdDioPixel* GetHdDioBuffer() const { return _hdDioReadyBuf; }
+	const uint16_t* GetHdDioBackdrop() const { return _hdDioBackdrop[_hdDioReady]; }
 	const uint8_t* GetCurrentSpritePriorities() const { return _readySpritePriorities; }
 	const uint16_t* GetColorWindowPreMathBuffer() const { return _readyCwPreMath; }
 	const SnesHdM7LineCapture* GetMode7LineCapture() const { return _m7Capture[_m7CapReady]; }

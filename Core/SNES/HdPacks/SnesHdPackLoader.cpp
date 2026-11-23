@@ -4,6 +4,8 @@
 #include "SNES/HdPacks/SnesHdPackLoader.h"
 #include "SNES/HdPacks/SnesHdPackConditions.h"
 #include "SNES/HdPacks/SnesHdGltf.h"
+#include "SNES/HdPacks/SnesHdDiorama.h" // diorama SNES (doc 59)
+#include "NES/HdPacks/HdPackLoader.h"     // ParseForeignDioramaLine (balises diorama, meme syntaxe que le NES)
 #include "Shared/MessageManager.h"
 #include "Utilities/FolderUtilities.h"
 #include "Utilities/StringUtilities.h"
@@ -833,6 +835,103 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 			spriteLightBlockStack.push_back(L);
 			spriteLightBlockCount.push_back(0);
 			blockKinds.push_back('L');
+			continue;
+		}
+
+		// ====================================================================
+		// DIORAMA SNES (doc 59) : balises du diorama NES lues par le chargeur NES (conditions SNES adaptees),
+		// et balises propres au SNES : <DioramaLayer>bgN,... et <DioramaSprites>...
+		// ====================================================================
+		if(StringUtilities::ToLower(lineContent.substr(0, 8)) == "<diorama") {
+			if(!outData->Dio) outData->Dio = std::make_shared<SnesHdDiorama>();
+			SnesHdDiorama& dio = *outData->Dio;
+			const std::string dlow = StringUtilities::ToLower(lineContent);
+			auto dStarts = [&](const char* tag) { const size_t n = strlen(tag); return dlow.size() >= n && dlow.compare(0, n, tag) == 0; };
+			// cible : 0..3 ou L0..L3, fixed (couche a plat devant la scene), off (retire de l'image) ; -1 = invalide
+			auto dTarget = [](std::string v) -> int {
+				v = StringUtilities::ToLower(StringUtilities::Trim(v));
+				if(v == "fixed" || v == "fixe" || v == "hud") return SnesHdDioFixed;
+				if(v == "off") return SnesHdDioOff;
+				if(v.size() == 2 && v[0] == 'l') v = v.substr(1);
+				if(v.size() == 1 && v[0] >= '0' && v[0] <= '3') return v[0] - '0';
+				return -1;
+			};
+			if(dStarts("<dioramalayer>") || dStarts("<dioramasprites>")) {
+				const bool isSpr = dStarts("<dioramasprites>");
+				std::vector<std::string> dtok = StringUtilities::Split(lineContent.substr(isSpr ? 16 : 14), ',');
+				int bg = -1, layer = -1, prio = -1;
+				bool bad = false;
+				for(size_t ti = 0; ti < dtok.size(); ti++) {
+					const std::string tk = StringUtilities::ToLower(StringUtilities::Trim(dtok[ti]));
+					if(tk.empty()) continue;
+					const size_t eq = tk.find('=');
+					if(eq == std::string::npos) {
+						if(!isSpr && bg < 0 && (tk == "bg1" || tk == "bg2" || tk == "bg3" || tk == "bg4")) bg = tk[2] - '1';
+						else if(!isSpr && bg < 0 && tk.size() == 1 && tk[0] >= '1' && tk[0] <= '4') bg = tk[0] - '1';
+						else if(dTarget(tk) >= SnesHdDioFixed) layer = dTarget(tk);
+						else bad = true;
+						continue;
+					}
+					const std::string key = tk.substr(0, eq), val = tk.substr(eq + 1);
+					if(key == "layer" || key == "couche") { layer = dTarget(val); if(layer < 0) bad = true; }
+					else if(key == "prio" || key == "priority") {
+						if(val == "*" || val == "all") prio = -1;
+						else if(!isSpr && (val == "high" || val == "1")) prio = 1;
+						else if(!isSpr && (val == "low" || val == "0")) prio = 0;
+						else if(isSpr && val.size() == 1 && val[0] >= '0' && val[0] <= '3') prio = val[0] - '0';
+						else bad = true;
+					}
+					else bad = true;
+				}
+				if(bad || layer < 0 || (!isSpr && bg < 0)) {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - " + (isSpr ? "<DioramaSprites>layer=0..3|fixed|off[,prio=0..3]" : "<DioramaLayer>bg1..bg4,layer=0..3|fixed|off[,prio=0|1]") + " attendu, ligne ignoree : " + lineContent);
+				} else if(isSpr) {
+					SnesHdDioSpriteRule r; r.Prio = prio; r.Layer = layer; r.Conditions = currentConditions;
+					dio.SpriteRules.push_back(r);
+				} else {
+					SnesHdDioLayerRule r; r.Bg = bg; r.Prio = prio; r.Layer = layer; r.Conditions = currentConditions;
+					dio.LayerRules.push_back(r);
+				}
+				continue;
+			}
+			const bool supported = dStarts("<diorama>") || dStarts("<dioramacamera") || dStarts("<dioramapad>") || dStarts("<dioramalight>") ||
+				dStarts("<dioramaskybox>") || dStarts("<dioramafog>") || dStarts("<dioramaclouds>") || dStarts("<dioramamist>") || dStarts("<dioramaview>");
+			if(!supported) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - balise diorama pas encore prise en charge sur SNES (doc 59, etapes suivantes), ignoree : " + lineContent);
+				continue;
+			}
+			std::string dline = lineContent;
+			if(dStarts("<diorama>")) {
+				// options propres au SNES : ref=bgN (repere du monde), refx= / refy= (repere depuis la RAM) ; le reste va au chargeur NES
+				std::string rest;
+				for(const std::string& raw : StringUtilities::Split(lineContent.substr(9), ',')) {
+					const std::string tk = StringUtilities::Trim(raw);
+					const std::string lk = StringUtilities::ToLower(tk);
+					std::string err;
+					if(lk.compare(0, 4, "ref=") == 0) {
+						const std::string v = lk.substr(4);
+						if(v.size() == 3 && v[0] == 'b' && v[1] == 'g' && v[2] >= '1' && v[2] <= '4') dio.RefBg = v[2] - '1';
+						else MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <Diorama> : ref=bg1..bg4 attendu, ignore : " + tk);
+					} else if(lk.compare(0, 5, "refx=") == 0 || lk.compare(0, 5, "refy=") == 0) {
+						HdWatchExpr& e = lk[3] == 'x' ? dio.RefX : dio.RefY;
+						if(!HdWatchExpr::Parse(tk.substr(5), outData->WatchedVars, e, err)) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <Diorama> : " + tk + " : " + err);
+					} else {
+						rest += (rest.empty() ? "" : ",") + tk;
+					}
+				}
+				dline = lineContent.substr(0, 9) + rest;
+			}
+			// valeurs RAM nommees : meme ordre que outData->WatchedVars (pour scrollx= des etapes suivantes)
+			dio.Data.WatchedValues.clear();
+			for(const HdWatchVar& w : outData->WatchedVars) {
+				HdWatchedValue hv; hv.Name = w.Name; hv.Address = w.Address; hv.Size = w.Size; hv.Signed = w.Signed;
+				dio.Data.WatchedValues.push_back(hv);
+			}
+			std::vector<HdPackCondition*> dconds;
+			if(!currentConditions.empty()) dconds.push_back(dio.MakeCond(currentConditions));
+			if(!HdPackLoader::ParseForeignDioramaLine(rootFolder, dline, dconds, dio.ByName, dio.Data)) {
+				MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - balise diorama non reconnue : " + lineContent);
+			}
 			continue;
 		}
 
@@ -3601,6 +3700,14 @@ else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dtexture>") {
 	}		
 
 	//MessageManager::Log("[HD TRACE 1] Fichier texte lu ! Tuiles chargees : " + std::to_string(outData->TileByKey.size()));
+
+	// Diorama SNES (doc 59) : la PPU ne releve chaque source (BG1..BG4, sprites) que si le pack a un <Diorama>
+	outData->DioRecord = outData->Dio && outData->Dio->Data.DioramaEnabled;
+	if(outData->Dio) {
+		MessageManager::Log(std::string("[HD-SNES-DIORAMA] chargement : <Diorama> ") + (outData->DioRecord ? "present" : "ABSENT (les autres balises diorama sont ignorees)") +
+			", " + std::to_string(outData->Dio->LayerRules.size()) + " <DioramaLayer>, " + std::to_string(outData->Dio->SpriteRules.size()) + " <DioramaSprites>, repere BG" + std::to_string(outData->Dio->RefBg + 1) +
+			(outData->Dio->RefX.Empty() && outData->Dio->RefY.Empty() ? "" : " (refx= / refy= en RAM)"));
+	}
 
 	// Tri croissant des backgrounds (du Z-Index le plus bas/arrière au plus haut/avant : Algorithme du peintre)
 	std::sort(outData->Backgrounds.begin(), outData->Backgrounds.end(),

@@ -34,6 +34,7 @@ class SnesHdPackData;
 class SnesPpu;
 struct SnesPpuState;
 struct SnesHdPixelData;
+struct SnesHdDiorama; // diorama SNES (doc 59), SnesHdDiorama.h
 
 // Bande 16:9 Mode 7 (tuiles <m7tiles>) : rangee dans le buffer HD, apres les lignes 512 px.
 // Ligne y, colonnes SNES -128..-1 -> index +0..127, colonnes 256..383 -> index +128..255.
@@ -322,6 +323,21 @@ struct SnesHdPixelData
 	bool M7LargeMap = false;   // Vrai si le jeu interdit la répétition (Screen Over)
 
 };
+
+// Diorama SNES (doc 59) : pixel releve par la PPU pour CHAQUE source (BG1..BG4, sprites), avant le test de priorite.
+// Sert a remplir les couches du diorama sous ce qui est devant (pas de trou quand la camera tourne).
+// Flags : bit0 present, bit1 HFlip, bit2 VFlip, bit3 tile prioritaire (BG) ; Prio : priorite PPU (meme echelle que SnesPriorityLevel).
+struct SnesHdDioPixel
+{
+	SnesHdPackTileInfo* Tile = nullptr;
+	uint16_t Color = 0;  // couleur SNES 15 bits (avant color math et luminosite)
+	uint8_t TileX = 0;
+	uint8_t TileY = 0;
+	uint8_t Prio = 0;
+	uint8_t Flags = 0;
+	uint8_t OamPrio = 0; // sprites : priorite OAM brute (0..3)
+};
+constexpr uint32_t SnesHdDioSources = 5; // BG1..BG4, sprites
 // =========================================================
 enum class SnesHdPackConditionType
 {
@@ -1880,6 +1896,9 @@ public:
 	std::unordered_set<uint32_t> WatchedMemoryAddresses;
 	// <watchMemoryAddress> : valeurs nommees (lecture seule), utilisables dans <background> via ramx= / ramy=
 	std::vector<HdWatchVar> WatchedVars;
+	// Diorama SNES (doc 59) : regles (format NES) et affectation des couches ; DioRecord : la PPU releve chaque source (SnesHdDioPixel)
+	std::shared_ptr<SnesHdDiorama> Dio;
+	bool DioRecord = false;
 	// Valeur de l'expression pour l'image courante ; false si une adresse n'est pas encore lue
 	bool EvalWatchExpr(const HdWatchExpr& e, float& out) const
 	{

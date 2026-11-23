@@ -10,11 +10,12 @@ import { declaredConditions, resolvePack } from './resolver';
 import { PackSignatureProvider } from './signature';
 import { Schema, loadSchema } from './schema';
 
-/** Console déduite du nom du fichier : snes_hires.txt = SNES, hires.txt = NES. */
+/** Console déduite du nom du fichier : snes_hires.txt = SNES, hires.txt = NES, gb_hires.txt = Game Boy. */
 export function consoleForFileName(fileName: string): HdConsole | undefined {
     const base = (fileName.split(/[\\/]/).pop() ?? '').toLowerCase();
     if (base === 'snes_hires.txt') return 'snes';
     if (base === 'hires.txt') return 'nes';
+    if (base === 'gb_hires.txt') return 'gb';
     return undefined;
 }
 
@@ -43,7 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('mesenHd.listConditions', () => {
             const doc = vscode.window.activeTextEditor?.document;
             if (!doc || doc.uri.scheme !== 'file' || !profileForDocument(doc)) {
-                vscode.window.showWarningMessage('Ouvrez un snes_hires.txt ou un hires.txt.');
+                vscode.window.showWarningMessage('Ouvrez un snes_hires.txt, un hires.txt ou un gb_hires.txt.');
                 return;
             }
             const pack = resolvePack(doc.uri.fsPath, openPackTexts());
@@ -77,7 +78,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.workspace.onDidCloseTextDocument(doc => diagnostics.delete(doc.uri)),
     );
 
-    output.appendLine('Mesen HD Pack (SNES et NES) activé.');
+    output.appendLine('Mesen HD Pack (SNES, NES et Game Boy) activé.');
 }
 
 export function deactivate(): void {

@@ -75,6 +75,8 @@ SnesPpu::~SnesPpu() {
   delete[] _hdSubOutputBuffers[1];
   delete[] _hdBehindOutputBuffers[0];
   delete[] _hdBehindOutputBuffers[1];
+  delete[] _hdDioBuffers[0]; // diorama SNES (doc 59)
+  delete[] _hdDioBuffers[1];
 }
 //-----------------------------------------------------------------
 void SnesPpu::PowerOn() {
@@ -687,6 +689,7 @@ bool SnesPpu::ProcessEndOfScanline(uint16_t &hClock) {
                                        ? _hdBehindOutputBuffers[1]
                                        : _hdBehindOutputBuffers[0];
           memset(_currentHdBehindBuffer, 0, 512 * 478 * sizeof(SnesHdPixelData));
+          _hdDioCur ^= 1; // diorama SNES (doc 59) : releve par source, autre tampon
           _currentCwPreMath = (_currentCwPreMath == _cwPreMathBuffers[0]) ? _cwPreMathBuffers[1] : _cwPreMathBuffers[0];
 
           if (_interlacedFrame) {
@@ -1859,6 +1862,14 @@ void SnesPpu::RenderScanline() {
 	  size_t chunkTaille = (_drawEndX - _drawStartX + 1) * sizeof(SnesHdPixelData);
 	  memset(_hdMainScreenBuffer + _drawStartX, 0, chunkTaille);
 	  memset(_hdSubScreenBuffer + _drawStartX, 0, chunkTaille);
+	  // Diorama SNES (doc 59) : releve de chaque source (BG1..BG4, sprites) seulement si le pack a un <Diorama> (pas en haute resolution)
+	  _hdDioRec = SnesHdPackLoader::ActivePack && SnesHdPackLoader::ActivePack->DioRecord && !_useHighResOutput;
+	  if(_hdDioRec) {
+		  if(!_hdDioBuffers[0]) {
+			  for(int b = 0; b < 2; b++) _hdDioBuffers[b] = new SnesHdDioPixel[239 * SnesHdDioSources * 256]();
+		  }
+		  for(uint32_t s = 0; s < SnesHdDioSources; s++) memset(&_hdDioLine[s][_drawStartX], 0, (_drawEndX - _drawStartX + 1) * sizeof(SnesHdDioPixel));
+	  }
 	  // ETAPE 2 16:9 : efface la rangee de bande Mode 7 HD de cette scanline
 	  if(_drawStartX == 0 && SnesHdPackLoader::ActivePack && SnesHdPackLoader::ActivePack->WsExtPx > 0) {
 		  { const int bandRowC = _overscanFrame ? (int)_scanline - 1 : (int)_scanline + 6; if(bandRowC >= 0 && bandRowC < 240) memset(_currentHdBuffer + SnesHdM7BandBase + ((uint32_t)bandRowC << 8), 0, 256 * sizeof(SnesHdPixelData)); }
@@ -1990,6 +2001,18 @@ void SnesPpu::RenderSprites(const uint8_t priority[4])
 	for(int x = _drawStartX; x <= _drawEndX; x++) {
 		if(_spritePriority[x] <= 3) {
 			uint8_t spritePrio = priority[_spritePriority[x]];
+
+			// Diorama SNES (doc 59) : pixel de sprite releve meme s'il perd contre un BG plus prioritaire
+			if(_hdDioRec && drawMain && !ProcessMaskWindow<SnesPpu::SpriteLayerIndex>(mainWindowCount, x)) {
+				SnesHdDioPixel& dp = _hdDioLine[4][x];
+				dp.Tile = _hdSpriteBuffer[x].Tile;
+				dp.Color = _cgram[128 + (_spritePalette[x] << 4) + _spriteColors[x]];
+				dp.TileX = _hdSpriteBuffer[x].TileX;
+				dp.TileY = _hdSpriteBuffer[x].TileY;
+				dp.Prio = spritePrio;
+				dp.OamPrio = _spritePriority[x];
+				dp.Flags = 1 | (_hdSpriteBuffer[x].HFlip ? 2 : 0) | (_hdSpriteBuffer[x].VFlip ? 4 : 0);
+			}
 
 			if(drawMain && ((_mainScreenFlags[x] & 0x0F) < spritePrio) &&
 				!ProcessMaskWindow<SnesPpu::SpriteLayerIndex>(mainWindowCount, x)) {
@@ -2199,6 +2222,16 @@ void SnesPpu::RenderTilemap() {
     if (color > 0) {
       uint16_t rgbColor = GetRgbColor<bpp, directColorMode, basePaletteOffset>(
           paletteIndex, color);
+      // Diorama SNES (doc 59) : pixel de ce BG releve meme s'il perd contre une source plus prioritaire
+      if (_hdDioRec && drawMain && !ProcessMaskWindow<layerIndex>(mainWindowCount, x)) {
+        SnesHdDioPixel& dp = _hdDioLine[layerIndex][x];
+        dp.Tile = hdPixel.Tile;
+        dp.Color = rgbColor;
+        dp.TileX = hdPixel.TileX;
+        dp.TileY = hdPixel.TileY;
+        dp.Prio = priority;
+        dp.Flags = 1 | (hMirror ? 2 : 0) | (vMirror ? 4 : 0) | ((tilemapData & 0x2000) ? 8 : 0);
+      }
       if (drawMain && (_mainScreenFlags[x] & 0x0F) < priority &&
           !ProcessMaskWindow<layerIndex>(mainWindowCount, x)) {
 
@@ -2896,6 +2929,15 @@ void SnesPpu::ApplyHiResMode() {
 	  memcpy(_currentHdBehindBuffer + (scanline << 8) + _drawStartX,
 				_hdSpriteBufferBehind + _drawStartX,
 				(_drawEndX - _drawStartX + 1) * sizeof(SnesHdPixelData));
+
+	  // Diorama SNES (doc 59) : releve par source de cette ligne, et couleur du fond (backdrop)
+	  if(_hdDioRec && _hdDioBuffers[_hdDioCur] && scanline < 239) {
+		  SnesHdDioPixel* dioDst = _hdDioBuffers[_hdDioCur] + (size_t)scanline * SnesHdDioSources * 256;
+		  for(uint32_t s = 0; s < SnesHdDioSources; s++) {
+			  memcpy(dioDst + s * 256 + _drawStartX, &_hdDioLine[s][_drawStartX], (_drawEndX - _drawStartX + 1) * sizeof(SnesHdDioPixel));
+		  }
+		  if(_drawStartX == 0) _hdDioBackdrop[_hdDioCur][scanline] = _cgram[0];
+	  }
  
   } else {
 	  _interlacedFrame |= _state.ScreenInterlace;
@@ -3037,6 +3079,8 @@ void SnesPpu::SendFrame() {
     _readyHdBuffer = _currentHdBuffer;
     _readyHdSubBuffer = _currentHdSubBuffer;
     _readyHdBehindBuffer = _currentHdBehindBuffer;
+    _hdDioReady = _hdDioCur; // diorama SNES (doc 59)
+    _hdDioReadyBuf = _hdDioBuffers[_hdDioCur];
     memcpy(_readySpritePriorities, _currentSpritePriorities, sizeof(_readySpritePriorities));
     _readyCwPreMath = _currentCwPreMath;
     _m7CapReady = _m7CapCur;

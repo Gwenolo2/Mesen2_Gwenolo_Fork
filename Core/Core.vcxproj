@@ -590,6 +590,8 @@
     <ClInclude Include="SNES\HdPacks\SnesHdData.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdMode7Camera.h" />
     <ClInclude Include="SNES\HdPacks\SnesHdGpu.h" />
+    <ClInclude Include="SNES\HdPacks\SnesHdDiorama.h" />
+    <ClInclude Include="SNES\HdPacks\SnesHdDioramaRun.h" />
     <ClInclude Include="Shared\HdGpuCore.h" />
     <ClInclude Include="Shared\HdDayNight.h" />
     <ClInclude Include="Shared\HdCamera.h" />
@@ -1001,6 +1003,7 @@
     <ClCompile Include="SNES\HdPacks\SnesHdPackLoader.cpp" />
     <ClCompile Include="SNES\HdPacks\SnesHdVideoFilter.cpp" />
     <ClCompile Include="SNES\HdPacks\SnesHdGpu.cpp" />
+    <ClCompile Include="SNES\HdPacks\SnesHdDiorama.cpp" />
     <ClCompile Include="Shared\HdGpuCore.cpp" />
     <ClCompile Include="SNES\HdPacks\SnesHdGltf.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

@@ -1,8 +1,10 @@
 /** Console d'un pack HD : fichier d'entrée, schéma, champs fichiers et conditions intégrées propres à chaque console. */
-export type HdConsole = 'snes' | 'nes';
+export type HdConsole = 'snes' | 'nes' | 'gb';
 
 export interface ConsoleProfile {
     id: HdConsole;
+    /** Nom court affiché dans les messages : SNES, NES, Game Boy. */
+    shortName: string;
     /** Identifiant du langage VS Code. */
     languageId: string;
     /** Nom du fichier d'entrée du pack : marqueur de la console. */
@@ -61,6 +63,7 @@ const FILE_FIELD_NES: Record<string, number> = {
 
 export const SNES_PROFILE: ConsoleProfile = {
     id: 'snes',
+    shortName: 'SNES',
     languageId: 'mesen-snes-hd',
     entryName: 'snes_hires.txt',
     schemaFile: '29_schema_balises_snes.json',
@@ -77,6 +80,7 @@ export const SNES_PROFILE: ConsoleProfile = {
 
 export const NES_PROFILE: ConsoleProfile = {
     id: 'nes',
+    shortName: 'NES',
     languageId: 'mesen-nes-hd',
     entryName: 'hires.txt',
     schemaFile: 'schema_balises_nes.json',
@@ -93,7 +97,36 @@ export const NES_PROFILE: ConsoleProfile = {
     snesRules: false,
 };
 
-export const PROFILES: ConsoleProfile[] = [SNES_PROFILE, NES_PROFILE];
+/** Champs fichiers Game Boy : tile = hash, palette, image, x, y (fichier au rang 2). */
+const FILE_FIELD_GB: Record<string, number> = {
+    'img': 0,
+    'tile': 2,
+    'tile_hflip': 2,
+    'tile_vflip': 2,
+    'tile_hvflip': 2,
+    'background': 0,
+    '2doverlay': 0,
+    'bgm': 2,
+    'dioramaobject': 0,
+    'daynight': 0,
+    'setvariable': 1,
+};
+
+export const GB_PROFILE: ConsoleProfile = {
+    id: 'gb',
+    shortName: 'Game Boy',
+    languageId: 'mesen-gb-hd',
+    entryName: 'gb_hires.txt',
+    schemaFile: 'schema_balises_gb.json',
+    fileField: FILE_FIELD_GB,
+    builtins: {
+        hmirror: 'Indicateur intégré : vrai si la tile est retournée horizontalement (claude/56).',
+        vmirror: 'Indicateur intégré : vrai si la tile est retournée verticalement (claude/56).',
+    },
+    snesRules: false,
+};
+
+export const PROFILES: ConsoleProfile[] = [SNES_PROFILE, NES_PROFILE, GB_PROFILE];
 
 export function profileForLanguage(languageId: string): ConsoleProfile | undefined {
     return PROFILES.find(p => p.languageId === languageId);

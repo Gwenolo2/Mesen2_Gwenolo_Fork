@@ -4,6 +4,7 @@
 #include <chrono>
 #include "SNES/SnesDefaultVideoFilter.h"
 #include "SNES/HdPacks/SnesHdThreadPool.h"
+#include "SNES/HdPacks/SnesHdDioramaRun.h"
 
 struct SnesHdPixelData;
 
@@ -16,6 +17,11 @@ private:
 	FrameInfo _sdFrameInfo = {}; // Pour garder en mémoire la taille basse résolution
 	std::vector<uint8_t> _zBuffer; // La carte de profondeur HD
 	SnesHdThreadPool _pool; // Reserve de threads permanente (passes du filtre)
+	SnesHdDioRuntimePtr _dio; // diorama SNES (doc 59) : etat de la scene (cree au premier usage)
+	std::vector<uint32_t> _dioBgCol; // diorama : <background> du pack empiles (ARGB), sans test de profondeur
+	std::vector<uint8_t> _dioBgZ;    // diorama : Z du fond opaque le plus haut de chaque pixel
+	std::vector<uint32_t> _dioTrCol; // diorama : dernier pixel de tile semi-transparent (ARGB non premultiplie)
+	std::vector<uint8_t> _dioTrZ;    // diorama : Z de ce pixel
 	std::shared_ptr<SnesHdPackData> _framePack; // Snapshot du pack HD pour la frame en cours (evite la course avec LoadHdPack)
 	// Chronometrage des passes (journal [HD-PASS] toutes les 300 frames) : m7, compose, reflets, eclairage, atmosphere
 	double _passMs[5] = {};

@@ -1,6 +1,6 @@
 # 06 – Diorama 3D (NES, Game Boy) et 3D SNES
 
-Docs projet : **47** (état et à-faire, fait foi), **33–45** (étapes G et H), **48** (manette), **49** (caméras), **50** (fonds dans les couches, 8 groupes), **52** (fond GPU), **53** (topDown Zelda 2), **54** (référence topDown, objets, Sprite2Obj, 2DTexture, atmosphère, 3DParticles), **55** (DayNight), **56** (Game Boy). Moteur GPU commun : `Core/Shared/HdGpuCore.cpp` (OpenGL 3.3 via SDL2).
+Docs projet : **47** (état et à-faire, fait foi), **33–45** (étapes G et H), **48** (manette), **49** (caméras), **50** (fonds dans les couches, 8 groupes), **52** (fond GPU), **53** (topDown Zelda 2), **54** (référence topDown, objets, Sprite2Obj, 2DTexture, atmosphère, 3DParticles), **55** (DayNight), **56** (Game Boy), **59** (SNES). Moteur GPU commun : `Core/Shared/HdGpuCore.cpp` (OpenGL 3.3 via SDL2).
 
 ## Principe
 Le filtre sépare l'image en couches (ARGB prémultiplié) que le GPU place en 3D :
@@ -34,7 +34,14 @@ En vue neutre (yaw = pitch = 0) l'image doit être identique au rendu 2D.
 Mêmes balises lues par le chargeur NES ; repère du monde = SCX/SCY cumulé (pas d'`anchor=`) ; `<DioramaDepth>…{ }`, `<DioramaShadow>` (bloc ou `tile=HASH_GB`), `<DioramaExtend>`, `repeat=` pris en charge depuis le 23/11 (non testés) ; pas de `<Sprite2Obj>`, `<Tile2Obj>`, `<DioramaOffCamera>`, `<DioramaNormal>`, lumières de tile. `<DioramaWindow>fixed|scene`. **Compile, non testé.**
 
 ## SNES : 3D Mode 7 (fiche 03)
-`<m7img>` / `<m7tiles>`, `<m7relief>`, `<m7billboard>`, `<m7model>`, `<m7light>`, `<m7material>`, `<m7effect>`, `<3DParticles>`, `<gpu3d>`, `<frontof3d>` ; caméra reconstruite (doc dépôt 10). Le diorama NES n'existe pas sur SNES (idée : doc dépôt 12).
+`<m7img>` / `<m7tiles>`, `<m7relief>`, `<m7billboard>`, `<m7model>`, `<m7light>`, `<m7material>`, `<m7effect>`, `<3DParticles>`, `<gpu3d>`, `<frontof3d>` ; caméra reconstruite (doc dépôt 10). Le diorama ne couvre pas encore le Mode 7 (doc 59, étape 4).
+
+## SNES : diorama (doc 59, étape 1 du 2026-11-23, compile non testé)
+Mêmes balises que le NES (chargeur NES, conditions SNES adaptées), vue **side** seulement. Pris en charge : `<Diorama>` (+ `ref=bg1..bg4`, `refx=` / `refy=` en RAM pour le repère du monde), `<DioramaCamera*>`, `<DioramaPad>`, `<DioramaLight>` (sans `tile=`), `<DioramaSkybox>`, `<DioramaFog>`, `<DioramaClouds>`, `<DioramaMist>`. Propres au SNES :
+- `[cond]<DioramaLayer>bg1..bg4,layer=0..3|fixed|off[,prio=0|1]` : BG → couche ; `fixed` = à plat devant la scène (HUD) ; `off` = retiré de l'image (ce qui est derrière se voit). Défaut : BG1 → L2, BG2..4 → L1.
+- `[cond]<DioramaSprites>layer=0..3|fixed|off[,prio=0..3]` : sprites (priorité OAM) → couche. Défaut : L3.
+- Dernière règle vraie gagne. La priorité PPU reste respectée : une source n'est jamais remplie devant ce qui la cache.
+Pas encore : topDown, `<DioramaDepth>`, `<DioramaShadow>`, objets, `<DioramaExtend>`, `<DayNight>`, Mode 7, modes 5/6, widescreen (diorama coupé, 2D conservé). Journal `[HD-SNES-DIORAMA]`.
 
 ## Conseils
 - Monter dans l'ordre : `<Diorama>` seul (vue neutre = identique au 2D) → `pitch` → ciel → lumières → profondeur des tiles → objets → atmosphère.

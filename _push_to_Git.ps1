@@ -106,11 +106,33 @@ if ($changes.Count -gt 0) {
 # --- 4. Commit ---------------------------------------------------------
 Step "4/6 Enregistrement (commit)..."
 if ($changes.Count -gt 0) {
-    $msg = Read-Host "Message de commit (Entree = message automatique)"
-    if ([string]::IsNullOrWhiteSpace($msg)) { $msg = "Mise a jour du " + (Get-Date -Format 'yyyy-MM-dd HH:mm') }
-    G commit -q -m $msg
-    if ($LASTEXITCODE -ne 0) { Finish $false "Le commit a echoue." }
-    Info "Commit cree : $msg"
+    # Message sur plusieurs lignes (tape ou colle) : terminer par une ligne contenant seulement un point (.)
+    # ou par deux lignes vides de suite. Entree tout de suite = message automatique.
+    Info "Message de commit, sur plusieurs lignes si besoin (le coller fonctionne aussi)."
+    Info "Terminez par une ligne contenant seulement un point (.) ou par deux lignes vides."
+    Info "Entree tout de suite = message automatique."
+    $lines = New-Object System.Collections.Generic.List[string]
+    $empty = 0
+    while ($true) {
+        $l = Read-Host "  "
+        if ($null -eq $l) { break }
+        if ($l.Trim() -eq '.') { break }
+        if ($lines.Count -eq 0 -and [string]::IsNullOrWhiteSpace($l)) { break }   # premiere ligne vide : message automatique
+        if ([string]::IsNullOrWhiteSpace($l)) { $empty++; if ($empty -ge 2) { break } } else { $empty = 0 }
+        $lines.Add($l.TrimEnd())
+    }
+    while ($lines.Count -gt 0 -and [string]::IsNullOrWhiteSpace($lines[$lines.Count - 1])) { $lines.RemoveAt($lines.Count - 1) }
+    if ($lines.Count -eq 0) { $lines.Add("Mise a jour du " + (Get-Date -Format 'yyyy-MM-dd HH:mm')) }
+    $msg = [string]::Join("`n", $lines) + "`n"
+    # Passage par un fichier (UTF-8 sans BOM) : retours a la ligne et accents conserves ; les lignes '#' sont gardees
+    $msgFile = Join-Path (Resolve-Path '.git') 'PUSH_COMMIT_MSG.txt'
+    [System.IO.File]::WriteAllText($msgFile, $msg, (New-Object System.Text.UTF8Encoding $false))
+    G commit -q --cleanup=whitespace -F $msgFile
+    $commitOk = ($LASTEXITCODE -eq 0)
+    Remove-Item -LiteralPath $msgFile -ErrorAction SilentlyContinue
+    if (-not $commitOk) { Finish $false "Le commit a echoue." }
+    Info "Commit cree : $($lines[0])"
+    if ($lines.Count -gt 1) { Info "   (+ $($lines.Count - 1) ligne(s) de details)" }
 } else {
     Info "Aucune modification a enregistrer."
 }

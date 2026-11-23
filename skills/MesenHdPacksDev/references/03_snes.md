@@ -28,6 +28,10 @@ Référence complète : doc projet **20** (balises SNES), **29** (`29_schema_bal
 | `<3DParticles>` | particules dans le monde Mode 7 (`particles3d`, `stretch=`) | 10, atelier `Atelier3DParticles.html` |
 | `<frontof3d>{ }` | éléments 2D devant la 3D (HUD) | 12 |
 
+## Diorama HD-2D (doc 59, étape 1 : side, compile non testé)
+- Mêmes balises que le diorama NES (fiche 06) ; propres au SNES : `<DioramaLayer>bgN,layer=0..3|fixed|off[,prio=0|1]`, `<DioramaSprites>layer=…[,prio=0..3]`, `<Diorama>…,ref=bgN` (repère du monde) ou `refx=$expr,refy=$expr`.
+- Vue neutre (`yaw=0,pitch=0`) = image 2D. Coupé en Mode 7, modes 5/6 (512 px) et widescreen. Journal `[HD-SNES-DIORAMA]`.
+
 ## RAM
 - `<watchmemoryaddress>nom,adresse[,1|2][,signed][,vram|oam|cgram|aram]` : adresses 24 bits (WRAM `7E0000`–`7FFFFF` ; les miroirs `00:0000–1FFF` désignent `7E:0000–1FFF`).
 - Conditions : `memoryCheck`, `memoryCheckConstant` et leurs variantes préfixées `vram`, `ppu`, `oam`, `cgram`, `aram` ; `frameRange`, `tileAtPosition`, `spriteAtPosition`, `tileNearby`, `spriteNearby`.

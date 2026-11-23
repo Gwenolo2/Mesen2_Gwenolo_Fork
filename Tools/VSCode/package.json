@@ -1,8 +1,8 @@
 {
   "name": "mesen-hd-pack-snes",
-  "displayName": "Mesen HD Pack (SNES et NES)",
-  "description": "Coloration, aide et vérifications pour les packs HD de Mesen2 Gwenolo : SNES (snes_hires.txt) et NES (hires.txt).",
-  "version": "0.2.0",
+  "displayName": "Mesen HD Pack (SNES, NES et Game Boy)",
+  "description": "Coloration, aide et vérifications pour les packs HD de Mesen2 Gwenolo : SNES (snes_hires.txt), NES (hires.txt) et Game Boy (gb_hires.txt).",
+  "version": "0.3.0",
   "private": true,
   "license": "UNLICENSED",
   "engines": {
@@ -14,7 +14,8 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:mesen-snes-hd",
-    "onLanguage:mesen-nes-hd"
+    "onLanguage:mesen-nes-hd",
+    "onLanguage:mesen-gb-hd"
   ],
   "contributes": {
     "languages": [
@@ -37,6 +38,16 @@
           "hires.txt"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "mesen-gb-hd",
+        "aliases": [
+          "Mesen HD Pack (Game Boy)"
+        ],
+        "filenames": [
+          "gb_hires.txt"
+        ],
+        "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
@@ -49,6 +60,11 @@
         "language": "mesen-nes-hd",
         "scopeName": "source.mesen-nes-hd",
         "path": "./syntaxes/mesen-nes-hd.tmLanguage.json"
+      },
+      {
+        "language": "mesen-gb-hd",
+        "scopeName": "source.mesen-gb-hd",
+        "path": "./syntaxes/mesen-gb-hd.tmLanguage.json"
       }
     ],
     "commands": [
@@ -65,7 +81,7 @@
       "editor/context": [
         {
           "command": "mesenHd.toggleComment",
-          "when": "editorLangId == mesen-snes-hd || editorLangId == mesen-nes-hd",
+          "when": "editorLangId == mesen-snes-hd || editorLangId == mesen-nes-hd || editorLangId == mesen-gb-hd",
           "group": "1_modification"
         }
       ]
