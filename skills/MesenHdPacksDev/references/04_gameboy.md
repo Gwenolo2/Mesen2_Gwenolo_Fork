@@ -23,7 +23,7 @@ Référence : docs projet **30** (structure, décisions D1–D29), **30b–30j**
 - Son : `<bgm>album,piste,fichier.ogg[,boucle]`, `[termes]<play_conditional_bgm>album,piste[,boucle]`, `[termes]<muteAudio>Square1,Square2,Wave,Noise|*`.
 
 ## Diorama (doc 56) – fiche 06
-`<Diorama>`, `[cond]<DioramaView>topDown`, `<DioramaCamera…>`, `<DioramaPad>`, `<DioramaLight>` (sans `tile=`), `<DioramaSkybox>`, `<DioramaFog>`, `<DioramaClouds>`, `<DioramaMist>`, `<3DParticles>`, `<DioramaObject>` (sans `anchor=`), `<DayNight>` : **même syntaxe que le NES** ; propre au GB : `<DioramaWindow>fixed|scene` (HUD de la fenêtre à plat ou dans la scène). Non pris en charge : `<DioramaDepth>`, `<DioramaShadow>`, `<Sprite2Obj>`, `<Tile2Obj>`, `<DioramaExtend>`, `<DioramaOffCamera>`, `<DioramaNormal>`. **État : compile, non testé (21/11/2026).**
+`<Diorama>`, `[cond]<DioramaView>topDown`, `<DioramaCamera…>`, `<DioramaPad>`, `<DioramaLight>` (sans `tile=`), `<DioramaSkybox>`, `<DioramaFog>`, `<DioramaClouds>`, `<DioramaMist>`, `<3DParticles>`, `<DioramaObject>` (sans `anchor=`, avec `repeat=` et `scrollx=`), `<DayNight>`, `<DioramaDepth>…{ }` (groupes, `name=`), `<DioramaShadow>` (bloc ou `tile=HASH_GB`), `<DioramaExtend>` (23/11) : **même syntaxe que le NES** ; propre au GB : `<DioramaWindow>fixed|scene` (HUD de la fenêtre à plat ou dans la scène). Non pris en charge : `<DioramaDepth>rect=`, `<background>dio=`, `<Sprite2Obj>`, `<Tile2Obj>`, `<DioramaOffCamera>`, `<DioramaNormal>`. **État : compile, non testé (21/11/2026).**
 
 ## Conditions
 - `<condition>nom,memoryCheckConstant,adresse,op,valeur[,masque]` (CPU seulement), `frameRange`, `tileAtPosition`, `spriteAtPosition`, `tileNearby`, `spriteNearby` ; termes `hmirror`, `vmirror`.

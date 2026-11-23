@@ -31,7 +31,7 @@ En vue neutre (yaw = pitch = 0) l'image doit être identique au rendu 2D.
 - `<2DTexture>` en diorama : matériaux PBR, eau animée à deux normales (doc 54 § 4).
 
 ## Game Boy (doc 56)
-Mêmes balises lues par le chargeur NES ; repère du monde = SCX/SCY cumulé (pas d'`anchor=`) ; pas de `<DioramaDepth>`, `<DioramaShadow>`, `<Sprite2Obj>`, `<Tile2Obj>`, `<DioramaExtend>`, lumières de tile. `<DioramaWindow>fixed|scene`. **Compile, non testé.**
+Mêmes balises lues par le chargeur NES ; repère du monde = SCX/SCY cumulé (pas d'`anchor=`) ; `<DioramaDepth>…{ }`, `<DioramaShadow>` (bloc ou `tile=HASH_GB`), `<DioramaExtend>`, `repeat=` pris en charge depuis le 23/11 (non testés) ; pas de `<Sprite2Obj>`, `<Tile2Obj>`, `<DioramaOffCamera>`, `<DioramaNormal>`, lumières de tile. `<DioramaWindow>fixed|scene`. **Compile, non testé.**
 
 ## SNES : 3D Mode 7 (fiche 03)
 `<m7img>` / `<m7tiles>`, `<m7relief>`, `<m7billboard>`, `<m7model>`, `<m7light>`, `<m7material>`, `<m7effect>`, `<3DParticles>`, `<gpu3d>`, `<frontof3d>` ; caméra reconstruite (doc dépôt 10). Le diorama NES n'existe pas sur SNES (idée : doc dépôt 12).

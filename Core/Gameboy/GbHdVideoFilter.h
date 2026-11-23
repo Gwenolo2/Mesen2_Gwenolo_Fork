@@ -78,6 +78,13 @@ private:
 	// priorite), L2 tiles de fond + <background> intermediaires, L3 sprites + <background> avant. _dioFix : fenetre (HUD) a plat.
 	std::vector<uint32_t> _dioL[4];
 	std::vector<uint32_t> _dioFix;
+	// Groupes <DioramaDepth> (G7) : image complete par groupe (ARGB premultiplie) + lignes SD non vides ; vides si le pack n'en declare pas
+	std::vector<uint32_t> _dioG[8];
+	std::vector<uint8_t> _dioGLines[8];
+	// Ombres des sprites (G6c) : silhouettes (ARGB premultiplie), lignes SD utilisees, numero de regle le plus petit par ligne (-1 = aucune)
+	std::vector<uint32_t> _dioS;
+	std::vector<uint8_t> _dioSLines;
+	std::vector<int> _dioSRule;
 	uint32_t _dioFixY0 = 0, _dioFixRows = 0; // lignes HD de la fenetre
 	uint32_t _dioBackdrop = 0xFF000000;      // couleur 0 du fond (hors des plans)
 	bool _dioGpuTried = false, _dioGpuOk = false;

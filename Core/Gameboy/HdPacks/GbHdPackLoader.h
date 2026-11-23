@@ -18,6 +18,8 @@ struct GbHdTileRef
 	uint32_t ImageIndex = 0; // index dans la liste des <img>
 	uint32_t X = 0;
 	uint32_t Y = 0;
+	uint8_t DepthGroup = 0;   // <DioramaDepth> : numero de groupe (1 a 8), 0 = aucun
+	uint16_t ShadowRule = 0;  // <DioramaShadow> : numero de regle d'ombre (1 a 200), 0 = aucune
 };
 
 // Condition memoryCheckConstant : (octet CPU & masque) operateur constante(s)
@@ -252,6 +254,16 @@ struct GbHdVariable
 	std::vector<Rule> Rules;
 };
 
+// <DioramaShadow>tile=HASH[,palette=N|*],options (forme ligne) : sprite -> numero de regle d'ombre (<DioramaShadow> en forme bloc : voir GbHdTileRef::ShadowRule)
+struct GbHdShadowKey
+{
+	uint64_t Hash = 0;
+	bool AnyTile = false, AnyPalette = true;
+	uint32_t Palette = 0;
+	int Rule = 0; // 1 a 200
+	std::vector<GbHdTerm> Terms;
+};
+
 // Contenu d'un pack Game Boy (gb_hires.txt)
 struct GbHdPackData
 {
@@ -266,6 +278,7 @@ struct GbHdPackData
 	std::vector<GbHdVariable> Variables;
 	// Tiles conditionnelles, dans l'ordre du fichier ; ConditionalIndex : (hash, palette) -> indices
 	std::vector<GbHdConditionalTile> ConditionalTiles;
+	std::vector<GbHdShadowKey> ShadowKeys; // ombres en forme ligne
 	std::map<std::pair<uint64_t, uint32_t>, std::vector<size_t>> ConditionalIndex;
 	// Adresses CPU releves a chaque image (une seule lecture par adresse)
 	std::vector<uint16_t> WatchedAddresses;

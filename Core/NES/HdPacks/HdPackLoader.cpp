@@ -4470,8 +4470,38 @@ bool HdPackLoader::ParseForeignDioramaLine(const string& folder, const string& l
 	else if(is("<dioramafog>")) { split(12); L.ProcessDioramaFogTag(tokens, conditions); }
 	else if(is("<dioramaview>")) { split(13); L.ProcessDioramaViewTag(tokens, conditions); }
 	else if(is("<dioramapad>")) { split(12); L.ProcessDioramaPadTag(tokens, conditions); }
+	else if(is("<dioramaextend>")) { split(15); L.ProcessDioramaExtendTag(tokens, conditions); }
 	else if(is("<dioramaskybox>")) { split(15); L.ProcessDioramaSkyboxTag(tokens, conditions); }
 	else if(is("<diorama>")) { split(9); L.ProcessDioramaTag(tokens, conditions); }
 	else return false;
 	return true;
+}
+
+// Game Boy : bloc <DioramaDepth>options{ (options = ce qui suit la balise, sans le '{') -> numero de groupe (1 a 8), 0 si refuse
+int HdPackLoader::ParseForeignDepthBlock(const string& folder, const string& options, HdPackData& data)
+{
+	HdPackLoader L;
+	L._data = &data;
+	L._loadFromZip = false;
+	L._hdPackFolder = folder;
+	vector<string> tokens = StringUtilities::Split(options, ',');
+	HdDioramaDepthGroup g;
+	if(!L.ParseDioramaDepthOptions(tokens, g)) return 0;
+	if(g.HasRect) { MessageManager::Log("[HDPack] " + string("DioramaDepth : rect= n'est pas pris en charge avec un bloc { }, bloc ignore.")); return 0; }
+	return L.AddDioramaDepthGroup(g);
+}
+
+// Game Boy : bloc <DioramaShadow>options{ -> numero de regle (1 a 200), 0 si refuse. Les <tile> du bloc sont rattachees par l'appelant.
+int HdPackLoader::ParseForeignShadowBlock(const string& folder, const string& options, HdPackData& data)
+{
+	HdPackLoader L;
+	L._data = &data;
+	L._loadFromZip = false;
+	L._hdPackFolder = folder;
+	vector<string> tokens = StringUtilities::Split(options, ',');
+	HdDioramaShadowRule r;
+	if(!L.ParseDioramaShadowOptions(tokens, r, false)) return 0;
+	if(data.DioramaShadowRules.size() >= 200) { MessageManager::Log("[HDPack] " + string("DioramaShadow : 200 regles au plus, bloc ignore.")); return 0; }
+	data.DioramaShadowRules.push_back(r);
+	return (int)data.DioramaShadowRules.size();
 }

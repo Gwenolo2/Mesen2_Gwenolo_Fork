@@ -154,7 +154,7 @@ void GbHdVideoFilter::DioramaCamera(const HdDioramaConfig& cfg, float& yaw, floa
 	float minZ = 0.0f;
 	for(int k = 0; k < 4; k++) minZ = std::min(minZ, cfg.Z[k]);
 	for(const HdDioramaDepthGroup& g : D.DioramaDepthGroups) minZ = std::min(minZ, g.Z);
-	for(const HdDioramaObjectRule& o : D.DioramaObjectRules) minZ = std::min(minZ, o.Z);
+	for(const HdDioramaObjectRule& o : D.DioramaObjectRules) { minZ = std::min(minZ, o.Z); if(o.RepStep[2] > 0.0f && o.RepHasFrom[2]) minZ = std::min(minZ, o.RepFrom[2]); }
 	v[2] = std::max(v[2], std::max(16.0f, -minZ / 0.9f + 1.0f));
 	if(!_camInit) {
 		for(int i = 0; i < 4; i++) { _camFrom[i] = _camTo[i] = _camCur[i] = v[i]; }
@@ -252,7 +252,7 @@ bool GbHdVideoFilter::DioramaSubmit(uint32_t* out)
 	scene.Scale = (float)_scale;
 	scene.Aa = cfg.Aa;
 	scene.Zoom = zoom;
-	scene.FlatMask = _dioTopDown ? ((1u << 0) | (1u << 2)) : 0u; // topDown : sol (L0) et tiles (L2) a plat, sprites debout
+	scene.FlatMask = _dioTopDown ? ((1u << 0) | (1u << 2) | 0xFF0u) : 0u; // topDown : sol (L0) et tiles (L2) a plat, sprites debout
 	scene.Clear = _dioBackdrop | 0xFF000000u;
 	// topDown : pied des sprites (silhouettes de pixels de sprite qui se touchent), meme calcul que le NES ; 256 octets par ligne
 	if(_dioTopDown) {
@@ -295,6 +295,62 @@ bool GbHdVideoFilter::DioramaSubmit(uint32_t* out)
 			}
 		}
 		scene.SpriteFoot = _dioFoot.data(); scene.SpriteFootH = (uint32_t)rows;
+	}
+	// G7 : groupes <DioramaDepth>, seulement leurs lignes non vides (une ligne de marge de chaque cote pour le filtrage)
+	{
+		const int rowsSd = (int)GbConstants::ScreenHeight;
+		const size_t groupCount = std::min<size_t>(D.DioramaDepthGroups.size(), 8);
+		for(size_t g = 0; g < groupCount; g++) {
+			if(_dioG[g].size() < pixels || _dioGLines[g].size() < (size_t)rowsSd) continue;
+			int a = -1, b = -1;
+			for(int y = 0; y < rowsSd; y++) {
+				if(_dioGLines[g][y]) { if(a < 0) a = y; b = y; }
+			}
+			if(a < 0) continue;
+			a = std::max(a - 1, 0);
+			b = std::min(b + 1, rowsSd - 1);
+			const HdDioramaDepthGroup& grp = D.DioramaDepthGroups[g];
+			scene.ExtraImg[g] = _dioG[g].data();
+			scene.ExtraY0[g] = (uint32_t)a * _scale;
+			scene.ExtraRows[g] = (uint32_t)(b - a + 1) * _scale;
+			scene.ExtraZ[g] = std::max(grp.Z, -0.9f * dist);
+			scene.ExtraThick[g] = grp.T * 8.0f;
+		}
+	}
+	// G4a : <DioramaExtend> (doc 40) : regles dont les conditions [ ] sont vraies a cette image ; la derniere regle vraie l'emporte
+	if(!D.DioramaExtendRules.empty()) {
+		const int sideBit[4] = { 1, 2, 4, 8 };
+		uint32_t active = 0;
+		for(const HdDioramaExtendRule& r : D.DioramaExtendRules) {
+			bool ok = true;
+			for(HdPackCondition* c : r.Conditions) {
+				if(!c->CheckCondition(0, 0, nullptr)) { ok = false; break; }
+			}
+			if(!ok || r.Layer < 0 || r.Layer > 3 + 8 || r.Layer >= 4 + 8) continue;
+			HdDioramaExtend& e = scene.Ext[r.Layer];
+			for(int sd = 0; sd < 4; sd++) {
+				if(!(r.Side & sideBit[sd])) continue;
+				e.Active = true;
+				e.Margin[sd] = (float)r.Size; e.Mode[sd] = r.Mode; e.Band[sd] = (float)r.Band * 8.0f;
+				if(r.RangeMin >= 0) { e.Range[sd][0] = (float)r.RangeMin; e.Range[sd][1] = (float)r.RangeMax; } else { e.Range[sd][0] = -100000.0f; e.Range[sd][1] = 100000.0f; }
+				e.Fog[sd] = r.Fog;
+				e.FogDist[sd] = r.FogDist > 0 ? (float)r.FogDist : (float)r.Size;
+				e.Color[sd][0] = r.HasColor ? (float)((r.Color >> 16) & 0xFF) / 255.0f : 0.0f;
+				e.Color[sd][1] = r.HasColor ? (float)((r.Color >> 8) & 0xFF) / 255.0f : 0.0f;
+				e.Color[sd][2] = r.HasColor ? (float)(r.Color & 0xFF) / 255.0f : 0.0f;
+				e.Color[sd][3] = r.HasColor ? 1.0f : 0.0f;
+				e.Edge[sd] = r.Edge >= 0 ? (float)r.Edge : (sd == 1 ? scene.H : (sd == 3 ? scene.W : 0.0f));
+			}
+			active++;
+		}
+		if(active) {
+			scene.ExtScrollX = _dioWX; scene.ExtScrollY = _dioWY; // defilement cumule : les bandes repeat suivent la grille du monde
+			static bool logged = false;
+			if(!logged) {
+				logged = true;
+				MessageManager::Log("[HD-GB-DIORAMA] DioramaExtend : " + std::to_string(active) + " regle(s) active(s) sur " + std::to_string(D.DioramaExtendRules.size()));
+			}
+		}
 	}
 	if(_dioFixRows > 0 && _dioFix.size() >= pixels) { scene.Fixed = _dioFix.data(); scene.FixedY0 = _dioFixY0; scene.FixedRows = _dioFixRows; }
 	// <background> dessines par le GPU (doc 52) : arriere devant L0, intermediaires devant L2, avant devant L3 (L0 uniforme : couleur d'effacement)
@@ -703,6 +759,15 @@ bool GbHdVideoFilter::DioramaSubmit(uint32_t* out)
 		if(_dioObjSpin.size() < orules.size()) _dioObjSpin.resize(orules.size(), 0.0f);
 		int on = 0;
 		vector<int32_t> wvals; // valeurs surveillees de cette image (INT32_MIN = adresse non lue), pour scrollx= / scrolly=
+		for(const GbHdWatchVar& w : _pack.WatchedVars) { // meme ordre que Dio->Data.WatchedValues (voir GbHdPackLoader : SyncDioWatch)
+			uint32_t raw = 0;
+			bool okv = _dioMem != nullptr;
+			for(uint32_t bi = 0; okv && bi < w.Size; bi++) {
+				if(w.Slot[bi] >= _dioMem->size()) { okv = false; break; }
+				raw |= (uint32_t)(*_dioMem)[w.Slot[bi]] << (8 * bi);
+			}
+			wvals.push_back(okv ? HdWatchCompose(raw, w.Size, w.Signed) : INT32_MIN);
+		}
 		for(size_t i = 0; i < orules.size() && on < HdDioMaxObjects; i++) {
 			const HdDioramaObjectRule& r = *orules[i];
 			if(!r.Mesh || r.Mesh->size() < 24) continue;
@@ -714,8 +779,27 @@ bool GbHdVideoFilter::DioramaSubmit(uint32_t* out)
 			float scx = 0.0f, scy = 0.0f;
 			if(!r.ScrollX.Empty() && !r.ScrollX.Eval(wvals, scx)) continue; // valeur RAM pas encore lue : objet masque
 			if(!r.ScrollY.Empty() && !r.ScrollY.Eval(wvals, scy)) continue;
-			if(!r.ScrollX.Empty() && (r.X - scx + r.Radius < -256.0f - 0.0f || r.X - scx - r.Radius > (float)scene.W + 256.0f + 0.0f)) continue; // hors du niveau visible
 			_dioObjSpin[i] = std::fmod(_dioObjSpin[i] + r.Spin, 360.0f);
+			// G9 (copie du NES) : copies repeat= (k = 0 seul sans repetition) ; x avec scrollx= : seulement les copies de la fenetre visible
+			const float visMargin = 160.0f; // marge hors ecran (pixels Game Boy) ou un objet est encore emis
+			int kr[3][2] = { { 0, 0 }, { 0, 0 }, { 0, 0 } };
+			const float org[3] = { r.X, r.Y, r.Z };
+			for(int ax = 0; ax < 3; ax++) {
+				if(r.RepStep[ax] <= 0.0f) continue;
+				float lo = r.RepHasFrom[ax] ? r.RepFrom[ax] : org[ax];
+				float hi = r.RepHasTo[ax] ? r.RepTo[ax] : 1.0e9f;
+				if(ax == 0 && !r.ScrollX.Empty()) {
+					lo = std::max(lo, scx - r.Radius - visMargin);
+					hi = std::min(hi, scx + (float)scene.W + r.Radius + visMargin);
+				}
+				const float k0 = std::ceil((lo - org[ax]) / r.RepStep[ax]), k1 = std::floor((hi - org[ax]) / r.RepStep[ax]);
+				kr[ax][0] = (int)std::max(-100000.0f, k0); kr[ax][1] = (int)std::min(100000.0f, k1);
+				if(kr[ax][1] - kr[ax][0] > 255) kr[ax][1] = kr[ax][0] + 255;
+			}
+			for(int kz = kr[2][0]; kz <= kr[2][1]; kz++) for(int ky = kr[1][0]; ky <= kr[1][1]; ky++) for(int kx = kr[0][0]; kx <= kr[0][1]; kx++) {
+			if(on >= HdDioMaxObjects) break;
+			const float rx = r.X + (float)kx * r.RepStep[0], ry = r.Y + (float)ky * r.RepStep[1], rz = r.Z + (float)kz * r.RepStep[2];
+			if(!r.ScrollX.Empty() && (rx - scx + r.Radius < -visMargin || rx - scx - r.Radius > (float)scene.W + visMargin)) continue; // hors du niveau visible
 			HdDioramaObject& o = scene.Objects.O[on++];
 			o.Verts = r.Mesh->data();
 			o.Version = r.MeshVersion;
@@ -728,7 +812,7 @@ bool GbHdVideoFilter::DioramaSubmit(uint32_t* out)
 				}
 			}
 			o.Color[0] = ((r.Color >> 16) & 0xFF) / 255.0f; o.Color[1] = ((r.Color >> 8) & 0xFF) / 255.0f; o.Color[2] = (r.Color & 0xFF) / 255.0f;
-			o.Pos[0] = r.X - scx; o.Pos[1] = r.Y - scy; o.Pos[2] = r.Z; o.RefZ = r.RefZ; o.Occlude = r.Occlude;
+			o.Pos[0] = rx - scx; o.Pos[1] = ry - scy; o.Pos[2] = rz; o.RefZ = r.RefZ; o.Occlude = r.Occlude;
 			if(r.FromTile2Obj && _dioTopDown) { // Tile2Obj en topDown : pose sur le sol, dans le meme repere que les couches a plat (sans perspective : kz = 1)
 				o.Pos[0] = r.X; o.Pos[1] = scene.H * 0.5f - r.Elevation; o.Pos[2] = scene.H * 0.5f - r.BottomY; o.RefZ = -o.Pos[2];
 			}
@@ -740,8 +824,8 @@ bool GbHdVideoFilter::DioramaSubmit(uint32_t* out)
 			o.WinOn = false;
 			if(r.HasWindow && !r.ScrollX.Empty()) { // fenetre sur le niveau : [defilement - marge, defilement + largeur + marge], convertie en x du modele
 				o.WinOn = true;
-				o.WinX0 = (scx - r.Window - 0.0f - r.X) / r.Scale;
-				o.WinX1 = (scx + (float)scene.W + r.Window + 0.0f - r.X) / r.Scale;
+				o.WinX0 = (scx - r.Window - rx) / r.Scale;
+				o.WinX1 = (scx + (float)scene.W + r.Window - rx) / r.Scale;
 			}
 			// R = Ry * Rx * Rz (degres) appliquee au modele avant le passage aux axes de la scene
 			const float kd = 0.017453292f;
@@ -759,12 +843,39 @@ bool GbHdVideoFilter::DioramaSubmit(uint32_t* out)
 				float t2[9]; mul(M, o.Rot, t2);
 				for(int q = 0; q < 9; q++) o.Rot[q] = t2[q];
 			}
+			}
 		}
 		scene.Objects.Count = on;
 		static int objLast = -1; // journal a chaque changement du nombre d'objets actifs (ex. changement d'ecran)
 		if(on != objLast) {
 			objLast = on;
 			MessageManager::Log("[HD-DIORAMA] H1 objets 3D : " + std::to_string(on) + " objet(s) actif(s) sur " + std::to_string(orules.size()) + " regle(s) <DioramaObject>, frame " + std::to_string(_frameNumber));
+		}
+	}
+	// G6c : ombres des sprites : bande de lignes du masque, style de la premiere regle utilisee
+	if(!D.DioramaShadowRules.empty() && _dioS.size() >= pixels && _dioSLines.size() >= (size_t)GbConstants::ScreenHeight && _dioSRule.size() >= (size_t)GbConstants::ScreenHeight) {
+		int y0 = -1, y1 = -1, ruleId = -1;
+		for(int y = 0; y < (int)GbConstants::ScreenHeight; y++) {
+			if(!_dioSLines[y]) continue;
+			if(y0 < 0) y0 = y;
+			y1 = y;
+			if(_dioSRule[y] >= 0 && (ruleId < 0 || _dioSRule[y] < ruleId)) ruleId = _dioSRule[y];
+		}
+		if(y0 >= 0 && ruleId >= 0 && scene.Lights.Active) {
+			const HdDioramaShadowRule& sr = D.DioramaShadowRules[ruleId];
+			const uint32_t r0 = (uint32_t)y0 * _scale, r1 = (uint32_t)(y1 + 1) * _scale;
+			scene.Shadow.Active = true;
+			scene.Shadow.Img = _dioS.data();
+			scene.Shadow.Y0 = r0; scene.Shadow.Rows = r1 > r0 ? r1 - r0 : 0;
+			scene.Shadow.Opacity = sr.Opacity; scene.Shadow.Soft = sr.Soft;
+			scene.Shadow.Color[0] = ((sr.Color >> 16) & 0xFF) / 255.0f; scene.Shadow.Color[1] = ((sr.Color >> 8) & 0xFF) / 255.0f; scene.Shadow.Color[2] = (sr.Color & 0xFF) / 255.0f;
+			scene.Shadow.OntoMask = sr.OntoMask;
+			scene.Shadow.Light = sr.Light - 1;
+			static bool shLogged = false;
+			if(!shLogged) { shLogged = true; MessageManager::Log("[HD-GB-DIORAMA] ombres des sprites : regle " + std::to_string(ruleId + 1) + " sur " + std::to_string(D.DioramaShadowRules.size()) + ", opacite " + std::to_string(sr.Opacity)); }
+		} else if(y0 >= 0 && !scene.Lights.Active) {
+			static bool shWarned = false;
+			if(!shWarned) { shWarned = true; MessageManager::Log("[HD-GB-DIORAMA] ombres des sprites : aucune <DioramaLight> active, pas d'ombre (il faut une lumiere ponctuelle ou solaire)."); }
 		}
 	}
 	const bool ok = gpu.SubmitScene(_dioL[0].data(), _dioL[1].data(), _dioL[2].data(), _dioL[3].data(), screenWidth, outHeight, scene) && gpu.FetchOpaque(out, pixels);

@@ -16,6 +16,8 @@ public:
 	// memes regles que le NES, dans data. conditions : conditions de la ligne (adaptateurs de la console) ; condByName : conditions
 	// nommees (pour until= de <DayNight>). Faux si la balise n'est pas une balise diorama prise en charge.
 	static bool ParseForeignDioramaLine(const string& folder, const string& line, const vector<HdPackCondition*>& conditions, const unordered_map<string, HdPackCondition*>& condByName, HdPackData& data);
+	static int ParseForeignDepthBlock(const string& folder, const string& options, HdPackData& data);
+	static int ParseForeignShadowBlock(const string& folder, const string& options, HdPackData& data);
 
 
 

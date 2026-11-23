@@ -636,6 +636,14 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		for(auto& L : _dioL) L.assign(N, 0u);
 		const bool winFixed = _pack.Dio->WindowFixed;
 		if(winFixed) _dioFix.assign(N, 0u);
+		const size_t dioGroupCount = std::min<size_t>(_pack.Dio->Data.DioramaDepthGroups.size(), 8);
+		for(size_t g = 0; g < 8; g++) {
+			if(g < dioGroupCount) { _dioG[g].assign(N, 0u); _dioGLines[g].assign(screenH, 0); }
+			else { _dioG[g].clear(); _dioGLines[g].clear(); }
+		}
+		const bool dioShadows = !_pack.Dio->Data.DioramaShadowRules.empty();
+		if(dioShadows) { _dioS.assign(N, 0u); _dioSLines.assign(screenH, 0); _dioSRule.assign(screenH, -1); }
+		else { _dioS.clear(); _dioSLines.clear(); _dioSRule.clear(); }
 		const bool l0Clear = DioramaSkyWanted(); // ciel : la couleur 0 du fond laisse voir la skybox
 		_dioBackdrop = ColorFromRgb555(info[0].BgZero) | 0xFF000000u;
 		auto prem = [](uint32_t c) -> uint32_t {
@@ -715,11 +723,20 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								else if(!m.Ref && tcolor != 0 && !_pack.DisableOriginalTiles) t = tileSd;
 							}
 							paintPrem(midCpu, hx, hy, t, INT32_MIN);
+							const size_t grp = (hasTile && m.Ref && m.Ref->DepthGroup > 0 && (size_t)m.Ref->DepthGroup <= dioGroupCount) ? (size_t)m.Ref->DepthGroup : 0;
 							if(win && winFixed) {
 								uint32_t f = backdrop;
 								over(f, t);
 								_dioFix[idx] = f;
 								_dioL[0][idx] = l0;
+							} else if(grp > 0) {
+								// tile d'un groupe <DioramaDepth> : dessinee dans l'image du groupe, pas dans L2 (les fonds intermediaires restent en L2)
+								_dioL[0][idx] = l0;
+								_dioG[grp - 1][idx] = t;
+								if(t >> 24) _dioGLines[grp - 1][y] = 1;
+								uint32_t t2 = 0;
+								paintPrem(midCpu, hx, hy, t2, INT32_MIN);
+								_dioL[2][idx] = t2;
 							} else {
 								_dioL[0][idx] = l0;
 								_dioL[2][idx] = t;
@@ -735,7 +752,22 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 			const int32_t screenW = (int32_t)GbConstants::ScreenWidth;
 			for(size_t k = 0; k < sprites->size(); k++) {
 				const GbHdSpriteInfo& s = (*sprites)[k];
-				std::vector<uint32_t>& L = _dioL[s.BgPriority ? 1 : 3];
+				// G6c : regle d'ombre du sprite (bloc <DioramaShadow> sur sa tile, ou ligne tile=HASH) ; -1 = pas d'ombre
+				int shRule = -1;
+				if(dioShadows) {
+					if(spriteTiles[k][0].Ref && spriteTiles[k][0].Ref->ShadowRule > 0) shRule = (int)spriteTiles[k][0].Ref->ShadowRule - 1;
+					else if(spriteTiles[k][1].Ref && spriteTiles[k][1].Ref->ShadowRule > 0) shRule = (int)spriteTiles[k][1].Ref->ShadowRule - 1;
+					else {
+						for(const GbHdShadowKey& sk : _pack.ShadowKeys) {
+							if(!sk.AnyTile && sk.Hash != s.Hash[0] && !(s.Height == 16 && sk.Hash == s.Hash[1])) continue;
+							if(!sk.AnyPalette && sk.Palette != s.Palette) continue;
+							if(!sk.Terms.empty() && !EvaluateTerms(sk.Terms, s.Flags, mem, s.X, s.Y, true)) continue;
+							shRule = sk.Rule - 1;
+							break;
+						}
+					}
+				}
+				const size_t sprGrp = (spriteTiles[k][0].Ref && spriteTiles[k][0].Ref->DepthGroup > 0 && (size_t)spriteTiles[k][0].Ref->DepthGroup <= dioGroupCount) ? (size_t)spriteTiles[k][0].Ref->DepthGroup : 0; // G7 : sprite dans un groupe (decide par sa premiere tile)
 				for(int32_t r = 0; r < s.Height; r++) {
 					const int32_t sy = s.Y + r;
 					if(sy < 0 || sy >= (int32_t)screenH) continue;
@@ -743,6 +775,9 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 					const uint64_t hash = s.Hash[vr >> 3];
 					const uint32_t row = (uint32_t)(r & 7);
 					const GbHdTileMatch& m = spriteTiles[k][vr >> 3];
+					std::vector<uint32_t>& L = sprGrp > 0 ? _dioG[sprGrp - 1] : _dioL[s.BgPriority ? 1 : 3];
+					if(sprGrp > 0) _dioGLines[sprGrp - 1][sy] = 1;
+					if(shRule >= 0) { _dioSLines[sy] = 1; if(_dioSRule[sy] < 0 || shRule < _dioSRule[sy]) _dioSRule[sy] = shRule; }
 					for(int32_t c = 0; c < 8; c++) {
 						const int32_t sx = s.X + c;
 						if(sx < 0 || sx >= screenW) continue;
@@ -759,13 +794,14 @@ void GbHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 									uint32_t px = 0;
 									if(SamplePixel(*m.Ref, m.MirrorH, m.MirrorV, (uint32_t)c, row, dx, dy, px) && (px >> 24)) {
 										over(L[((size_t)sy * _scale + dy) * outWidth + (size_t)sx * _scale + dx], prem(px));
+										if(shRule >= 0) over(_dioS[((size_t)sy * _scale + dy) * outWidth + (size_t)sx * _scale + dx], prem(px));
 									}
 								}
 							}
 						} else if(owned) {
 							const uint32_t col = GetPixel(ppuOutputBuffer, offset) | 0xFF000000u;
 							for(uint32_t dy = 0; dy < _scale; dy++) {
-								for(uint32_t dx = 0; dx < _scale; dx++) L[((size_t)sy * _scale + dy) * outWidth + (size_t)sx * _scale + dx] = col;
+								for(uint32_t dx = 0; dx < _scale; dx++) { L[((size_t)sy * _scale + dy) * outWidth + (size_t)sx * _scale + dx] = col; if(shRule >= 0) _dioS[((size_t)sy * _scale + dy) * outWidth + (size_t)sx * _scale + dx] = col; }
 							}
 						}
 					}

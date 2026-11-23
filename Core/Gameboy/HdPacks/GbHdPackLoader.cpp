@@ -34,6 +34,19 @@ namespace {
 		return out;
 	}
 
+	// Expose les <watchMemoryAddress> aux regles diorama (scrollx= / scrolly= de <DioramaObject>) : meme ordre que WatchedVars
+	void SyncDioWatch(GbHdPackData& d)
+	{
+		if(!d.Dio) return;
+		d.Dio->Data.WatchedValues.clear();
+		for(const GbHdWatchVar& v : d.WatchedVars) {
+			HdWatchedValue w;
+			w.Name = v.Name; w.Size = v.Size; w.Signed = v.Signed;
+			w.Address = v.Slot[0] < d.WatchedAddresses.size() ? d.WatchedAddresses[v.Slot[0]] : 0;
+			d.Dio->Data.WatchedValues.push_back(w);
+		}
+	}
+
 	// Index de l'image dans la liste (ajoutee si absente) : un chemin PNG suffit, sans <img>
 	uint32_t FindOrAddImage(std::vector<std::string>& images, const std::string& path)
 	{
@@ -391,6 +404,8 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 	std::vector<uint32_t> imgTags;
 	ReadPackLines(packFolder, "gb_hires.txt", lines, 0, includeStack, includeErrors);
 
+	// Blocs <DioramaDepth>{ } / <DioramaShadow>{ } : pile (type, numero) ; 'x' = bloc non gere (apparie seulement)
+	std::vector<std::pair<char, int>> blockStack;
 	int ignoredLines = 0;
 	int duplicates = 0;
 	int conditionalTiles = 0;
@@ -412,6 +427,33 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 			continue;
 		}
 
+		{
+			// [fork GB] blocs de profondeur / d'ombre du diorama (comme NES) : les <tile> du bloc sont marquees
+			std::string bl = line; // sans la condition [ ] eventuelle (ignoree sur un bloc, comme NES)
+			if(bl[0] == '[') { const size_t cb = bl.find(']'); if(cb != std::string::npos) bl = Trim(bl.substr(cb + 1)); }
+			const std::string lo = Lower(bl);
+			if(line == "}") {
+				if(!blockStack.empty()) blockStack.pop_back();
+				continue;
+			}
+			if(!bl.empty() && bl.back() == '{' && bl[0] == '<' && lo.find('>') != std::string::npos && lo.compare(0, 5, "<tile") != 0) {
+				int id = 0;
+				char kind = 'x';
+				const bool isDepth = lo.compare(0, 14, "<dioramadepth>") == 0, isShadow = lo.compare(0, 15, "<dioramashadow>") == 0;
+				if(isDepth || isShadow) {
+					if(!outData.Dio) { outData.Dio = std::make_shared<GbHdDiorama>(); SyncDioWatch(outData); }
+					const std::string opts = bl.substr(isDepth ? 14 : 15, bl.size() - (isDepth ? 15 : 16));
+					if(isDepth) { kind = 'd'; id = HdPackLoader::ParseForeignDepthBlock(packFolder, opts, outData.Dio->Data); }
+					else { kind = 's'; id = HdPackLoader::ParseForeignShadowBlock(packFolder, opts, outData.Dio->Data); }
+					if(id == 0) { MessageManager::Log("[HD-GB-LOAD] bloc diorama refuse : " + bl); ignoredLines++; }
+				} else {
+					MessageManager::Log("[HD-GB-LOAD] bloc non pris en charge sur Game Boy (ses lignes restent lues) : " + bl);
+					ignoredLines++;
+				}
+				blockStack.push_back(std::make_pair(kind, id));
+				continue;
+			}
+		}
 		if(line.compare(0, 7, "<scale>") == 0) {
 			long s = strtol(line.c_str() + 7, nullptr, 10);
 			if(s >= 1 && s <= 10) {
@@ -477,6 +519,7 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 					}
 				}
 				outData.WatchedVars.push_back(gv);
+				SyncDioWatch(outData);
 			}
 		} else if(line.compare(0, 11, "<condition>") == 0) {
 			// nom,memoryCheckConstant,adresse,operateur,valeur[,masque]
@@ -584,20 +627,45 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 				// Diorama et <DayNight> (doc 56) : lus par le chargeur NES (memes balises, memes options), conditions Game Boy adaptees
 				std::string low = Lower(line);
 				if(low.compare(0, 15, "<dioramawindow>") == 0) {
-					if(!outData.Dio) outData.Dio = std::make_shared<GbHdDiorama>();
+					if(!outData.Dio) { outData.Dio = std::make_shared<GbHdDiorama>(); SyncDioWatch(outData); }
 					const std::string v = Lower(Trim(line.substr(15)));
 					outData.Dio->WindowFixed = !(v == "scene" || v == "off" || v == "3d");
 					MessageManager::Log(std::string("[HD-GB-LOAD] <DioramaWindow> : fenetre ") + (outData.Dio->WindowFixed ? "a plat devant la scene" : "dans la scene (couche des tiles)"));
 					continue;
 				}
 				if(low.compare(0, 8, "<diorama") == 0 || low.compare(0, 10, "<daynight>") == 0 || low.compare(0, 13, "<3dparticles>") == 0) {
-					if(!outData.Dio) outData.Dio = std::make_shared<GbHdDiorama>();
+					if(!outData.Dio) { outData.Dio = std::make_shared<GbHdDiorama>(); SyncDioWatch(outData); }
 					GbHdDiorama& dio = *outData.Dio;
 					for(const auto& kv : outData.Conditions) { dio.Named(kv.first, false); dio.Named(kv.first, true); }
 					std::vector<HdPackCondition*> conds;
 					for(const GbHdTerm& t : terms) {
 						if(t.Name == "hmirror" || t.Name == "vmirror") continue; // sans tile : ignores
 						conds.push_back(dio.Named(t.Name, t.Negated));
+					}
+					if(low.compare(0, 15, "<dioramashadow>") == 0) {
+						// forme ligne : tile=HASH (hash Game Boy, hexadecimal) ou tile=*, palette=N ou *, puis les options communes de la forme bloc
+						std::string tileStr, palStr = "*", rest;
+						for(const std::string& tk : SplitTrim(line.substr(15), ',')) {
+							const std::string lk = Lower(tk);
+							if(lk.compare(0, 5, "tile=") == 0) tileStr = Trim(tk.substr(5));
+							else if(lk.compare(0, 8, "palette=") == 0) palStr = Lower(Trim(tk.substr(8)));
+							else rest += (rest.empty() ? "" : ",") + tk;
+						}
+						const int rid = tileStr.empty() ? 0 : HdPackLoader::ParseForeignShadowBlock(packFolder, rest, dio.Data);
+						if(rid == 0) {
+							MessageManager::Log("[HD-GB-LOAD] <DioramaShadow> : tile= obligatoire (ou bloc { }) / options invalides : " + line);
+							ignoredLines++;
+						} else {
+							GbHdShadowKey k;
+							k.Rule = rid;
+							k.AnyTile = tileStr == "*";
+							k.Hash = k.AnyTile ? 0 : strtoull(tileStr.c_str(), nullptr, 16);
+							k.AnyPalette = (palStr == "*" || palStr == "all" || palStr == "any");
+							k.Palette = k.AnyPalette ? 0 : (uint32_t)strtoul(palStr.c_str(), nullptr, 10);
+							for(const GbHdTerm& t : terms) { if(t.Name != "hmirror" && t.Name != "vmirror") k.Terms.push_back(t); }
+							outData.ShadowKeys.push_back(k);
+						}
+						continue;
 					}
 					if(!HdPackLoader::ParseForeignDioramaLine(packFolder, line, conds, dio.ByName, dio.Data)) {
 						MessageManager::Log("[HD-GB-LOAD] balise diorama non prise en charge sur Game Boy : " + line);
@@ -896,6 +964,10 @@ bool GbHdPackLoader::Load(const std::string& packFolder, GbHdPackData& outData)
 			ref.ImageIndex = imageIndex;
 			ref.X = (uint32_t)strtoul(fields[3].c_str(), nullptr, 10);
 			ref.Y = (uint32_t)strtoul(fields[4].c_str(), nullptr, 10);
+			for(size_t bi = blockStack.size(); bi-- > 0; ) { // bloc le plus interne de chaque sorte
+				if(blockStack[bi].first == 'd' && ref.DepthGroup == 0) ref.DepthGroup = (uint8_t)blockStack[bi].second;
+				if(blockStack[bi].first == 's' && ref.ShadowRule == 0) ref.ShadowRule = (uint16_t)blockStack[bi].second;
+			}
 
 			if(!terms.empty()) {
 				GbHdConditionalTile ct;
