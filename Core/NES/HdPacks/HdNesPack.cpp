@@ -3599,7 +3599,7 @@ void HdNesPack<scale>::DioramaCameraStep(const HdDioramaConfig& cfg, float& yaw,
 	float minZ = 0.0f;
 	for(int k = 0; k < 4; k++) minZ = std::min(minZ, cfg.Z[k]);
 	for(const HdDioramaDepthGroup& g : _hdData->DioramaDepthGroups) minZ = std::min(minZ, g.Z);
-	for(const HdDioramaObjectRule& o : _hdData->DioramaObjectRules) minZ = std::min(minZ, o.Z);
+	for(const HdDioramaObjectRule& o : _hdData->DioramaObjectRules) { minZ = std::min(minZ, o.Z); if(o.RepStep[2] > 0.0f && o.RepHasFrom[2]) minZ = std::min(minZ, o.RepFrom[2]); }
 	v[2] = std::max(v[2], std::max(16.0f, -minZ / 0.9f + 1.0f));
 	if(!_camInit) {
 		for(int i = 0; i < 4; i++) { _camFrom[i] = _camTo[i] = _camCur[i] = v[i]; }
@@ -4504,8 +4504,26 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			float scx = 0.0f, scy = 0.0f;
 			if(!r.ScrollX.Empty() && !r.ScrollX.Eval(wvals, scx)) continue; // valeur RAM pas encore lue : objet masque
 			if(!r.ScrollY.Empty() && !r.ScrollY.Eval(wvals, scy)) continue;
-			if(!r.ScrollX.Empty() && (r.X - scx + r.Radius < -256.0f - wsPadNes || r.X - scx - r.Radius > (float)scene.W + 256.0f + wsPadNes)) continue; // hors du niveau visible
 			_dioObjSpin[i] = std::fmod(_dioObjSpin[i] + r.Spin, 360.0f);
+			// G9 : copies repeat= (k = 0 seul sans repetition) ; x avec scrollx= : seulement les copies de la fenetre visible
+			int kr[3][2] = { { 0, 0 }, { 0, 0 }, { 0, 0 } };
+			const float org[3] = { r.X, r.Y, r.Z };
+			for(int ax = 0; ax < 3; ax++) {
+				if(r.RepStep[ax] <= 0.0f) continue;
+				float lo = r.RepHasFrom[ax] ? r.RepFrom[ax] : org[ax];
+				float hi = r.RepHasTo[ax] ? r.RepTo[ax] : 1.0e9f;
+				if(ax == 0 && !r.ScrollX.Empty()) {
+					lo = std::max(lo, scx - r.Radius - 256.0f - wsPadNes);
+					hi = std::min(hi, scx + (float)scene.W + r.Radius + 256.0f + wsPadNes);
+				}
+				const float k0 = std::ceil((lo - org[ax]) / r.RepStep[ax]), k1 = std::floor((hi - org[ax]) / r.RepStep[ax]);
+				kr[ax][0] = (int)std::max(-100000.0f, k0); kr[ax][1] = (int)std::min(100000.0f, k1);
+				if(kr[ax][1] - kr[ax][0] > 255) kr[ax][1] = kr[ax][0] + 255;
+			}
+			for(int kz = kr[2][0]; kz <= kr[2][1]; kz++) for(int ky = kr[1][0]; ky <= kr[1][1]; ky++) for(int kx = kr[0][0]; kx <= kr[0][1]; kx++) {
+			if(on >= HdDioMaxObjects) break;
+			const float rx = r.X + (float)kx * r.RepStep[0], ry = r.Y + (float)ky * r.RepStep[1], rz = r.Z + (float)kz * r.RepStep[2];
+			if(!r.ScrollX.Empty() && (rx - scx + r.Radius < -256.0f - wsPadNes || rx - scx - r.Radius > (float)scene.W + 256.0f + wsPadNes)) continue; // hors du niveau visible
 			HdDioramaObject& o = scene.Objects.O[on++];
 			o.Verts = r.Mesh->data();
 			o.Version = r.MeshVersion;
@@ -4518,7 +4536,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 				}
 			}
 			o.Color[0] = ((r.Color >> 16) & 0xFF) / 255.0f; o.Color[1] = ((r.Color >> 8) & 0xFF) / 255.0f; o.Color[2] = (r.Color & 0xFF) / 255.0f;
-			o.Pos[0] = r.X - scx; o.Pos[1] = r.Y - scy; o.Pos[2] = r.Z; o.RefZ = r.RefZ; o.Occlude = r.Occlude;
+			o.Pos[0] = rx - scx; o.Pos[1] = ry - scy; o.Pos[2] = rz; o.RefZ = r.RefZ; o.Occlude = r.Occlude;
 			if(r.FromTile2Obj && _dioTopDown) { // Tile2Obj en topDown : pose sur le sol, dans le meme repere que les couches a plat (sans perspective : kz = 1)
 				o.Pos[0] = r.X; o.Pos[1] = scene.H * 0.5f - r.Elevation; o.Pos[2] = scene.H * 0.5f - r.BottomY; o.RefZ = -o.Pos[2];
 			}
@@ -4530,8 +4548,8 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 			o.WinOn = false;
 			if(r.HasWindow && !r.ScrollX.Empty()) { // fenetre sur le niveau : [defilement - marge, defilement + largeur + marge], convertie en x du modele
 				o.WinOn = true;
-				o.WinX0 = (scx - r.Window - wsPadNes - r.X) / r.Scale;
-				o.WinX1 = (scx + (float)scene.W + r.Window + wsPadNes - r.X) / r.Scale;
+				o.WinX0 = (scx - r.Window - wsPadNes - rx) / r.Scale;
+				o.WinX1 = (scx + (float)scene.W + r.Window + wsPadNes - rx) / r.Scale;
 			}
 			// R = Ry * Rx * Rz (degres) appliquee au modele avant le passage aux axes de la scene
 			const float kd = 0.017453292f;
@@ -4548,6 +4566,7 @@ void HdNesPack<scale>::DioramaGpuStep(HdScreenInfo* hdScreenInfo, uint32_t* outp
 				const float M[9] = { r.MirrorX ? -1.0f : 1.0f, 0, 0, 0, r.MirrorY ? -1.0f : 1.0f, 0, 0, 0, 1 };
 				float t2[9]; mul(M, o.Rot, t2);
 				for(int q = 0; q < 9; q++) o.Rot[q] = t2[q];
+			}
 			}
 		}
 		scene.Objects.Count = on;

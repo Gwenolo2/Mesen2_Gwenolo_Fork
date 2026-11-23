@@ -1222,6 +1222,10 @@ struct HdDioramaObjectRule
 	bool MirrorX = false, MirrorY = false; // <Sprite2Obj> : objet retourne en miroir (sprite hmirror / vmirror)
 	bool FromTile2Obj = false;           // instance <Tile2Obj> : en topDown, posee sur le sol (BottomY = bas du motif en pixels NES, Elevation = hauteur)
 	float BottomY = 0.0f, Elevation = 0.0f;
+	// G9 : repeat=axe:pas[:de:a] : copies a intervalles reguliers (axes x, y, z de la scene) ; copie k a l'origine + k x pas, bornee a [de, a]
+	float RepStep[3] = { 0, 0, 0 };
+	bool RepHasFrom[3] = { false, false, false }, RepHasTo[3] = { false, false, false };
+	float RepFrom[3] = { 0, 0, 0 }, RepTo[3] = { 0, 0, 0 };
 	HdDioramaExpr ScrollX, ScrollY;      // scrollx= / scrolly= : defilement du niveau (pixels) ; position a l'ecran = x - scrollx
 	vector<HdPackCondition*> Conditions;
 };

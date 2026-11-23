@@ -37,7 +37,7 @@ Référence complète : doc projet **19** (balises NES), doc projet **54** (dior
 - `<LoadingScreen>` : écran de chargement (doc 24).
 
 ## Diorama (3D) – voir fiche 06
-`<Diorama>`, `<DioramaView>`, `<DioramaDepth>` (bloc `{ }`), `<DioramaOffCamera>`, `<DioramaIgnore>`, `<DioramaExtend>`, `<DioramaSkybox>`, `<DioramaLight>`, `<DioramaShadow>`, `<DioramaNormal>`, `<DioramaObject>`, `<Tile2Obj>`, `<Sprite2Obj>`, `<DioramaCamera>`, `<DioramaCameraDefault>`, `<DioramaCameraKeys>`, `<DioramaPad>`, `<DioramaFog>`, `<DioramaClouds>`, `<DioramaMist>`, `<3DParticles>`, `<DayNight>`.
+`<Diorama>`, `<DioramaView>`, `<DioramaDepth>` (bloc `{ }`, `name=`, sprites compris ; doc 58), `<DioramaOffCamera>`, `<DioramaIgnore>`, `<DioramaExtend>`, `<DioramaSkybox>`, `<DioramaLight>`, `<DioramaShadow>`, `<DioramaNormal>`, `<DioramaObject>`, `<Tile2Obj>`, `<Sprite2Obj>`, `<DioramaCamera>`, `<DioramaCameraDefault>`, `<DioramaCameraKeys>`, `<DioramaPad>`, `<DioramaFog>`, `<DioramaClouds>`, `<DioramaMist>`, `<3DParticles>`, `<DayNight>`.
 
 ## RAM
 - `<watchMemoryAddress>nom,adresse[,1|2][,signed]` (adresses CPU 0000–FFFF ; RAM interne 0000–07FF) ; conditions `memoryCheckConstant` (fiche 07).

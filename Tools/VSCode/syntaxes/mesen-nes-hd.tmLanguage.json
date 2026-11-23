@@ -33,7 +33,7 @@
         },
         {
           "name": "support.function.condition.mesen-nes-hd",
-          "match": "\\b(?:ppuMemoryCheckConstant|originPositionCheckY|originPositionCheckX|memoryCheckConstant|spriteAtPosition|tileAtPosition|positionCheckY|ppuMemoryCheck|positionCheckX|spriteNearby|memoryCheck|frameRange|tileNearby)\\b"
+          "match": "\\b(?:ppuMemoryCheckConstant|originPositionCheckY|originPositionCheckX|memoryCheckConstant|spriteAtPosition|ppuMemoryCheck|positionCheckY|tileAtPosition|positionCheckX|spriteNearby|memoryCheck|frameRange|tileNearby)\\b"
         },
         {
           "name": "constant.numeric.hash.mesen-nes-hd",
@@ -55,11 +55,11 @@
     },
     {
       "name": "keyword.control.tag.mesen-nes-hd",
-      "match": "<(?:play_conditional_bgm|play_conditional_sfx|disable_8bits_Sound|2DPerspective|LoadingScreen|tile_hvflip|setVariable|tile_hflip|widescreen|tile_vflip|background|condition|2DOverlay|2DLiquid|fallback|overscan|addition|include|options|alias|scale|patch|video|tile|bgm|ver|sfx|img)>"
+      "match": "<(?:play_conditional_bgm|play_conditional_sfx|disable_8bits_Sound|LoadingScreen|2DPerspective|tile_hvflip|setVariable|tile_vflip|widescreen|background|tile_hflip|condition|2DOverlay|fallback|2DLiquid|overscan|addition|options|include|scale|alias|patch|video|tile|sfx|ver|img|bgm)>"
     },
     {
       "name": "keyword.control.tag.mesen-nes-hd",
-      "match": "(?i:<(?:DioramaCameraDefault|watchMemoryAddress|DioramaCameraKeys|DioramaOffCamera|Ignore2DOverlays|2DSpriteLight|DioramaSkybox|DioramaShadow|DioramaNormal|DioramaCamera|DioramaIgnore|DioramaClouds|DioramaObject|DioramaExtend|DioramaLight|DioramaDepth|DioramaMist|DioramaView|3DParticles|Sprite2Obj|DioramaFog|DioramaPad|2DReflect|2DTexture|Tile2Obj|DayNight|Diorama)>)"
+      "match": "(?i:<(?:DioramaCameraDefault|watchMemoryAddress|DioramaCameraKeys|Ignore2DOverlays|DioramaOffCamera|DioramaShadow|DioramaClouds|DioramaObject|DioramaCamera|2DSpriteLight|DioramaExtend|DioramaSkybox|DioramaNormal|DioramaIgnore|DioramaDepth|DioramaLight|DioramaMist|DioramaView|3DParticles|Sprite2Obj|DioramaFog|DioramaPad|2DReflect|2DTexture|DayNight|Tile2Obj|Diorama)>)"
     },
     {
       "name": "invalid.illegal.tag.mesen-nes-hd",

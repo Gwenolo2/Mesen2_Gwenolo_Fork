@@ -2772,6 +2772,26 @@ void HdPackLoader::ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPack
 		else if(key == "lit") { r.Lit = !(val == "off" || val == "0" || val == "false"); }
 		else if(key == "shadow") { r.Shadow = !(val == "off" || val == "0" || val == "false"); }
 		else if(key == "occlude") { r.Occlude = (val == "on" || val == "1" || val == "true"); }
+		else if(key == "repeat") { // G9 : repeat=x:64[:de:a][+z:32[:de:a]]
+			size_t st = 0;
+			while(st <= val.size()) {
+				const size_t pl = val.find('+', st);
+				const string part = val.substr(st, pl == string::npos ? string::npos : pl - st);
+				vector<string> fl = StringUtilities::Split(part, ':');
+				float v[3] = { 0, 0, 0 };
+				if(fl.size() < 2 || fl.size() > 4 || fl[0].size() != 1 || fl[0][0] < 'x' || fl[0][0] > 'z') { logError("DioramaObject : repeat attend axe:pas[:de:a] (axe x, y ou z) : " + val + ", ligne ignoree."); return; }
+				const int ax = fl[0][0] - 'x';
+				for(size_t q = 1; q < fl.size(); q++) {
+					if(!LightParseFloat(StringUtilities::Trim(fl[q]), v[q - 1])) { logError("DioramaObject : repeat : nombre invalide : " + fl[q] + ", ligne ignoree."); return; }
+				}
+				if(v[0] < 1.0f || v[0] > 4096.0f) { logError("DioramaObject : repeat : le pas doit etre de 1 a 4096 pixels NES : " + fl[1] + ", ligne ignoree."); return; }
+				r.RepStep[ax] = v[0];
+				if(fl.size() >= 4) { r.RepHasFrom[ax] = true; r.RepFrom[ax] = v[1]; r.RepHasTo[ax] = true; r.RepTo[ax] = v[2]; if(v[2] < v[1]) { logError("DioramaObject : repeat : a doit etre >= de : " + val + ", ligne ignoree."); return; } }
+				else if(fl.size() == 3) { r.RepHasTo[ax] = true; r.RepTo[ax] = v[1]; }
+				if(pl == string::npos) break;
+				st = pl + 1;
+			}
+		}
 		else if(key == "scrollx" || key == "scrolly") {
 			string err;
 			if(!HdParseDioramaExpr(raw, _data->WatchedValues, key == "scrollx" ? r.ScrollX : r.ScrollY, err)) { logError("DioramaObject : " + key + " : " + err + ", ligne ignoree."); return; }
@@ -2798,6 +2818,12 @@ void HdPackLoader::ProcessDioramaObjectTag(vector<string>& tokens, vector<HdPack
 			else if(key == "bright") { if(f < 0.0f || f > 8.0f) { logError("DioramaObject : bright doit etre de 0 a 8 : " + val + ", ligne ignoree."); return; } r.Bright = f; }
 			else if(key == "window") { if(f < 0.0f || f > 4096.0f) { logError("DioramaObject : window doit etre de 0 a 4096 pixels NES : " + val + ", ligne ignoree."); return; } r.HasWindow = true; r.Window = f; }
 			else { logError("DioramaObject : option inconnue : " + key + ", ligne ignoree."); return; }
+		}
+	}
+	for(int ax = 0; ax < 3; ax++) { // G9 : sans borne haute, seule x avec scrollx= peut etre infinie (limitee a l'ecran)
+		if(r.RepStep[ax] > 0.0f && !r.RepHasTo[ax] && !(ax == 0 && !r.ScrollX.Empty())) {
+			logError("DioramaObject : repeat sur cet axe demande une borne (repeat=axe:pas:a ou axe:pas:de:a), sauf x avec scrollx= : ligne ignoree.");
+			return;
 		}
 	}
 	auto cached = _dioObjCache.find(file);
@@ -3175,8 +3201,9 @@ bool HdPackLoader::ParseDioramaShadowOptions(vector<string>& tokens, HdDioramaSh
 				const string part = StringUtilities::Trim(val.substr(start, plus == string::npos ? string::npos : plus - start));
 				int n = 0;
 				if(part.size() == 2 && part[0] == 'g' && part[1] >= '1' && part[1] <= '8') mask |= 1u << (4 + (part[1] - '1'));
+				else if(FindDioGroupByName(_data->DioramaDepthGroups, StringUtilities::ToLower(part)) > 0) mask |= 1u << (3 + FindDioGroupByName(_data->DioramaDepthGroups, StringUtilities::ToLower(part))); // G8 : nom de groupe (declare avant)
 				else if(DioParseInt(part, n) && n >= 0 && n <= 3) mask |= 1u << n;
-				else { logError("DioramaShadow : onto = couches 0 a 3 ou g1 a g8 separees par + : " + val); return false; }
+				else { logError("DioramaShadow : onto = couches 0 a 3, g1 a g8 ou un nom de groupe, separes par + : " + val); return false; }
 				if(plus == string::npos) break;
 				start = plus + 1;
 			}

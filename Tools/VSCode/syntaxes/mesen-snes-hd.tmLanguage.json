@@ -33,7 +33,7 @@
         },
         {
           "name": "support.function.condition.mesen-snes-hd",
-          "match": "\\b(?:cgramMemoryCheckConstant|aramMemoryCheckConstant|vramMemoryCheckConstant|oamMemoryCheckConstant|spcMemoryCheckConstant|ppuMemoryCheckConstant|memoryCheckConstant|hmirror\\ /\\ vmirror|spriteAtPosition|cgramMemoryCheck|widescreenMode7|vramMemoryCheck|aramMemoryCheck|spcMemoryCheck|tileAtPosition|ppuMemoryCheck|oamMemoryCheck|spriteNearby|memoryCheck|colorWindow|widescreen|frameRange|tileNearby|vmirror|hmirror|gpu3d)\\b"
+          "match": "\\b(?:cgramMemoryCheckConstant|vramMemoryCheckConstant|aramMemoryCheckConstant|oamMemoryCheckConstant|ppuMemoryCheckConstant|spcMemoryCheckConstant|memoryCheckConstant|hmirror\\ /\\ vmirror|cgramMemoryCheck|spriteAtPosition|aramMemoryCheck|widescreenMode7|vramMemoryCheck|oamMemoryCheck|ppuMemoryCheck|tileAtPosition|spcMemoryCheck|spriteNearby|memoryCheck|colorWindow|widescreen|frameRange|tileNearby|hmirror|vmirror|gpu3d)\\b"
         },
         {
           "name": "constant.numeric.hash.mesen-snes-hd",
@@ -55,7 +55,7 @@
     },
     {
       "name": "keyword.control.tag.mesen-snes-hd",
-      "match": "<(?:disableAllColorMathWindow|disableOriginalSprites|disableColorMathWindow|disableOriginalTiles|disableColorMath|disablesublayer|setLayersOrder|2DPerspective|LoadingScreen|m7billboard|tile_hvflip|disableTile|3DParticles|tile_hflip|widescreen|tile_vflip|background|disableBg1|condition|m7ambient|2DOverlay|msuToOgg|2DLiquid|m7relief|fallback|overscan|addition|include|m7tiles|m7light|m7model|m7img|scale|patch|gpu3d|video|alias|tile|img)>"
+      "match": "<(?:disableAllColorMathWindow|disableOriginalSprites|disableColorMathWindow|disableOriginalTiles|disableColorMath|disablesublayer|setLayersOrder|LoadingScreen|2DPerspective|tile_hvflip|disableTile|3DParticles|m7billboard|setVariable|tile_vflip|widescreen|background|tile_hflip|disableBg1|condition|2DOverlay|m7ambient|fallback|m7relief|2DLiquid|msuToOgg|overscan|addition|m7model|include|m7tiles|m7light|gpu3d|scale|alias|patch|video|m7img|tile|img)>"
     },
     {
       "name": "keyword.control.tag.mesen-snes-hd",

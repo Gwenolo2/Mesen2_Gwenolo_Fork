@@ -3562,6 +3562,30 @@
       "syntax": "voir <spritelight>",
       "params": [],
       "notes": "Alias de <spritelight> en version doc. Vérifier la casse : le code accepte <spritelight> en minuscules et en majuscules."
+    },
+    {
+      "name": "<setVariable>",
+      "status": "implemented",
+      "block": false,
+      "conditions": true,
+      "syntax": "<setVariable>nom,valeur",
+      "params": [
+        {
+          "name": "nom",
+          "src": "code",
+          "pos": 1,
+          "type": "lettres, chiffres, _",
+          "required": true
+        },
+        {
+          "name": "valeur",
+          "src": "code",
+          "pos": 2,
+          "type": "chemin PNG",
+          "required": true
+        }
+      ],
+      "notes": "Déclare une valeur possible de la variable $nom ; la dernière règle vraie gagne à chaque image. Sert avec <background>$nom (doc 57). Lu par le loader SNES (fork)."
     }
   ],
   "conditionTypes": [

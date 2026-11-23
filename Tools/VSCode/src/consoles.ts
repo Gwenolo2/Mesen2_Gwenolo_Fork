@@ -34,6 +34,7 @@ const FILE_FIELD_SNES: Record<string, number> = {
     'loadingscreen': 0,
     'm7model': 0,
     'patch': 0,
+    'setvariable': 1,
 };
 
 /** Source : claude/19_Tags_HdPack_NES.md et HdPackLoader.cpp. */
