@@ -235,6 +235,12 @@ struct HdDioramaScene
 	uint32_t ExtraY0[HdDioMaxGroups] = {}, ExtraRows[HdDioMaxGroups] = {};
 	float ExtraZ[HdDioMaxGroups] = {};      // profondeur de la face avant (pixels NES)
 	float ExtraThick[HdDioMaxGroups] = {};  // epaisseur (pixels NES)
+	// topDown, stand=on (doc 59) : le groupe n'est pas pose a plat ; chaque silhouette (x debut, x fin exclue, ligne du haut, pied, en lignes
+	// du plan) est dessinee debout a ses pieds comme un sprite. La carte SpriteFoot doit contenir aussi les pieds de ces silhouettes.
+	// Le bit du groupe doit etre retire de FlatMask par l'appelant. ExtraStandN = 0 : groupe dessine normalement.
+	bool ExtraStand[HdDioMaxGroups] = {};
+	float ExtraBlob[HdDioMaxGroups][64][4] = {};
+	int ExtraBlobN[HdDioMaxGroups] = {};
 	// G3h : envoi reduit. L0Uniform : L0 est une seule couleur (envoyee en 1 x 1). RowDirty[k] (k = 0..3, nullptr = image entiere) :
 	// 240 marques par ligne NES, seules les lignes marquees de la couche k sont renvoyees (les autres n'ont pas change depuis
 	// le dernier envoi). Ligne HD = (ligne NES - RowY0) * RowScale.

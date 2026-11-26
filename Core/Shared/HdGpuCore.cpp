@@ -461,6 +461,7 @@ uniform sampler2D uTopTex;   // G3b2 : motif du dessus et du dessous
 uniform sampler2D uSideTex;  // G3b2 : motif des flancs
 uniform int uExt;       // G4a : 1 = quad etendu
 uniform int uStand;     // topDown : silhouette de sprite debout (vUV = fraction du plan)
+uniform vec2 uStandBand; // topDown, groupe debout : bande de lignes de la texture (debut, hauteur en fraction du plan) ; (0, 1) = image entiere
 uniform int uMist;      // <DioramaMist> : 1 = nappe de brume (bruit uCldA0 / uCldB0 / uCldC0 ; uCldB0.w = bande side)
 uniform vec4 uFog;      // <DioramaFog> : debut, fin (profondeur au-dela du plan de l'ecran), opacite, 1 = actif
 uniform vec3 uFogCol;   // couleur du brouillard
@@ -655,6 +656,7 @@ vec3 LightOne(vec4 lp, vec4 lc, vec3 P, vec3 N)
 R"(void main()
 {
 	vec2 uv0 = vUV;   // coordonnee de lecture de la texture
+	if(uStand != 0) uv0.y = (vUV.y - uStandBand.x) / max(uStandBand.y, 1e-6); // groupe debout : texture = bande de lignes
 	gPlaneY = (uExt != 0 || uStand != 0) ? vUV.y : uR.y + vUV.y * uR.w;
 	if(uMist != 0) { // <DioramaMist> : nappe de brume, bords du plan fondus ; side : dense en bas de l'ecran (bande)
 		float mx = (uR.x + vUV.x * uR.z) * uSize.x, my = gPlaneY * uSize.y;
@@ -1935,8 +1937,9 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 	if(((sc.FlatMask != 0 && (sc.Objects.Count > 0 || sc.SpriteFoot)) || (sc.Mist.Active && sc.FlatMask != 0) || (sc.P3Count > 0 && sc.FlatMask != 0)) && !objDepthOn) ensureObjDepth(); // brume topDown : profondeur des montagnes et des sprites meme sans objet
 	const GLint locSprDepth = U("uSprDepth");
 	G.Uniform1i(locSprDepth, 0);
-	const GLint locStand = U("uStand"), locStandFoot = U("uStandFoot");
+	const GLint locStand = U("uStand"), locStandFoot = U("uStandFoot"), locStandBand = U("uStandBand");
 	G.Uniform1i(locStand, 0);
+	G.Uniform2f(locStandBand, 0.0f, 1.0f);
 	const GLint locMist = U("uMist");
 	G.Uniform1i(locMist, 0);
 	// <DioramaMist> : une nappe (plan a la hauteur / profondeur de la nappe i, bruit qui derive), puis retour a l'etat des tranches
@@ -2120,23 +2123,29 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 		// topDown : un groupe a plat (montagne) ecrit sa profondeur, mais seulement sur ses tiles (masque), sans couleur ; les objets sont testes contre elle
 		const bool t2oWrite = objDepthOn && !occlOn && sc.FlatMask != 0 && s.Layer >= 4 && s.Layer < 12 && flatSlice(s) && sc.ExtraMask[s.Layer - 4] && _extraMaskTex[s.Layer - 4];
 		// topDown : sprites (L1, L3) testes contre la profondeur des montagnes et des objets, sans l'ecrire
-		const bool sprDepth = objDepthOn && sc.FlatMask != 0 && sc.SpriteFoot && _sprFootTex && (s.Layer == 1 || s.Layer == 3) && !flatSlice(s);
+		// stand=on (doc 59) : un groupe debout est traite comme une couche de sprites, avec ses propres silhouettes
+		const int sg = (s.Layer >= 4 && s.Layer < 4 + HdDioMaxGroups) ? s.Layer - 4 : -1;
+		const bool grpStand = sg >= 0 && sc.ExtraStand[sg] && sc.ExtraBlobN[sg] > 0;
+		const bool sprDepth = objDepthOn && sc.FlatMask != 0 && sc.SpriteFoot && _sprFootTex && (s.Layer == 1 || s.Layer == 3 || grpStand) && !flatSlice(s);
 		if(sprDepth) {
 			G.ActiveTexture(GL_TEXTURE0 + 7); G.BindTexture(GL_TEXTURE_2D, _sprFootTex); G.ActiveTexture(GL_TEXTURE0);
 			G.Uniform1i(locSprDepth, 1); G.Enable(GL_DEPTH_TEST); G.DepthFunc(GL_LEQUAL); G.DepthMask(GL_FALSE);
 		}
 		// topDown : chaque silhouette de sprite est dessinee debout a ses pieds (comme son ombre) ; plus de 16 silhouettes : plan entier
-		const bool stand = sprDepth && sc.SpriteBlobN > 0 && sc.SpriteBlobTotal <= 16 && !sc.Ext[s.Layer].Active;
+		const bool stand = sprDepth && (grpStand ? true : (sc.SpriteBlobN > 0 && sc.SpriteBlobTotal <= 16 && !sc.Ext[s.Layer].Active));
 		if(stand) {
 			G.DepthMask(GL_TRUE); // les sprites ecrivent leur profondeur : un objet dessine ensuite derriere eux est cache
 			G.Uniform1i(locStand, 1);
-			for(int bi = 0; bi < sc.SpriteBlobN && bi < 16; bi++) {
-				const float* b = sc.SpriteBlob[bi];
+			if(grpStand) G.Uniform2f(locStandBand, (float)sc.ExtraY0[sg] / (float)h, (float)sc.ExtraRows[sg] / (float)h);
+			const int nb = grpStand ? (std::min)(sc.ExtraBlobN[sg], 64) : (std::min)(sc.SpriteBlobN, 16);
+			for(int bi = 0; bi < nb; bi++) {
+				const float* b = grpStand ? sc.ExtraBlob[sg][bi] : sc.SpriteBlob[bi];
 				G.Uniform4f(locR, b[0] / sc.W, b[2] / sc.H, (b[1] - b[0]) / sc.W, (b[3] - b[2]) / sc.H);
 				G.Uniform1f(locStandFoot, b[3]);
 				G.DrawArrays(GL_TRIANGLES, 0, 6);
 			}
 			G.Uniform1i(locStand, 0);
+			G.Uniform2f(locStandBand, 0.0f, 1.0f);
 			G.Uniform4f(locR, 0.0f, 0.0f, 1.0f, 1.0f);
 		} else {
 			G.DrawArrays(GL_TRIANGLES, 0, 6);

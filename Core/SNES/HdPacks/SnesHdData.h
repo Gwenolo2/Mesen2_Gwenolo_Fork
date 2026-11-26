@@ -429,6 +429,8 @@ public:
 
 	// Flag for <disableTile> tag
 	bool IsDisabled = false;
+	uint8_t DioGroup = 0; // diorama SNES (doc 59) : groupe <DioramaDepth>{ } de la tile (1..8), 0 = aucun
+	uint8_t DioShadow = 0; // diorama SNES (doc 59) : regle <DioramaShadow>{ } de la tile (1..255), 0 = aucune
 
 	//Option pour désactiver la lumière dynamique sur cette tuile
 	bool IgnoreColorMath = false;

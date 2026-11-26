@@ -26,6 +26,8 @@ struct SnesHdDioFrame
 	const uint8_t* BgZ = nullptr;         // Z du fond opaque le plus haut de chaque pixel
 	const uint32_t* TrCol = nullptr;      // dernier pixel de tile semi-transparent pose (bord anticrenele), ARGB non premultiplie
 	const uint8_t* TrZ = nullptr;         // Z de ce pixel (devant la source visible si TrZ > Z)
+	const uint8_t* TrG = nullptr;         // groupe <DioramaDepth> de la tile de ce bord (0 = aucun)
+	const uint8_t* OwnG = nullptr;        // groupe de la derniere tile opaque posee sur ce pixel HD (0 = aucun)
 	const uint32_t* Palette = nullptr;    // couleur SNES 15 bits -> ARGB
 	int BgMode = 1;
 	bool Bg3Priority = false;

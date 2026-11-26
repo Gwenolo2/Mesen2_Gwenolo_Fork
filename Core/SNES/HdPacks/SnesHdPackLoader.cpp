@@ -403,6 +403,8 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 		return (l == "<noliquidreflect>" || l == "<noliquidrefelct>") ? 17 : 0;
 	};
 	std::vector<int> frontBlockId, frontBlockCount;                 // numero du bloc, tiles ajoutees
+	std::vector<int> dioDepthStack, dioDepthCount;                  // diorama (doc 59) : groupe (1..8, 0 = refuse) de chaque bloc <DioramaDepth>{ ouvert, tiles du bloc
+	std::vector<int> dioShadowStack, dioShadowCount;                // diorama (doc 59) : regle (1..255, 0 = refusee) de chaque bloc <DioramaShadow>{ ouvert
 	int frontBlockNext = 0;
 	std::vector<SnesHdSpriteLightInfo> spriteLightBlockStack;     // modele de chaque bloc <SpriteLight ...>{ ouvert ('L')
 	std::vector<int> spriteLightBlockCount;
@@ -753,6 +755,18 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <FrontOf3D>{ } : " + std::to_string(frontBlockCount.back()) + " tile(s) gardee(s) devant la 3D");
 					frontBlockCount.pop_back(); frontBlockId.pop_back();
 				}
+			} else if(!blockKinds.empty() && blockKinds.back() == 'S') {
+				blockKinds.pop_back();
+				if(!dioShadowStack.empty()) {
+					if(dioShadowStack.back() > 0) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <DioramaShadow>{ } : " + std::to_string(dioShadowCount.back()) + " tile(s) avec la regle d'ombre " + std::to_string(dioShadowStack.back()));
+					dioShadowStack.pop_back(); dioShadowCount.pop_back();
+				}
+			} else if(!blockKinds.empty() && blockKinds.back() == 'D') {
+				blockKinds.pop_back();
+				if(!dioDepthStack.empty()) {
+					if(dioDepthStack.back() > 0) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <DioramaDepth>{ } : " + std::to_string(dioDepthCount.back()) + " tile(s) dans le groupe " + std::to_string(dioDepthStack.back()));
+					dioDepthStack.pop_back(); dioDepthCount.pop_back();
+				}
 			} else if(!fallbackStack.empty()) {
 				fallbackStack.pop_back();
 				if(!blockKinds.empty()) blockKinds.pop_back();
@@ -894,6 +908,66 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 				}
 				continue;
 			}
+			if(dStarts("<dioramadepth>")) {
+				// <DioramaDepth>name=,z=,t=...{ : bloc de tiles (forme ligne rect= pas encore prise en charge)
+				std::string opts = StringUtilities::Trim(lineContent.substr(14));
+				if(opts.empty() || opts.back() != '{') {
+					MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <DioramaDepth> : seule la forme bloc { } est prise en charge sur SNES, ligne ignoree : " + lineContent);
+					continue;
+				}
+				opts = StringUtilities::Trim(opts.substr(0, opts.size() - 1));
+				if(!currentConditions.empty()) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <DioramaDepth>{ : les conditions [ ] ne sont pas prises en charge sur un groupe, ignorees.");
+				// stand=on|off (propre au SNES pour l'instant) : retire avant le chargeur NES
+				bool standOn = false;
+				{
+					std::string rest;
+					for(const std::string& raw : StringUtilities::Split(opts, ',')) {
+						const std::string tk = StringUtilities::Trim(raw), lk = StringUtilities::ToLower(tk);
+						if(lk.compare(0, 6, "stand=") == 0) { const std::string sv = lk.substr(6); standOn = (sv == "on" || sv == "1" || sv == "true" || sv == "yes"); }
+						else if(!tk.empty()) rest += (rest.empty() ? "" : ",") + tk;
+					}
+					opts = rest;
+				}
+				const int gid = HdPackLoader::ParseForeignDepthBlock(rootFolder, opts, dio.Data);
+				if(gid >= 1 && gid <= 8 && standOn) dio.GroupStand[gid - 1] = true;
+				if(gid <= 0 || gid > 8) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <DioramaDepth>{ refuse (options invalides ou plus de 8 groupes), les tiles du bloc restent dans leur couche : " + lineContent);
+				dioDepthStack.push_back(gid > 0 && gid <= 8 ? gid : 0); dioDepthCount.push_back(0);
+				blockKinds.push_back('D');
+				continue;
+			}
+			if(dStarts("<dioramashadow>")) {
+				std::string opts = StringUtilities::Trim(lineContent.substr(15));
+				if(!opts.empty() && opts.back() == '{') {
+					// forme bloc : <DioramaShadow>opacity=,soft=,color=,onto=,light={ <tile>... } (les tiles HD du bloc projettent une ombre)
+					opts = StringUtilities::Trim(opts.substr(0, opts.size() - 1));
+					if(!currentConditions.empty()) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <DioramaShadow>{ : les conditions [ ] sur le bloc sont ignorees (utiliser la forme ligne tile=).");
+					const int rid = HdPackLoader::ParseForeignShadowBlock(rootFolder, opts, dio.Data);
+					if(rid <= 0 || rid > 255) MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <DioramaShadow>{ refuse (options invalides ou trop de regles) : " + lineContent);
+					dioShadowStack.push_back(rid > 0 && rid <= 255 ? rid : 0); dioShadowCount.push_back(0);
+					blockKinds.push_back('S');
+					continue;
+				}
+				// forme ligne : [cond]<DioramaShadow>tile=HASH|*[,palette=N|*],opacity=,soft=,color=,onto=,light= (sprites seulement)
+				std::string tileStr, palStr = "*", rest;
+				for(const std::string& raw : StringUtilities::Split(opts, ',')) {
+					const std::string tk = StringUtilities::Trim(raw), lk = StringUtilities::ToLower(tk);
+					if(lk.compare(0, 5, "tile=") == 0) tileStr = StringUtilities::Trim(tk.substr(5));
+					else if(lk.compare(0, 8, "palette=") == 0) palStr = StringUtilities::ToLower(StringUtilities::Trim(tk.substr(8)));
+					else if(!tk.empty()) rest += (rest.empty() ? "" : ",") + tk;
+				}
+				const int rid = tileStr.empty() ? 0 : HdPackLoader::ParseForeignShadowBlock(rootFolder, rest, dio.Data);
+				SnesHdDiorama::ShadowKey k;
+				bool okKey = rid > 0 && rid <= 255;
+				k.Rule = rid;
+				k.AnyTile = tileStr == "*";
+				if(okKey && !k.AnyTile) { try { k.Hash = std::stoull(tileStr, nullptr, 16); } catch(...) { okKey = false; } }
+				k.AnyPalette = (palStr == "*" || palStr == "all" || palStr == "any");
+				if(okKey && !k.AnyPalette) { try { k.Palette = (uint32_t)std::stoul(palStr); } catch(...) { okKey = false; } }
+				k.Conditions = currentConditions;
+				if(okKey) dio.ShadowKeys.push_back(k);
+				else MessageManager::Log("[SnesHDPack] Line " + lineLocation + " - <DioramaShadow> : tile=HASH|* obligatoire (ou bloc { }) / options invalides, ligne ignoree : " + lineContent);
+				continue;
+			}
 			const bool supported = dStarts("<diorama>") || dStarts("<dioramacamera") || dStarts("<dioramapad>") || dStarts("<dioramalight>") ||
 				dStarts("<dioramaskybox>") || dStarts("<dioramafog>") || dStarts("<dioramaclouds>") || dStarts("<dioramamist>") || dStarts("<dioramaview>");
 			if(!supported) {
@@ -980,6 +1054,25 @@ bool SnesHdPackLoader::LoadHdPack(const std::string& definitionFile, std::shared
 
 			while(std::getline(ss, item, ',')) {
 				tokens.push_back(StringUtilities::Trim(item));
+			}
+
+			// Diorama (doc 59) : <DioramaDepth>{ ... } : la tile (hash, palette) va dans le groupe de profondeur du bloc ;
+			// <DioramaShadow>{ ... } : la tile projette une ombre (regle du bloc)
+			if((!dioDepthStack.empty() || !dioShadowStack.empty()) && !tokens.empty() && outData->Dio) {
+				SnesHdDiorama::DepthTile dt;
+				bool okHash = true;
+				try { dt.Hash = std::stoull(tokens[0], nullptr, 16); } catch(...) { okHash = false; }
+				const std::string p = tokens.size() >= 2 ? StringUtilities::ToLower(StringUtilities::Trim(tokens[1])) : std::string("*");
+				if(!(p.empty() || p == "*" || p == "all")) { try { dt.Palette = (uint32_t)std::stoul(p); dt.AnyPalette = false; } catch(...) {} }
+				if(okHash && !dioDepthStack.empty() && dioDepthStack.back() > 0) {
+					dt.Group = dioDepthStack.back();
+					outData->Dio->DepthTiles.push_back(dt); dioDepthCount.back()++;
+				}
+				if(okHash && !dioShadowStack.empty() && dioShadowStack.back() > 0) {
+					dt.Group = dioShadowStack.back();
+					outData->Dio->ShadowTiles.push_back(dt); dioShadowCount.back()++;
+				}
+				if(tokens.size() < 3 && frontBlockStack.empty() && noReflBlockStack.empty() && spriteLightBlockStack.empty() && ign2dBlockStack.empty()) continue; // simple reference
 			}
 
 			// <NoLiquidReflect>{ ... } : la tile (hash, palette) ne se reflete pas (Lakitu en l'air, piece qui s'envole...)
@@ -3703,6 +3796,34 @@ else if(StringUtilities::ToLower(lineContent.substr(0, 11)) == "<2dtexture>") {
 
 	// Diorama SNES (doc 59) : la PPU ne releve chaque source (BG1..BG4, sprites) que si le pack a un <Diorama>
 	outData->DioRecord = outData->Dio && outData->Dio->Data.DioramaEnabled;
+	// <DioramaDepth>{ } : numero de groupe porte par chaque tile concernee (hash, palette ; une tile '*' prend le groupe de toute regle de son hash)
+	// <DioramaShadow>{ } : numero de regle d'ombre porte par chaque tile concernee
+	if(outData->Dio && !outData->Dio->ShadowTiles.empty()) {
+		size_t marked = 0;
+		for(auto& tp : outData->Tiles) {
+			SnesHdPackTileInfo* tl = tp.get();
+			if(!tl) continue;
+			for(const SnesHdDiorama::DepthTile& dt : outData->Dio->ShadowTiles) {
+				if(tl->MemoryHash != dt.Hash) continue;
+				if(!dt.AnyPalette && tl->PaletteHash != dt.Palette && tl->PaletteHash != 0xFFFFFFFFu) continue;
+				tl->DioShadow = (uint8_t)dt.Group; marked++;
+			}
+		}
+		MessageManager::Log("[HD-SNES-DIORAMA] <DioramaShadow>{ } : " + std::to_string(marked) + " tile(s) HD projettent une ombre" + (marked == 0 ? " (aucune : verifier les hash / palettes ; il faut une <tile> HD)" : ""));
+	}
+	if(outData->Dio && !outData->Dio->DepthTiles.empty()) {
+		size_t marked = 0;
+		for(auto& tp : outData->Tiles) {
+			SnesHdPackTileInfo* tl = tp.get();
+			if(!tl) continue;
+			for(const SnesHdDiorama::DepthTile& dt : outData->Dio->DepthTiles) {
+				if(tl->MemoryHash != dt.Hash) continue;
+				if(!dt.AnyPalette && tl->PaletteHash != dt.Palette && tl->PaletteHash != 0xFFFFFFFFu) continue;
+				tl->DioGroup = (uint8_t)dt.Group; marked++;
+			}
+		}
+		MessageManager::Log("[HD-SNES-DIORAMA] <DioramaDepth> : " + std::to_string(outData->Dio->Data.DioramaDepthGroups.size()) + " groupe(s), " + std::to_string(marked) + " tile(s) HD rattachee(s)" + (marked == 0 ? " (aucune : verifier les hash / palettes, ou les tiles doivent avoir une <tile> HD)" : ""));
+	}
 	if(outData->Dio) {
 		MessageManager::Log(std::string("[HD-SNES-DIORAMA] chargement : <Diorama> ") + (outData->DioRecord ? "present" : "ABSENT (les autres balises diorama sont ignorees)") +
 			", " + std::to_string(outData->Dio->LayerRules.size()) + " <DioramaLayer>, " + std::to_string(outData->Dio->SpriteRules.size()) + " <DioramaSprites>, repere BG" + std::to_string(outData->Dio->RefBg + 1) +

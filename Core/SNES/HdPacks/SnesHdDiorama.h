@@ -62,6 +62,15 @@ struct SnesHdDiorama
 	std::unordered_map<std::string, HdPackCondition*> ByName; // conditions nommees, pour until= (etapes suivantes)
 	std::vector<SnesHdDioLayerRule> LayerRules;
 	std::vector<SnesHdDioSpriteRule> SpriteRules;
+	// <DioramaDepth>opts{ <tile>HASH[,palette]... } : tiles rattachees a un groupe de profondeur (resolues sur les tiles en fin de chargement)
+	struct DepthTile { uint64_t Hash = 0; bool AnyPalette = true; uint32_t Palette = 0; int Group = 0; };
+	std::vector<DepthTile> DepthTiles;
+	// <DioramaShadow>opts{ <tile>HASH... } : tiles qui projettent une ombre (Group = numero de regle 1..255, resolu sur les tiles)
+	std::vector<DepthTile> ShadowTiles;
+	// [cond]<DioramaShadow>tile=HASH|*[,palette=N|*],opts : regle evaluee a chaque image (sprites seulement)
+	struct ShadowKey { uint64_t Hash = 0; bool AnyTile = false; bool AnyPalette = true; uint32_t Palette = 0; int Rule = 0; std::vector<SnesHdPackCondition*> Conditions; };
+	std::vector<ShadowKey> ShadowKeys;
+	bool GroupStand[8] = {}; // <DioramaDepth>...,stand=on : en topDown, les silhouettes du groupe sont debout a leurs pieds (comme les sprites)
 	int RefBg = 0;        // <Diorama>...,ref=bgN : BG de reference du repere du monde (0..3 = BG1..BG4)
 	HdWatchExpr RefX, RefY; // <Diorama>...,refx=$expr,refy=$expr : repere depuis la RAM (remplace ref=bgN sur cet axe)
 

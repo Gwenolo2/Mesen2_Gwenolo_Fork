@@ -26,6 +26,10 @@ struct SnesHdDioRuntime
 {
 	std::vector<uint32_t> L[4];
 	std::vector<uint32_t> Fix;
+	std::vector<uint32_t> G[8]; // groupes <DioramaDepth>{ } (etape 2b)
+	std::vector<uint32_t> Sh;   // G6c : masque des silhouettes qui projettent une ombre (etape 2c)
+	std::vector<int16_t> ShSd;  // regle d'ombre (0..) par pixel SNES, -1 = aucune
+	std::vector<uint8_t> ShSrc; // source (0..4) qui porte l'ombre
 	bool GpuTried = false, GpuOk = false;
 	int Fail = 0;
 	// camera (copie de GbHdVideoFilter)
@@ -48,7 +52,7 @@ struct SnesHdDioRuntime
 	bool TopDown = false;
 	float FloorMargin = -1.0f;
 	std::vector<uint8_t> Foot;   // pied des sprites : 256 octets par ligne SNES (ligne du bas + 1 de la silhouette)
-	std::vector<uint8_t> SprSd;  // pixel SNES dont la source visible est un sprite (silhouettes)
+	std::vector<uint8_t> SprSd;  // pixel SNES visible : 1 = sprite, 2 + g = tile d'un groupe debout (stand=on), 0 = autre (silhouettes)
 	// journaux (une fois)
 	bool Logged[16] = {};
 };
@@ -141,6 +145,7 @@ namespace {
 		}
 		float minZ = 0.0f;
 		for(int k = 0; k < 4; k++) minZ = std::min(minZ, cfg.Z[k]);
+		for(const HdDioramaDepthGroup& g : D.DioramaDepthGroups) minZ = std::min(minZ, g.Z);
 		v[2] = std::max(v[2], std::max(16.0f, -minZ / 0.9f + 1.0f));
 		if(!rt.CamInit) {
 			for(int i = 0; i < 4; i++) { rt.CamFrom[i] = rt.CamTo[i] = rt.CamCur[i] = v[i]; }
@@ -309,6 +314,12 @@ bool SnesHdDioRun(SnesHdDioRuntime& rt, SnesHdPackData& pack, const SnesHdDioFra
 	for(int k = 0; k < 4; k++) { if(rt.L[k].size() != pixels) rt.L[k].assign(pixels, 0u); }
 	if(rt.Fix.size() != pixels) rt.Fix.assign(pixels, 0u);
 	const uint32_t sdW = W / S, sdH = H / S;
+	const int nG = (int)std::min<size_t>(D.DioramaDepthGroups.size(), 8);
+	for(int g = 0; g < nG; g++) { if(rt.G[g].size() != pixels) rt.G[g].assign(pixels, 0u); }
+	// groupe d'une tile relevee par la PPU (1..nG), 0 = aucun
+	auto groupOf = [&](const SnesHdDioPixel& r) -> int {
+		return ((r.Flags & 1) && r.Tile && r.Tile->DioGroup >= 1 && r.Tile->DioGroup <= nG) ? r.Tile->DioGroup : 0;
+	};
 	if(rt.SprSd.size() != (size_t)sdW * sdH) rt.SprSd.assign((size_t)sdW * sdH, 0);
 	const bool disT = pack.DisableOriginalTiles, disS = pack.DisableOriginalSprites;
 	auto recColor = [&](int s, const SnesHdDioPixel& r, uint32_t u, uint32_t v) -> uint32_t {
@@ -331,6 +342,37 @@ bool SnesHdDioRun(SnesHdDioRuntime& rt, SnesHdPackData& pack, const SnesHdDioFra
 	std::vector<int> fixMin, fixMax;
 	const int nBands = (f.Pool && f.Pool->Size() > 1 && H >= 64) ? f.Pool->Size() : 1;
 	fixMin.assign((size_t)nBands, INT32_MAX); fixMax.assign((size_t)nBands, -1);
+	std::vector<int> gMin((size_t)nBands * 8, INT32_MAX), gMax((size_t)nBands * 8, -1);
+	// G6c (etape 2c) : regle d'ombre de chaque pixel SNES, d'apres le releve PPU (le sprite le plus prioritaire, meme cache par un BG).
+	// Tile avec un bloc <DioramaShadow>{ } (sprite ou BG), sinon forme ligne tile=HASH|* dont les conditions sont vraies (sprites).
+	const bool shadowsOn = !D.DioramaShadowRules.empty();
+	std::vector<int> sMin((size_t)nBands, INT32_MAX), sMax((size_t)nBands, -1), sRule((size_t)nBands, INT32_MAX);
+	if(shadowsOn) {
+		if(rt.Sh.size() != pixels) rt.Sh.assign(pixels, 0u);
+		rt.ShSd.assign((size_t)239 * 256, -1);
+		rt.ShSrc.assign((size_t)239 * 256, 0);
+		std::vector<const SnesHdDiorama::ShadowKey*> keys;
+		for(const SnesHdDiorama::ShadowKey& k : dio.ShadowKeys) { if(SnesCondsOk(k.Conditions)) keys.push_back(&k); }
+		static const int order[5] = { 4, 0, 1, 2, 3 };
+		for(int y = 0; y < 239; y++) {
+			const SnesHdDioPixel* rr = f.Rec + (size_t)y * SnesHdDioSources * 256;
+			for(int x = 0; x < 256; x++) {
+				for(int oi = 0; oi < 5; oi++) {
+					const int s = order[oi];
+					const SnesHdDioPixel& r = rr[(size_t)s * 256 + x];
+					if(!(r.Flags & 1)) continue;
+					int rule = -1;
+					if(r.Tile && r.Tile->DioShadow) rule = r.Tile->DioShadow - 1;
+					else if(s == 4) {
+						for(const SnesHdDiorama::ShadowKey* k : keys) {
+							if(k->AnyTile || (r.Tile && r.Tile->MemoryHash == k->Hash && (k->AnyPalette || r.Tile->PaletteHash == k->Palette || r.Tile->PaletteHash == 0xFFFFFFFFu))) { rule = k->Rule - 1; break; }
+						}
+					}
+					if(rule >= 0 && rule < (int)D.DioramaShadowRules.size()) { rt.ShSd[(size_t)y * 256 + x] = (int16_t)rule; rt.ShSrc[(size_t)y * 256 + x] = (uint8_t)s; break; }
+				}
+			}
+		}
+	}
 	const uint32_t bandH = (H + nBands - 1) / nBands;
 	auto build = [&](int band) {
 		const uint32_t y0 = (uint32_t)band * bandH, y1 = std::min(H, y0 + bandH);
@@ -345,6 +387,22 @@ bool SnesHdDioRun(SnesHdDioRuntime& rt, SnesHdPackData& pack, const SnesHdDioFra
 				const size_t i = (size_t)hy * W + hx;
 				rt.L[0][i] = rt.L[1][i] = rt.L[2][i] = rt.L[3][i] = 0u;
 				rt.Fix[i] = 0u;
+				for(int g = 0; g < nG; g++) rt.G[g][i] = 0u;
+				if(shadowsOn) {
+					rt.Sh[i] = 0u;
+					const int sx = (int)(hx / S) - f.DstX + f.SrcX;
+					if(rowOk && sx >= 0 && sx < 256) {
+						const size_t si = (size_t)snesY * 256 + sx;
+						const int shr = rt.ShSd[si];
+						if(shr >= 0) {
+							const uint32_t col = recColor(rt.ShSrc[si], rec[(size_t)rt.ShSrc[si] * 256 + sx], hx % S, v);
+							if(col >> 24) {
+								rt.Sh[i] = col;
+								sMin[band] = std::min(sMin[band], (int)hy); sMax[band] = std::max(sMax[band], (int)hy); sRule[band] = std::min(sRule[band], shr);
+							}
+						}
+					}
+				}
 				const uint8_t z = f.Z[i];
 				const int src = zSrc[z];
 				const int own = layerOfZ(z);
@@ -353,8 +411,14 @@ bool SnesHdDioRun(SnesHdDioRuntime& rt, SnesHdPackData& pack, const SnesHdDioFra
 				// son Z, il resterait dans la couche de dessous a la position native. On rend a la source visible sa couleur propre
 				// (fond <background> capture, ou tile / couleur du releve PPU) et le bord va dans sa propre couche (vue neutre identique).
 				uint32_t trCol = 0;
-				int trLayer = -1;
+				int trLayer = -1, trGroup = 0;
 				const int snesXo = (int)(hx / S) - f.DstX + f.SrcX;
+				// groupe <DioramaDepth> de la tile visible : capture du filtre (tile HD opaque qui a pose ce pixel), sinon releve PPU
+				int ownG = 0;
+				if(nG > 0 && src < 5) {
+					if(f.OwnG) ownG = f.OwnG[i] <= nG ? f.OwnG[i] : 0;
+					else if(rec && snesXo >= 0 && snesXo < 256) ownG = groupOf(rec[(size_t)src * 256 + snesXo]);
+				}
 				if(f.TrCol && (f.TrCol[i] >> 24) && f.TrZ[i] > z) {
 					uint32_t clean = 0;
 					if(f.BgCol && f.BgZ[i] == z && (f.BgCol[i] >> 24) == 255) clean = f.BgCol[i] | 0xFF000000u;
@@ -363,56 +427,69 @@ bool SnesHdDioRun(SnesHdDioRuntime& rt, SnesHdPackData& pack, const SnesHdDioFra
 						if((rc >> 24) == 255) clean = rc;
 					} else if(src == 5) clean = bdc;
 					const int tl = layerOfZ(f.TrZ[i]);
-					if(clean && tl != own && (tl == SnesHdDioOff || own == SnesHdDioOff || RankOf(tl) > RankOf(own))) {
+					const int tg = (nG > 0 && f.TrG && f.TrG[i] <= nG) ? f.TrG[i] : 0;
+					// le bord part s'il est dans une couche devant, ou dans un autre groupe que la source visible (meme couche d'origine)
+					const bool moves = tl == SnesHdDioOff || own == SnesHdDioOff || RankOf(tl) > RankOf(own) ||
+						(RankOf(tl) == RankOf(own) && tg != ownG && tl != SnesHdDioFixed);
+					if(clean && moves) {
 						c = clean;
-						if(tl != SnesHdDioOff) { trCol = Premul(f.TrCol[i]); trLayer = tl; }
+						if(tl != SnesHdDioOff) { trCol = Premul(f.TrCol[i]); trLayer = tl; trGroup = (tl == SnesHdDioFixed) ? 0 : tg; }
 					}
 				}
-				if(hx % S == S / 2 && v == S / 2 && hx / S < sdW && hy / S < sdH) rt.SprSd[(size_t)(hy / S) * sdW + hx / S] = (src == 4 && own != SnesHdDioOff) ? 1 : 0;
+				if(hx % S == S / 2 && v == S / 2 && hx / S < sdW && hy / S < sdH) rt.SprSd[(size_t)(hy / S) * sdW + hx / S] =
+					(own == SnesHdDioOff) ? 0 : (ownG > 0 && dio.GroupStand[ownG - 1]) ? (uint8_t)(1 + ownG) : (src == 4 ? 1 : 0);
+				auto markG = [&](int g) { const size_t k = (size_t)band * 8 + (size_t)g; gMin[k] = std::min(gMin[k], (int)hy); gMax[k] = std::max(gMax[k], (int)hy); };
 				int ownRank;
 				if(own == SnesHdDioOff) {
 					ownRank = 6; // source retiree : rien n'est pose, tout ce qui est derriere peut se voir
 				} else if(own == SnesHdDioFixed) {
 					rt.Fix[i] = c; fixRow = true; ownRank = 4;
+				} else if(ownG > 0) {
+					rt.G[ownG - 1][i] = c; markG(ownG - 1);
+					ownRank = own;
 				} else {
 					rt.L[own][i] = (src == 5 && sky) ? 0u : c;
 					ownRank = own;
 				}
-				// remplissage sous le pixel visible : sources de rang inferieur, de la plus prioritaire a la moins prioritaire
+				// remplissage sous le pixel visible : sources de rang inferieur, de la plus prioritaire a la moins prioritaire ; si la
+				// tile visible est partie dans un groupe, sa couche d'origine est remplie aussi (sol sous un buisson du groupe)
 				const int snesX = (int)(hx / S) - f.DstX + f.SrcX;
-				if(ownRank > 0) {
+				const int fillRank = (ownG > 0 && own != SnesHdDioOff && own != SnesHdDioFixed) ? ownRank + 1 : ownRank;
+				if(fillRank > 0) {
 					// candidats : sources PPU (0..4) et fonds <background> du pack (5), tries par Z decroissant (Z = 20 + priorite x 4, +2)
-					int cs[SnesHdDioSources + 1], cl[SnesHdDioSources + 1], cz[SnesHdDioSources + 1], n = 0;
-					auto addCand = [&](int s, int lay, int zc) {
-						if(lay == SnesHdDioOff || RankOf(lay) >= ownRank) return;
+					int cs[SnesHdDioSources + 1], cl[SnesHdDioSources + 1], cz[SnesHdDioSources + 1], cg[SnesHdDioSources + 1], n = 0;
+					auto addCand = [&](int s, int lay, int zc, int grp) {
+						if(lay == SnesHdDioOff || RankOf(lay) >= fillRank) return;
 						int j = n++;
-						while(j > 0 && cz[j - 1] < zc) { cs[j] = cs[j - 1]; cl[j] = cl[j - 1]; cz[j] = cz[j - 1]; j--; }
-						cs[j] = s; cl[j] = lay; cz[j] = zc;
+						while(j > 0 && cz[j - 1] < zc) { cs[j] = cs[j - 1]; cl[j] = cl[j - 1]; cz[j] = cz[j - 1]; cg[j] = cg[j - 1]; j--; }
+						cs[j] = s; cl[j] = lay; cz[j] = zc; cg[j] = (lay == SnesHdDioFixed) ? 0 : grp;
 					};
 					if(rec && snesX >= 0 && snesX < 256) {
 						for(int s = 0; s < (int)SnesHdDioSources; s++) {
 							const SnesHdDioPixel& r = rec[(size_t)s * 256 + snesX];
 							if(!(r.Flags & 1) || s == src) continue;
 							const bool hi = s < 4 ? (r.Flags & 8) != 0 : r.OamPrio >= 2;
-							addCand(s, s < 4 ? bgLayer[s][hi ? 1 : 0] : sprLayer[r.OamPrio & 3], 20 + r.Prio * 4 + (hi ? 2 : 0));
+							addCand(s, s < 4 ? bgLayer[s][hi ? 1 : 0] : sprLayer[r.OamPrio & 3], 20 + r.Prio * 4 + (hi ? 2 : 0), nG > 0 ? groupOf(r) : 0);
 						}
 					}
 					if(f.BgCol && (f.BgCol[i] >> 24) && f.BgZ[i] != z) {
 						const uint8_t bz = f.BgZ[i];
-						addCand(5, layerOfZ(bz), bz);
+						addCand(5, layerOfZ(bz), bz, 0);
 					}
 					const uint32_t u = hx % S;
 					for(int k = 0; k < n; k++) {
-						uint32_t* dst = cl[k] == SnesHdDioFixed ? rt.Fix.data() : rt.L[cl[k]].data();
+						uint32_t* dst = cg[k] > 0 ? rt.G[cg[k] - 1].data() : (cl[k] == SnesHdDioFixed ? rt.Fix.data() : rt.L[cl[k]].data());
 						if(dst[i] >> 24) continue;
 						const uint32_t col = cs[k] == 5 ? Premul(f.BgCol[i]) : recColor(cs[k], rec[(size_t)cs[k] * 256 + snesX], u, v);
 						if(!(col >> 24)) continue;
 						dst[i] = col;
-						if(cl[k] == SnesHdDioFixed) fixRow = true;
+						if(cg[k] > 0) markG(cg[k] - 1);
+						else if(cl[k] == SnesHdDioFixed) fixRow = true;
 					}
 				}
-				if(trLayer >= 0) { // bord semi-transparent dans sa couche, par-dessus ce qui y est deja (remplissage compris)
-					uint32_t* td = trLayer == SnesHdDioFixed ? rt.Fix.data() : rt.L[trLayer].data();
+				if(trLayer >= 0) { // bord semi-transparent dans sa couche (ou son groupe), par-dessus ce qui y est deja (remplissage compris)
+					uint32_t* td = trGroup > 0 ? rt.G[trGroup - 1].data() : (trLayer == SnesHdDioFixed ? rt.Fix.data() : rt.L[trLayer].data());
+					if(trGroup > 0) markG(trGroup - 1);
 					const uint32_t d = td[i], a = trCol >> 24, ia = 255 - a;
 					const uint32_t rb = ((trCol & 0xFF00FFu) + (((d & 0xFF00FFu) * ia / 255) & 0xFF00FFu)) & 0xFF00FFu;
 					const uint32_t g = ((trCol & 0x00FF00u) + (((d & 0x00FF00u) * ia / 255) & 0x00FF00u)) & 0x00FF00u;
@@ -470,17 +547,25 @@ bool SnesHdDioRun(SnesHdDioRuntime& rt, SnesHdPackData& pack, const SnesHdDioFra
 	// topDown : couches sans sprite a plat (sol, toits...), couches des sprites debout a leurs pieds ; groupes a plat
 	uint32_t sprMask = 0;
 	for(int p = 0; p < 4; p++) { if(sprLayer[p] >= 0 && sprLayer[p] <= 3) sprMask |= 1u << sprLayer[p]; }
-	scene.FlatMask = td ? ((~sprMask & 0xFu) | 0xFF0u) : 0u;
+	uint32_t standMask = 0; // groupes debout (stand=on) : pas a plat en topDown
+	for(int g = 0; g < nG; g++) { if(dio.GroupStand[g]) standMask |= 1u << (4 + g); }
+	scene.FlatMask = td ? ((~sprMask & 0xFu) | (0xFF0u & ~standMask)) : 0u;
+	// topDown : pour une couche a plat, le Z du GPU est une HAUTEUR (positif = au-dessus du sol) et les plans a plat sont dessines du plus
+	// bas au plus haut. Les z0..z3 de <Diorama> (profondeurs de la vue side) souleveraient le sol (z1=24) au-dessus des toits : les
+	// couches a plat sont empilees selon leur rang (L0 < L1 < L2 < L3) a des hauteurs quasi nulles.
+	if(td) { for(int k = 0; k < 4; k++) { if((scene.FlatMask >> k) & 1u) scene.PlaneZ[k] = 0.01f * (float)k; } }
 	if(td && rt.FloorMargin >= 0.0f) scene.BgMargin = rt.FloorMargin;
 	if(td) { // pied des sprites : silhouettes de pixels de sprite qui se touchent (meme calcul que le NES / Game Boy)
 		const int rows = (int)sdH, cols = (int)std::min<uint32_t>(sdW, 256);
 		rt.Foot.assign((size_t)256 * rows, 0);
-		auto covered = [&](int r, int x) { return rt.SprSd[(size_t)r * sdW + x] != 0; };
+		int standN[8] = {};
+		auto typeAt = [&](int r, int x) { return rt.SprSd[(size_t)r * sdW + x]; };
 		std::vector<int> stack, comp;
 		for(int r = 0; r < rows; r++) {
 			for(int x = 0; x < cols; x++) {
 				const int i0 = (r << 8) | x;
-				if(rt.Foot[i0] || !covered(r, x)) continue;
+				const uint8_t ty = typeAt(r, x);
+				if(rt.Foot[i0] || ty == 0) continue;
 				stack.clear(); comp.clear();
 				rt.Foot[i0] = 255; stack.push_back(i0);
 				int maxR = r, minX = x, maxX = x;
@@ -492,24 +577,62 @@ bool SnesHdDioRun(SnesHdDioRuntime& rt, SnesHdPackData& pack, const SnesHdDioFra
 					for(int k = 0; k < 4; k++) {
 						if(nr[k] < 0 || nr[k] >= rows || nx[k] < 0 || nx[k] >= cols) continue;
 						const int j = (nr[k] << 8) | nx[k];
-						if(rt.Foot[j] || !covered(nr[k], nx[k])) continue;
+						if(rt.Foot[j] || typeAt(nr[k], nx[k]) != ty) continue; // un buisson et Link qui se touchent restent separes
 						rt.Foot[j] = 255; stack.push_back(j);
 					}
 				}
 				const uint8_t fv = (uint8_t)std::min(255, maxR + 1);
 				for(int c : comp) rt.Foot[c] = fv;
-				scene.SpriteBlobTotal++;
-				if(scene.SpriteBlobN < 16) {
-					float* b = scene.SpriteBlob[scene.SpriteBlobN++];
-					b[0] = (float)minX; b[1] = (float)(maxX + 1); b[2] = (float)r; b[3] = (float)(maxR + 1);
+				if(ty == 1) {
+					scene.SpriteBlobTotal++;
+					if(scene.SpriteBlobN < 16) {
+						float* b = scene.SpriteBlob[scene.SpriteBlobN++];
+						b[0] = (float)minX; b[1] = (float)(maxX + 1); b[2] = (float)r; b[3] = (float)(maxR + 1);
+					}
+				} else {
+					const int g = ty - 2;
+					if(standN[g] < 64) {
+						float* b = scene.ExtraBlob[g][standN[g]];
+						b[0] = (float)minX; b[1] = (float)(maxX + 1); b[2] = (float)r; b[3] = (float)(maxR + 1);
+					}
+					standN[g]++;
 				}
 			}
 		}
 		scene.SpriteFoot = rt.Foot.data(); scene.SpriteFootH = (uint32_t)rows;
+		for(int g = 0; g < nG; g++) {
+			if(!dio.GroupStand[g]) continue;
+			if(standN[g] > 64) { // trop de silhouettes : le groupe reste a plat pour cette image
+				scene.FlatMask |= 1u << (4 + g);
+				LogOnce(rt, 10, "stand=on : plus de 64 silhouettes dans un groupe, groupe dessine a plat pour ces images.");
+				continue;
+			}
+			scene.ExtraStand[g] = standN[g] > 0;
+			scene.ExtraBlobN[g] = standN[g];
+		}
 		LogOnce(rt, 4, "vue topDown active : couches a plat 0x" + std::to_string(scene.FlatMask & 0xF) + " (bit n = Ln), sprites debout en L" + std::to_string(sprLayer[0]));
 	}
 	scene.Clear = f.Palette[f.Backdrop[120] & 0x7FFF] | 0xFF000000u; // hors des plans : couleur du fond (milieu de l'ecran)
 	if(fy1 >= fy0) { scene.Fixed = rt.Fix.data(); scene.FixedY0 = (uint32_t)fy0; scene.FixedRows = (uint32_t)(fy1 - fy0 + 1); }
+	// G7 : groupes <DioramaDepth>{ } : seulement leurs lignes non vides (une ligne SNES de marge de chaque cote pour le filtrage)
+	int gActive = 0;
+	for(int g = 0; g < nG; g++) {
+		int a = INT32_MAX, b = -1;
+		for(int bd = 0; bd < nBands; bd++) { a = std::min(a, gMin[(size_t)bd * 8 + g]); b = std::max(b, gMax[(size_t)bd * 8 + g]); }
+		if(b < a) continue;
+		a = std::max(a - (int)S, 0);
+		b = std::min(b + (int)S, (int)H - 1);
+		const HdDioramaDepthGroup& grp = D.DioramaDepthGroups[(size_t)g];
+		scene.ExtraImg[g] = rt.G[g].data();
+		scene.ExtraY0[g] = (uint32_t)a;
+		scene.ExtraRows[g] = (uint32_t)(b - a + 1);
+		// side : profondeur (negatif = devant) ; topDown : hauteur au-dessus des couches a plat = -z (z=-16 devant en side -> 16 au-dessus
+		// du sol en topDown ; z=0 -> pose sur le sol, t= donne alors un volume qui monte)
+		scene.ExtraZ[g] = td ? std::max(0.0f, -grp.Z) + 0.05f : std::max(grp.Z, -0.9f * dist);
+		scene.ExtraThick[g] = grp.T * 8.0f;
+		gActive++;
+	}
+	if(gActive > 0) LogOnce(rt, 9, "groupes <DioramaDepth> : " + std::to_string(gActive) + " groupe(s) visible(s) sur " + std::to_string(nG));
 	{ // L0 d'une seule couleur : pas d'envoi, couleur d'effacement
 		const uint32_t c0 = rt.L[0][0];
 		bool uni = (c0 >> 24) == 0xFF;
@@ -615,6 +738,25 @@ bool SnesHdDioRun(SnesHdDioRuntime& rt, SnesHdPackData& pack, const SnesHdDioFra
 		if(anyTile) LogOnce(rt, 6, "<DioramaLight>tile= : lumieres attachees a une tile pas encore prises en charge sur SNES, ignorees.");
 		scene.Lights.Active = any;
 		if(any) LogOnce(rt, 7, "lumieres de scene : " + std::to_string(n) + " ponctuelle(s) ou solaire(s), " + std::to_string(D.DioramaLightRules.size()) + " regle(s)");
+	}
+
+	// G6c (etape 2c) : ombres des silhouettes : bande de lignes du masque, style de la plus petite regle utilisee (copie de GbHdDiorama.cpp)
+	if(shadowsOn) {
+		int y0 = INT32_MAX, y1 = -1, ruleId = INT32_MAX;
+		for(int b = 0; b < nBands; b++) { y0 = std::min(y0, sMin[b]); y1 = std::max(y1, sMax[b]); ruleId = std::min(ruleId, sRule[b]); }
+		if(y1 >= y0 && ruleId < (int)D.DioramaShadowRules.size() && scene.Lights.Active) {
+			const HdDioramaShadowRule& sr = D.DioramaShadowRules[(size_t)ruleId];
+			scene.Shadow.Active = true;
+			scene.Shadow.Img = rt.Sh.data();
+			scene.Shadow.Y0 = (uint32_t)y0; scene.Shadow.Rows = (uint32_t)(y1 - y0 + 1);
+			scene.Shadow.Opacity = sr.Opacity; scene.Shadow.Soft = sr.Soft;
+			scene.Shadow.Color[0] = ((sr.Color >> 16) & 0xFF) / 255.0f; scene.Shadow.Color[1] = ((sr.Color >> 8) & 0xFF) / 255.0f; scene.Shadow.Color[2] = (sr.Color & 0xFF) / 255.0f;
+			scene.Shadow.OntoMask = sr.OntoMask;
+			scene.Shadow.Light = sr.Light - 1;
+			LogOnce(rt, 11, "ombres des silhouettes : regle " + std::to_string(ruleId + 1) + " sur " + std::to_string(D.DioramaShadowRules.size()) + ", opacite " + std::to_string(sr.Opacity) + ", masque onto= " + std::to_string(sr.OntoMask) + " (bit n = Ln, bits 4+ = groupes)");
+		} else if(y1 >= y0 && !scene.Lights.Active) {
+			LogOnce(rt, 12, "ombres des silhouettes : aucune <DioramaLight> active, pas d'ombre (il faut une lumiere ponctuelle ou solaire).");
+		}
 	}
 
 	// <DioramaMist> (copie de GbHdDiorama.cpp, vue side ; repere = ref=bgN ou refx= / refy=)

@@ -3956,6 +3956,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	uint8_t* dioBgZ = nullptr;
 	uint32_t* dioTrCol = nullptr; // diorama : dernier pixel de tile semi-transparent pose (bord anticrenele d'un sprite HD)
 	uint8_t* dioTrZ = nullptr;
+	uint8_t* dioTrG = nullptr;  // diorama : groupe <DioramaDepth> de la tile de ce bord
+	uint8_t* dioOwnG = nullptr; // diorama : groupe de la derniere tile opaque posee (0 = aucun, ou un fond / pixel SD par-dessus)
 	if(_framePack->Dio && _framePack->DioRecord) {
 		const size_t np = (size_t)outWidth * hdHeight;
 		if(_dioBgCol.size() != np) { _dioBgCol.assign(np, 0u); _dioBgZ.assign(np, 0); }
@@ -3964,6 +3966,9 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		if(_dioTrCol.size() != np) { _dioTrCol.assign(np, 0u); _dioTrZ.assign(np, 0); }
 		else { memset(_dioTrCol.data(), 0, np * sizeof(uint32_t)); memset(_dioTrZ.data(), 0, np); }
 		dioTrCol = _dioTrCol.data(); dioTrZ = _dioTrZ.data();
+		if(_dioTrG.size() != np) { _dioTrG.assign(np, 0); _dioOwnG.assign(np, 0); }
+		else { memset(_dioTrG.data(), 0, np); memset(_dioOwnG.data(), 0, np); }
+		dioTrG = _dioTrG.data(); dioOwnG = _dioOwnG.data();
 	}
 
 	auto composeBand = [&](uint32_t bandY0, uint32_t bandY1) {
@@ -4130,6 +4135,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								if(ign2dOn) s_ign2D[outIdx] = bgIgn ? 1 : 0;
 							}
 							_zBuffer[outIdx] = bg->ZIndex;
+							if(dioOwnG) dioOwnG[outIdx] = 0;
 						}
 					}
 				};
@@ -4204,11 +4210,12 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 							if(alpha == 255) {
 								out[pixelIndex] = finalColor | 0xFF000000;
 								_zBuffer[pixelIndex] = item.zIndex;
+								if(dioOwnG) dioOwnG[pixelIndex] = item.Tile->DioGroup;
 							} else {
 								uint32_t dstColor = out[pixelIndex];
 								uint32_t invAlpha = 255 - alpha;
 
-								if(dioTrCol) { dioTrCol[pixelIndex] = finalColor; dioTrZ[pixelIndex] = item.zIndex; } // diorama : bord semi-transparent
+								if(dioTrCol) { dioTrCol[pixelIndex] = finalColor; dioTrZ[pixelIndex] = item.zIndex; dioTrG[pixelIndex] = item.Tile->DioGroup; } // diorama : bord semi-transparent
 								uint32_t s_R = (finalColor >> 16) & 0xFF;
 								uint32_t s_G = (finalColor >> 8) & 0xFF;
 								uint32_t s_B = finalColor & 0xFF;
@@ -5733,7 +5740,7 @@ if(video->IsPlaying && video->VideoPlayer != nullptr) {
 	if(_framePack->Dio && out != nullptr) {
 		if(!_dio) _dio = SnesHdDioCreate();
 		SnesHdDioFrame df;
-		df.BgCol = dioBgCol; df.BgZ = dioBgZ; df.TrCol = dioTrCol; df.TrZ = dioTrZ;
+		df.BgCol = dioBgCol; df.BgZ = dioBgZ; df.TrCol = dioTrCol; df.TrZ = dioTrZ; df.TrG = dioTrG; df.OwnG = dioOwnG;
 		df.Out = out; df.Z = _zBuffer.data(); df.OutW = outWidth; df.OutH = hdHeight; df.Scale = scale;
 		df.SrcX = (int)srcX; df.SrcY = (int)srcY; df.DstX = (int)dstX; df.DstY = (int)dstY;
 		df.SdWidth = _baseFrameInfo.Width; df.Wide = wsExt > 0;

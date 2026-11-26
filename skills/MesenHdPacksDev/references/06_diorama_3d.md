@@ -41,7 +41,7 @@ Mêmes balises que le NES (chargeur NES, conditions SNES adaptées), vue **side*
 - `[cond]<DioramaLayer>bg1..bg4,layer=0..3|fixed|off[,prio=0|1]` : BG → couche ; `fixed` = à plat devant la scène (HUD) ; `off` = retiré de l'image (ce qui est derrière se voit). Défaut : BG1 → L2, BG2..4 → L1.
 - `[cond]<DioramaSprites>layer=0..3|fixed|off[,prio=0..3]` : sprites (priorité OAM) → couche. Défaut : L3.
 - Dernière règle vraie gagne. La priorité PPU reste respectée : une source n'est jamais remplie devant ce qui la cache.
-Pas encore : topDown, `<DioramaDepth>`, `<DioramaShadow>`, objets, `<DioramaExtend>`, `<DayNight>`, Mode 7, modes 5/6, widescreen (diorama coupé, 2D conservé). Journal `[HD-SNES-DIORAMA]`.
+`<DioramaView>topDown` (étape 2a, validée : couches sans sprite à plat) ; `<DioramaDepth>…{ <tile>HASH_SNES… }` (étape 2b, tiles HD seulement ; `stand=on` : en topDown, silhouettes du groupe debout à leurs pieds comme les sprites). `<DioramaShadow>` (étape 2c : bloc `{ <tile>HASH_SNES }` ou ligne `tile=HASH|*` ; sol de Zelda 3 en L1 → `onto=0+1`). Pas encore : objets, `<DioramaExtend>`, `<DayNight>`, Mode 7, modes 5/6, widescreen (diorama coupé, 2D conservé). Journal `[HD-SNES-DIORAMA]`.
 
 ## Conseils
 - Monter dans l'ordre : `<Diorama>` seul (vue neutre = identique au 2D) → `pitch` → ciel → lumières → profondeur des tiles → objets → atmosphère.

@@ -22,6 +22,7 @@ private:
 	std::vector<uint8_t> _dioBgZ;    // diorama : Z du fond opaque le plus haut de chaque pixel
 	std::vector<uint32_t> _dioTrCol; // diorama : dernier pixel de tile semi-transparent (ARGB non premultiplie)
 	std::vector<uint8_t> _dioTrZ;    // diorama : Z de ce pixel
+	std::vector<uint8_t> _dioTrG, _dioOwnG; // diorama : groupe <DioramaDepth> du bord / de la derniere tile opaque posee
 	std::shared_ptr<SnesHdPackData> _framePack; // Snapshot du pack HD pour la frame en cours (evite la course avec LoadHdPack)
 	// Chronometrage des passes (journal [HD-PASS] toutes les 300 frames) : m7, compose, reflets, eclairage, atmosphere
 	double _passMs[5] = {};
