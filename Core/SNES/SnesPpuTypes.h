@@ -66,6 +66,7 @@ struct TileData {
 
   // --- HD PACK ---
   SnesHdPackTileInfo *HdTile = nullptr;
+  uint64_t HdHash = 0; // hash memoire de la tile (meme calcul que le Builder), meme sans <tile> dans le pack (diorama : Tile2Obj)
 };
 
 struct LayerData {

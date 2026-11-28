@@ -4445,8 +4445,8 @@ void HdPackLoader::ProcessLiquidTag(vector<string>& tokens, vector<HdPackConditi
 }
 
 // Diorama des autres consoles (Game Boy, doc 56) : memes analyses que les balises du hires.txt NES. Les balises liees aux tiles NES
-// (<Tile2Obj>, <Sprite2Obj>, <DioramaDepth>, <DioramaOffCamera>, <DioramaNormal>, <DioramaShadow>, lumieres de tile) ne sont pas
-// prises en charge ici.
+// (<DioramaDepth>, <DioramaOffCamera>, <DioramaNormal>, <DioramaShadow>, lumieres de tile) ne sont pas
+// prises en charge ici. <Tile2Obj> / <Sprite2Obj> : modele et options lus ici, hashs de tiles fournis factices par l'appelant (SNES).
 bool HdPackLoader::ParseForeignDioramaLine(const string& folder, const string& line, const vector<HdPackCondition*>& conditions, const unordered_map<string, HdPackCondition*>& condByName, HdPackData& data)
 {
 	HdPackLoader L;
@@ -4473,6 +4473,8 @@ bool HdPackLoader::ParseForeignDioramaLine(const string& folder, const string& l
 	else if(is("<dioramaextend>")) { split(15); L.ProcessDioramaExtendTag(tokens, conditions); }
 	else if(is("<dioramaskybox>")) { split(15); L.ProcessDioramaSkyboxTag(tokens, conditions); }
 	else if(is("<diorama>")) { split(9); L.ProcessDioramaTag(tokens, conditions); }
+	else if(is("<tile2obj>")) { split(10); L.ProcessDioramaTile2ObjTag(tokens, conditions); }         // SNES : hashs remplaces par l'appelant
+	else if(is("<sprite2obj>")) { split(12); L.ProcessDioramaTile2ObjTag(tokens, conditions, true); } // (motif / liste lus a part)
 	else return false;
 	return true;
 }

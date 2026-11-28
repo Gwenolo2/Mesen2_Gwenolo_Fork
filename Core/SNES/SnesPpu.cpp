@@ -309,6 +309,7 @@ void SnesPpu::GetChrData(uint8_t layerIndex, uint8_t column, uint8_t plane) {
   // =========================================================================
   if (plane == 0 && !secondTile) {
     tileData.HdTile = nullptr; // Par défaut, pas de HD
+    tileData.HdHash = 0;
 
     if (SnesHdPackLoader::ActivePack != nullptr) {
       // 1. Lire les pixels en VRAM pour créer le Hash
@@ -337,6 +338,7 @@ void SnesPpu::GetChrData(uint8_t layerIndex, uint8_t column, uint8_t plane) {
 		*/
 
 		// 4. Interroger le dictionnaire avec les états de symétrie !
+		tileData.HdHash = hash; // diorama SNES (Tile2Obj) : tile reconnue meme sans <tile> dans le pack
 		tileData.HdTile = SnesHdPackLoader::GetHdTile(hash, paletteIndex, snesBpp,
 																	 false, false, hMirror, vMirror);
 
@@ -2231,6 +2233,8 @@ void SnesPpu::RenderTilemap() {
         dp.TileY = hdPixel.TileY;
         dp.Prio = priority;
         dp.Flags = 1 | (hMirror ? 2 : 0) | (vMirror ? 4 : 0) | ((tilemapData & 0x2000) ? 8 : 0);
+        dp.Hash = tileData[lookupIndex].HdHash;
+        dp.Pal = paletteIndex;
       }
       if (drawMain && (_mainScreenFlags[x] & 0x0F) < priority &&
           !ProcessMaskWindow<layerIndex>(mainWindowCount, x)) {

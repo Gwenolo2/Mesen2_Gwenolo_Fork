@@ -231,6 +231,9 @@ struct HdDioramaScene
 	// topDown : silhouettes de sprites (16 au plus) : x debut, x fin (exclue), ligne du haut, pied (lignes du plan) ; pour les ombres
 	float SpriteBlob[16][4] = {}; int SpriteBlobN = 0;
 	int SpriteBlobTotal = 0; // nombre total de silhouettes (au-dela de 16 : sprites sur le plan entier, comme avant)
+	// Liste etendue (SNES, doc 59) : jusqu'a 64 silhouettes de sprites dessinees debout (SpriteBlob[16] reste pour les ombres) ;
+	// SpriteBlobXN = 0 : non fournie (NES, Game Boy : limite de 16 comme avant)
+	float SpriteBlobX[64][4] = {}; int SpriteBlobXN = 0;
 	const uint32_t* ExtraMask[HdDioMaxGroups] = {}; // topDown : tiles de montagne du groupe (alpha 255), pour la profondeur seule
 	uint32_t ExtraY0[HdDioMaxGroups] = {}, ExtraRows[HdDioMaxGroups] = {};
 	float ExtraZ[HdDioMaxGroups] = {};      // profondeur de la face avant (pixels NES)

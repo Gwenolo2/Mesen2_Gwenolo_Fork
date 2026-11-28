@@ -336,6 +336,8 @@ struct SnesHdDioPixel
 	uint8_t Prio = 0;
 	uint8_t Flags = 0;
 	uint8_t OamPrio = 0; // sprites : priorite OAM brute (0..3)
+	uint8_t Pal = 0;     // BG : palette de la tile (0..7, comme la colonne palette de <tile>)
+	uint64_t Hash = 0;   // BG : hash memoire de la tile, meme sans <tile> dans le pack (Tile2Obj) ; 0 = inconnu
 };
 constexpr uint32_t SnesHdDioSources = 5; // BG1..BG4, sprites
 // =========================================================
@@ -431,6 +433,7 @@ public:
 	bool IsDisabled = false;
 	uint8_t DioGroup = 0; // diorama SNES (doc 59) : groupe <DioramaDepth>{ } de la tile (1..8), 0 = aucun
 	uint8_t DioShadow = 0; // diorama SNES (doc 59) : regle <DioramaShadow>{ } de la tile (1..255), 0 = aucune
+	int16_t DioSprSlot = -1; // diorama SNES (doc 59) : regles <DioramaSprites>tile= de la tile (indice dans SnesHdDiorama::SprSlots), -1 = aucune
 
 	//Option pour désactiver la lumière dynamique sur cette tuile
 	bool IgnoreColorMath = false;

@@ -70,7 +70,20 @@ struct SnesHdDiorama
 	// [cond]<DioramaShadow>tile=HASH|*[,palette=N|*],opts : regle evaluee a chaque image (sprites seulement)
 	struct ShadowKey { uint64_t Hash = 0; bool AnyTile = false; bool AnyPalette = true; uint32_t Palette = 0; int Rule = 0; std::vector<SnesHdPackCondition*> Conditions; };
 	std::vector<ShadowKey> ShadowKeys;
+	// <DioramaSprites>tile=HASH[,palette],layer=... ou bloc <DioramaSprites>layer=...{ <tile>HASH... } : sprite precis -> couche
+	struct SpriteTileRule { uint64_t Hash = 0; bool AnyPalette = true; uint32_t Palette = 0; int Layer = 3; std::vector<SnesHdPackCondition*> Conditions; };
+	std::vector<SpriteTileRule> SpriteTileRules;
+	std::vector<std::vector<int>> SprSlots; // par tile concernee : indices des regles (ordre du fichier), resolu en fin de chargement
 	bool GroupStand[8] = {}; // <DioramaDepth>...,stand=on : en topDown, les silhouettes du groupe sont debout a leurs pieds (comme les sprites)
+	// <DioramaLight>tile=HASH[,palette=N|*],... : lumiere attachee a une tile de sprite (hash SNES) ; Rule = indice dans Data.DioramaLightRules
+	// HMir / VMir : [hmirror] / [!hmirror] (et vmirror) de la ligne, evalues tile par tile : 1 = tile retournee, 0 = non retournee, -1 = les deux
+	struct LightTileKey { int Rule = 0; uint64_t Hash = 0; bool AnyPalette = true; uint32_t Palette = 0; int8_t HMir = -1, VMir = -1; };
+	// <Tile2Obj> / <Sprite2Obj> (etape 3b-2) : hashs SNES de chaque regle (meme indice que Data.Tile2ObjRules / Data.Sprite2ObjRules).
+	// Tile2Obj : Hashes = motif dans l'ordre de lecture (grid=CxL) ; Sprite2Obj : toutes les tiles du personnage. HMir / VMir comme LightTileKey.
+	struct ObjTileKey { std::vector<uint64_t> Hashes; bool AnyPalette = true; uint32_t Palette = 0; int8_t HMir = -1, VMir = -1; };
+	std::vector<ObjTileKey> T2oKeys, S2oKeys;
+	std::vector<LightTileKey> LightTiles;
+	bool Async = false;   // <Diorama>...,async=on : relecture GPU decalee d'une image (gain de temps, une image de retard)
 	int RefBg = 0;        // <Diorama>...,ref=bgN : BG de reference du repere du monde (0..3 = BG1..BG4)
 	HdWatchExpr RefX, RefY; // <Diorama>...,refx=$expr,refy=$expr : repere depuis la RAM (remplace ref=bgN sur cet axe)
 

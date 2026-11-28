@@ -3958,10 +3958,24 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 	uint8_t* dioTrZ = nullptr;
 	uint8_t* dioTrG = nullptr;  // diorama : groupe <DioramaDepth> de la tile de ce bord
 	uint8_t* dioOwnG = nullptr; // diorama : groupe de la derniere tile opaque posee (0 = aucun, ou un fond / pixel SD par-dessus)
+	uint16_t* dioOwnSl = nullptr; // diorama : regles <DioramaSprites>tile= de la derniere tile opaque posee (indice + 1, 0 = aucune)
+	uint16_t* dioTrSl = nullptr;  // diorama : idem pour le bord semi-transparent
+	uint8_t dioPileMask = 0; // piles de fonds utilisees par cette image (bit m = BG d'ancrage m + 1)
+	const auto tDioCap = std::chrono::steady_clock::now();
 	if(_framePack->Dio && _framePack->DioRecord) {
 		const size_t np = (size_t)outWidth * hdHeight;
-		if(_dioBgCol.size() != np) { _dioBgCol.assign(np, 0u); _dioBgZ.assign(np, 0); }
-		else { memset(_dioBgCol.data(), 0, np * sizeof(uint32_t)); memset(_dioBgZ.data(), 0, np); }
+		// une pile par BG d'ancrage (masterLayer 1..4) : le desert (BG2) n'est pas ecrase par le cadre d'interface (BG3) ;
+		// seules les piles des fonds actifs de cette image sont videes (et lues par le diorama)
+		for(const auto& task : tasks) {
+			if(task.type == 0 && bgReady[task.index]) dioPileMask |= (uint8_t)(1u << std::clamp(_framePack->Backgrounds[task.index]->MasterScrollLayer - 1, 0, 3));
+		}
+		if(_dioBgCol.size() != np * 4) { _dioBgCol.assign(np * 4, 0u); _dioBgZ.assign(np * 4, 0); }
+		else {
+			for(int m = 0; m < 4; m++) {
+				if(!(dioPileMask & (1u << m))) continue;
+				memset(_dioBgCol.data() + (size_t)m * np, 0, np * sizeof(uint32_t)); memset(_dioBgZ.data() + (size_t)m * np, 0, np);
+			}
+		}
 		dioBgCol = _dioBgCol.data(); dioBgZ = _dioBgZ.data();
 		if(_dioTrCol.size() != np) { _dioTrCol.assign(np, 0u); _dioTrZ.assign(np, 0); }
 		else { memset(_dioTrCol.data(), 0, np * sizeof(uint32_t)); memset(_dioTrZ.data(), 0, np); }
@@ -3969,6 +3983,10 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 		if(_dioTrG.size() != np) { _dioTrG.assign(np, 0); _dioOwnG.assign(np, 0); }
 		else { memset(_dioTrG.data(), 0, np); memset(_dioOwnG.data(), 0, np); }
 		dioTrG = _dioTrG.data(); dioOwnG = _dioOwnG.data();
+		if(_dioOwnSl.size() != np) { _dioOwnSl.assign(np, 0); _dioTrSl.assign(np, 0); }
+		else { memset(_dioOwnSl.data(), 0, np * sizeof(uint16_t)); memset(_dioTrSl.data(), 0, np * sizeof(uint16_t)); }
+		dioOwnSl = _dioOwnSl.data(); dioTrSl = _dioTrSl.data();
+		_dioCapMs += msSince(tDioCap);
 	}
 
 	auto composeBand = [&](uint32_t bandY0, uint32_t bandY1) {
@@ -4105,7 +4123,8 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 						}
 
 						if(dioBgCol) { // diorama : fonds du pack empiles par Z, sans test de profondeur
-							uint32_t& dc = dioBgCol[outIdx];
+							const size_t bgPile = (size_t)std::clamp(bg->MasterScrollLayer - 1, 0, 3) * ((size_t)outWidth * hdHeight);
+							uint32_t& dc = dioBgCol[bgPile + outIdx];
 							if(alpha == 255 || (dc >> 24) == 0) dc = (pixelColor & 0xFFFFFFu) | (alpha << 24);
 							else {
 								const uint32_t ia = 255 - alpha;
@@ -4113,7 +4132,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								const uint32_t g = (((pixelColor & 0x00FF00u) * alpha + (dc & 0x00FF00u) * ia) >> 8) & 0x00FF00u;
 								dc = rb | g | (std::max(alpha, dc >> 24) << 24);
 							}
-							if(alpha >= 128) dioBgZ[outIdx] = (uint8_t)bg->ZIndex;
+							if(alpha >= 128) dioBgZ[bgPile + outIdx] = (uint8_t)bg->ZIndex;
 						}
 						if(bg->ZIndex >= _zBuffer[outIdx]) {
 							if(alpha == 255) {
@@ -4135,7 +4154,7 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 								if(ign2dOn) s_ign2D[outIdx] = bgIgn ? 1 : 0;
 							}
 							_zBuffer[outIdx] = bg->ZIndex;
-							if(dioOwnG) dioOwnG[outIdx] = 0;
+							if(dioOwnG) { dioOwnG[outIdx] = 0; dioOwnSl[outIdx] = 0; }
 						}
 					}
 				};
@@ -4210,12 +4229,12 @@ void SnesHdVideoFilter::ApplyFilter(uint16_t* ppuOutputBuffer)
 							if(alpha == 255) {
 								out[pixelIndex] = finalColor | 0xFF000000;
 								_zBuffer[pixelIndex] = item.zIndex;
-								if(dioOwnG) dioOwnG[pixelIndex] = item.Tile->DioGroup;
+								if(dioOwnG) { dioOwnG[pixelIndex] = item.Tile->DioGroup; dioOwnSl[pixelIndex] = (uint16_t)(item.Tile->DioSprSlot + 1); }
 							} else {
 								uint32_t dstColor = out[pixelIndex];
 								uint32_t invAlpha = 255 - alpha;
 
-								if(dioTrCol) { dioTrCol[pixelIndex] = finalColor; dioTrZ[pixelIndex] = item.zIndex; dioTrG[pixelIndex] = item.Tile->DioGroup; } // diorama : bord semi-transparent
+								if(dioTrCol) { dioTrCol[pixelIndex] = finalColor; dioTrZ[pixelIndex] = item.zIndex; dioTrG[pixelIndex] = item.Tile->DioGroup; dioTrSl[pixelIndex] = (uint16_t)(item.Tile->DioSprSlot + 1); } // diorama : bord semi-transparent
 								uint32_t s_R = (finalColor >> 16) & 0xFF;
 								uint32_t s_G = (finalColor >> 8) & 0xFF;
 								uint32_t s_B = finalColor & 0xFF;
@@ -5740,7 +5759,7 @@ if(video->IsPlaying && video->VideoPlayer != nullptr) {
 	if(_framePack->Dio && out != nullptr) {
 		if(!_dio) _dio = SnesHdDioCreate();
 		SnesHdDioFrame df;
-		df.BgCol = dioBgCol; df.BgZ = dioBgZ; df.TrCol = dioTrCol; df.TrZ = dioTrZ; df.TrG = dioTrG; df.OwnG = dioOwnG;
+		df.BgCol = dioBgCol; df.BgZ = dioBgZ; df.BgPileMask = dioPileMask; df.TrCol = dioTrCol; df.TrZ = dioTrZ; df.TrG = dioTrG; df.OwnG = dioOwnG; df.OwnSl = dioOwnSl; df.TrSl = dioTrSl;
 		df.Out = out; df.Z = _zBuffer.data(); df.OutW = outWidth; df.OutH = hdHeight; df.Scale = scale;
 		df.SrcX = (int)srcX; df.SrcY = (int)srcY; df.DstX = (int)dstX; df.DstY = (int)dstY;
 		df.SdWidth = _baseFrameInfo.Width; df.Wide = wsExt > 0;
@@ -5754,7 +5773,16 @@ if(video->IsPlaying && video->VideoPlayer != nullptr) {
 			for(uint32_t r = 0; r < 239 && df.BgMode != 7; r++) { if(hdBuffer[r * 256 + 128].IsMode7 || hdBuffer[r * 256 + 8].IsMode7) df.BgMode = 7; }
 		}
 		df.FrameNumber = _framePack->ScreenInfo.FrameNumber; df.Screen = &_framePack->ScreenInfo; df.Pool = &_pool;
-		SnesHdDioRun(*_dio, *_framePack, df);
+		const auto tDioRun = std::chrono::steady_clock::now();
+		const bool dioDrawn = SnesHdDioRun(*_dio, *_framePack, df);
+		SnesHdDioPost(*_dio, *_framePack, df, dioDrawn); // <DayNight> en 2D si la scene n'a pas ete dessinee
+		_dioRunMs += msSince(tDioRun);
+		if(++_dioFrames >= 300) { // [HD-SNES-DIORAMA] cout par image (detail des phases du diorama : journal du diorama lui-meme)
+			char dbuf[200];
+			snprintf(dbuf, sizeof(dbuf), "[HD-SNES-DIORAMA] ms/image : captures du filtre %.2f, diorama (couches + scene + GPU) %.2f", _dioCapMs / _dioFrames, _dioRunMs / _dioFrames);
+			MessageManager::Log(dbuf);
+			_dioCapMs = _dioRunMs = 0.0; _dioFrames = 0;
+		}
 	}
 
 	// ====================================================================

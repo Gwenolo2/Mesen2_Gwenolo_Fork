@@ -29,7 +29,7 @@ Référence complète : doc projet **20** (balises SNES), **29** (`29_schema_bal
 | `<frontof3d>{ }` | éléments 2D devant la 3D (HUD) | 12 |
 
 ## Diorama HD-2D (doc 59, étape 1 : side, compile non testé)
-- Mêmes balises que le diorama NES (fiche 06) ; propres au SNES : `<DioramaLayer>bgN,layer=0..3|fixed|off[,prio=0|1]`, `<DioramaSprites>layer=…[,prio=0..3]`, `<Diorama>…,ref=bgN` (repère du monde) ou `refx=$expr,refy=$expr`.
+- Mêmes balises que le diorama NES (fiche 06) ; propres au SNES : `<DioramaLayer>bgN,layer=0..3|fixed|off[,prio=0|1]`, `<DioramaSprites>layer=…[,prio=0..3 | tile=HASH[,palette=N]]` (ou bloc `{ <tile>HASH }`), `<Diorama>…,ref=bgN` (repère du monde) ou `refx=$expr,refy=$expr`.
 - Vue neutre (`yaw=0,pitch=0`) = image 2D. Coupé en Mode 7, modes 5/6 (512 px) et widescreen. Journal `[HD-SNES-DIORAMA]`.
 
 ## RAM

@@ -2132,14 +2132,15 @@ bool HdGpuCore::SubmitScene(const uint32_t* l0, const uint32_t* l1, const uint32
 			G.Uniform1i(locSprDepth, 1); G.Enable(GL_DEPTH_TEST); G.DepthFunc(GL_LEQUAL); G.DepthMask(GL_FALSE);
 		}
 		// topDown : chaque silhouette de sprite est dessinee debout a ses pieds (comme son ombre) ; plus de 16 silhouettes : plan entier
-		const bool stand = sprDepth && (grpStand ? true : (sc.SpriteBlobN > 0 && sc.SpriteBlobTotal <= 16 && !sc.Ext[s.Layer].Active));
+		const bool sprX = !grpStand && sc.SpriteBlobXN > 0 && sc.SpriteBlobTotal <= 64; // liste etendue (SNES) : 64 silhouettes
+		const bool stand = sprDepth && (grpStand ? true : ((sprX || (sc.SpriteBlobN > 0 && sc.SpriteBlobTotal <= 16)) && !sc.Ext[s.Layer].Active));
 		if(stand) {
 			G.DepthMask(GL_TRUE); // les sprites ecrivent leur profondeur : un objet dessine ensuite derriere eux est cache
 			G.Uniform1i(locStand, 1);
 			if(grpStand) G.Uniform2f(locStandBand, (float)sc.ExtraY0[sg] / (float)h, (float)sc.ExtraRows[sg] / (float)h);
-			const int nb = grpStand ? (std::min)(sc.ExtraBlobN[sg], 64) : (std::min)(sc.SpriteBlobN, 16);
+			const int nb = grpStand ? (std::min)(sc.ExtraBlobN[sg], 64) : (sprX ? (std::min)(sc.SpriteBlobXN, 64) : (std::min)(sc.SpriteBlobN, 16));
 			for(int bi = 0; bi < nb; bi++) {
-				const float* b = grpStand ? sc.ExtraBlob[sg][bi] : sc.SpriteBlob[bi];
+				const float* b = grpStand ? sc.ExtraBlob[sg][bi] : (sprX ? sc.SpriteBlobX[bi] : sc.SpriteBlob[bi]);
 				G.Uniform4f(locR, b[0] / sc.W, b[2] / sc.H, (b[1] - b[0]) / sc.W, (b[3] - b[2]) / sc.H);
 				G.Uniform1f(locStandFoot, b[3]);
 				G.DrawArrays(GL_TRIANGLES, 0, 6);
